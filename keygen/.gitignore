@@ -1,0 +1,11 @@
+# Private keys — NEVER commit these.
+# (Safety net — always double-check before `git add`.)
+*.pem
+*.bin
+private_key*
+
+# Signed license files (may contain customer-identifying data).
+*.license
+
+# Cargo build artifacts.
+/target/

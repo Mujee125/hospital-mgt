@@ -1,0 +1,30 @@
+{
+  "license_id": "LIC-001",
+  "hospital_id": "HMS-001",
+  "hospital_name": "Your Hospital Name",
+  "deployment_id": "DEP-001",
+  "hardware_fingerprint": "646408e902d017a7ed1f086ed661f56f82fc0b2a27bd26ef7caebbfcb9eecf65",
+  "license_version": "1.0",
+  "product_edition": "Enterprise",
+  "enabled_modules": [
+    "dashboard",
+    "patients",
+    "appointments",
+    "queue",
+    "ipd",
+    "lab",
+    "billing",
+    "pharmacy",
+    "inventory",
+    "hr",
+    "reports",
+    "settings",
+    "admin"
+  ],
+  "issue_date": "2025-07-10T00:00:00Z",
+  "expiration_date": null,
+  "maintenance_until": "2099-12-31",
+  "software_version_min": "0.0.0",
+  "software_version_max": "999.999.999",
+  "dev": false
+}

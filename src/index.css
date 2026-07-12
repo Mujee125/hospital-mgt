@@ -1,0 +1,426 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ============================================================
+   VitalFlow HMS — Design System v4 "Rasheed Medical"
+   Brand colors from the hospital logo (RCTF prompt):
+     Primary Green   #089075   — teal-dark, the brand interactive color
+     Primary Blue    #0447A4   — blue-dark, for scheduled status + info
+     Secondary Green #52BCA6   — mint, the accent + focus ring
+     Dark Green      #045639   — green-dark, hover state
+     Dark Navy       #04177B   — blue-deep, sidebar gradient end
+     Deep Blue       #05425C   — navy ink, foreground text
+     Steel Blue      #476FA4   — muted secondary text
+     Light Blue      #619BCC   — blue-light, dark-mode text
+     Soft Blue       #7EA1C2   — blue-soft, dark-mode muted text
+     Success Green   #04AC6C   — confirmed/available/success status
+
+   Typography: Inter (single sans family, no serif per RCTF prompt).
+   8px spacing system. WCAG 2.2 AA contrast.
+   ============================================================ */
+
+:root {
+  /* ── Surface system (light) ──────────────────────────────────────────
+     Clean white surfaces with the deep blue (#05425C) ink for
+     foreground — calm, clinical, high legibility. */
+  --background: 0 0% 100%;            /* #FFFFFF */
+  --foreground: 198 90% 19%;          /* #05425C deep blue ink */
+  --card: 0 0% 100%;                  /* #FFFFFF */
+  --card-foreground: 198 90% 19%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 198 90% 19%;
+
+  /* ── Primary: healthcare green (#089075) ─────────────────────────────
+     The single brand color used for interactive elements, links, and
+     emphasis. Deep, calm, reads as medical without being institutional. */
+  --primary: 168 89% 30%;             /* #089075 primary green */
+  --primary-foreground: 0 0% 100%;
+  --primary-hover: 159 91% 18%;       /* #045639 dark green */
+  --primary-soft: 168 44% 95%;        /* pale mint wash */
+
+  /* ── Accent: secondary green / mint (#52BCA6) ────────────────────────
+     Used for focus rings, active states, and secondary emphasis. */
+  --accent: 168 44% 53%;              /* #52BCA6 mint */
+  --accent-foreground: 198 90% 19%;
+  --accent-soft: 168 44% 95%;         /* pale mint wash */
+
+  /* ── Semantic neutrals (steel blue #476FA4 family) ─────────────────── */
+  --secondary: 209 36% 96%;           /* pale blue-light gray */
+  --secondary-foreground: 214 40% 46%;/* #476FA4 steel blue */
+  --muted: 209 36% 96%;
+  --muted-foreground: 214 40% 46%;    /* #476FA4 steel blue */
+
+  /* ── Status colors ─────────────────────────────────────────────────── */
+  --destructive: 356 68% 42%;         /* #B4242F red */
+  --destructive-foreground: 0 0% 100%;
+  --success: 157 95% 35%;             /* #04AC6C success green */
+  --success-foreground: 0 0% 100%;
+  --warning: 34 90% 44%;              /* #C87F0A amber */
+  --warning-foreground: 0 0% 100%;
+  --info: 215 95% 33%;                /* #0447A4 primary blue */
+
+  /* Appointment/token/bill lifecycle — mapped to brand palette */
+  --status-scheduled: 215 95% 33%;    /* #0447A4 primary blue */
+  --status-confirmed: 157 95% 35%;    /* #04AC6C success green */
+  --status-completed: 214 40% 46%;    /* #476FA4 steel blue */
+  --status-cancelled: 356 68% 42%;    /* #B4242F red */
+  --status-no-show: 34 90% 44%;       /* #C87F0A amber */
+
+  /* ── Borders & rings ───────────────────────────────────────────────── */
+  --border: 209 36% 88%;              /* pale blue-light gray */
+  --input: 209 36% 88%;
+  --ring: 168 44% 53%;                /* #52BCA6 mint — focus ring */
+
+  /* ── Radius scale ──────────────────────────────────────────────────── */
+  --radius-sm: 8px;
+  --radius: 10px;                     /* default — inputs */
+  --radius-md: 14px;                  /* cards */
+  --radius-lg: 18px;                  /* larger cards, modals */
+  --radius-xl: 22px;                  /* hero/feature panels */
+  --radius-full: 999px;               /* pill buttons */
+
+  /* ── Shadow system — soft, navy-tinted ─────────────────────────────── */
+  --shadow-xs: 0 1px 2px 0 rgb(5 66 92 / 0.05);
+  --shadow-sm: 0 2px 6px 0 rgb(5 66 92 / 0.07);
+  --shadow-md: 0 4px 12px -2px rgb(5 66 92 / 0.09);
+  --shadow-lg: 0 10px 24px -6px rgb(5 66 92 / 0.11);
+  --shadow-xl: 0 20px 40px -10px rgb(5 66 92 / 0.15);
+  --shadow-glow: 0 0 0 3px rgb(82 188 166 / 0.20);   /* mint focus glow */
+
+  /* ── Spacing system (8px grid) ─────────────────────────────────────── */
+  --space-page-x: 3rem;                /* 48px */
+  --space-page-x-lg: 4rem;             /* 64px */
+  --space-page-y: 2rem;                /* 32px */
+  --space-section: 2.5rem;             /* 40px — between major sections */
+  --space-card: 1.75rem;               /* 28px — card internal padding */
+  --space-card-lg: 2rem;               /* 32px */
+  --space-form-group: 1.375rem;        /* 22px — between form fields */
+  --space-button-y: 0.875rem;          /* 14px — button vertical padding */
+
+  /* Raw numeric scale (4/8/12/16/24/32/40/48/64/96) */
+  --space-1: 0.25rem;   /* 4px */
+  --space-2: 0.5rem;    /* 8px */
+  --space-3: 0.75rem;   /* 12px */
+  --space-4: 1rem;      /* 16px */
+  --space-6: 1.5rem;    /* 24px */
+  --space-8: 2rem;      /* 32px */
+  --space-10: 2.5rem;   /* 40px */
+  --space-12: 3rem;     /* 48px */
+  --space-16: 4rem;     /* 64px */
+  --space-24: 6rem;     /* 96px */
+
+  /* Shared content container — keeps every page the same width */
+  --container-max: 1680px;
+
+  /* ── Sidebar — navy (#05425C) with mint (#52BCA6) active states ───── */
+  --sidebar-bg: 198 90% 19%;          /* #05425C deep blue navy */
+  --sidebar-bg-2: 230 94% 18%;        /* #04177B blue-deep for gradient */
+  --sidebar-fg: 0 0% 100%;
+  --sidebar-fg-muted: 209 36% 63%;    /* #7EA1C2 soft blue */
+  --sidebar-active-bg: 168 44% 53%;   /* #52BCA6 mint */
+  --sidebar-active-fg: 198 90% 19%;   /* navy on mint */
+  --sidebar-hover: 230 94% 25%;       /* #04177B blue-deep */
+  --sidebar-border: 209 36% 30%;      /* darker blue-light */
+  --sidebar-width: 264px;
+  --sidebar-width-collapsed: 72px;
+
+  --header-height: 64px;
+
+  /* Typography — Inter single sans family (per RCTF prompt) */
+  --font-sans: 'Inter', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* ── Dark theme ────────────────────────────────────────────────────────────
+   Deep blue-deep (#04177B) base instead of slate so the brand hue
+   stays consistent with the light theme. Eases night-shift eye strain. */
+.dark {
+  --background: 230 94% 10%;          /* #04177B blue-deep (darkened) */
+  --foreground: 209 36% 90%;          /* pale blue-light */
+  --card: 198 90% 13%;                /* dark navy */
+  --card-foreground: 209 36% 90%;
+  --popover: 198 90% 11%;
+  --popover-foreground: 209 36% 90%;
+
+  --primary: 168 44% 53%;             /* #52BCA6 mint — brighter for dark */
+  --primary-foreground: 198 90% 19%;  /* navy */
+  --primary-hover: 168 44% 60%;
+  --primary-soft: 168 44% 18%;
+
+  --accent: 168 44% 53%;              /* mint for dark */
+  --accent-foreground: 198 90% 19%;
+  --accent-soft: 209 36% 16%;
+
+  --secondary: 198 60% 16%;
+  --secondary-foreground: 209 36% 88%;
+  --muted: 198 60% 14%;
+  --muted-foreground: 209 36% 65%;    /* #7EA1C2 soft blue */
+
+  --destructive: 356 60% 58%;
+  --destructive-foreground: 0 0% 100%;
+  --success: 157 95% 45%;             /* bright green */
+  --success-foreground: 0 0% 100%;
+  --warning: 34 85% 55%;
+  --warning-foreground: 0 0% 100%;
+
+  --status-scheduled: 215 95% 58%;    /* brighter blue-dark */
+  --status-confirmed: 157 95% 50%;    /* brighter green */
+  --status-completed: 209 36% 70%;    /* blue-light */
+  --status-cancelled: 356 60% 58%;
+  --status-no-show: 34 85% 55%;
+
+  --border: 198 60% 22%;
+  --input: 198 60% 22%;
+  --ring: 168 44% 53%;                /* mint */
+
+  --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.25);
+  --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.35);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.45);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.55);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.65);
+  --shadow-glow: 0 0 0 3px rgb(82 188 166 / 0.30);   /* mint glow */
+
+  --sidebar-bg: 230 94% 10%;          /* #04177B blue-deep */
+  --sidebar-bg-2: 230 94% 7%;
+  --sidebar-fg: 209 36% 92%;
+  --sidebar-fg-muted: 209 36% 65%;    /* #7EA1C2 soft blue */
+  --sidebar-active-bg: 168 44% 40%;   /* darker mint */
+  --sidebar-active-fg: 0 0% 100%;
+  --sidebar-hover: 230 60% 18%;
+  --sidebar-border: 198 60% 18%;
+}
+
+/* ── @theme inline — Tailwind v4 token registration ─────────────────────────
+   CR-13: Tailwind v4 generates utilities ONLY from @theme declarations. */
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-success: hsl(var(--success));
+  --color-success-foreground: hsl(var(--success-foreground));
+  --color-warning: hsl(var(--warning));
+  --color-warning-foreground: hsl(var(--warning-foreground));
+  --color-info: hsl(var(--info));
+  --color-status-scheduled: hsl(var(--status-scheduled));
+  --color-status-confirmed: hsl(var(--status-confirmed));
+  --color-status-completed: hsl(var(--status-completed));
+  --color-status-cancelled: hsl(var(--status-cancelled));
+  --color-status-no-show: hsl(var(--status-no-show));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --font-sans: 'Inter', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+}
+
+/* ── Base reset ─────────────────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+  border-color: hsl(var(--border));
+}
+
+html { color-scheme: light; }
+html.dark { color-scheme: dark; }
+
+body {
+  font-family: 'Inter', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 1rem;               /* 16px */
+  line-height: 1.5rem;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+}
+
+/* ── Typography scale — Inter only (per RCTF prompt) ────────────────────────
+   Hierarchy via weight + tracking, not a different typeface.
+   Optimized for 8-12 hour healthcare workdays: no thin weights, comfortable
+   line heights, clear scan-ability for dense data tables. */
+.text-display-xl { font-family: var(--font-sans); font-weight: 800; font-size: 2rem; line-height: 2.5rem; letter-spacing: -0.02em; color: hsl(var(--foreground)); }
+.text-display-lg { font-family: var(--font-sans); font-weight: 800; font-size: 1.5rem; line-height: 2rem; letter-spacing: -0.02em; color: hsl(var(--foreground)); }
+.text-display-md { font-family: var(--font-sans); font-weight: 700; font-size: 1.125rem; line-height: 1.625rem; color: hsl(var(--foreground)); }
+.text-display-sm { font-weight: 700; font-size: 1rem; line-height: 1.5rem; color: hsl(var(--foreground)); }
+.text-helper { font-size: 0.875rem; line-height: 1.25rem; color: hsl(var(--muted-foreground)); }
+
+/* ── Focus ring — accessible, visible on both themes ─────────────────────── */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-glow);
+  border-radius: var(--radius-sm);
+}
+
+/* ── Custom scrollbar (slim, unobtrusive) ────────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.25);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.4);
+  background-clip: padding-box;
+}
+
+/* ── Reduced motion ──────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Loading skeleton shimmer ────────────────────────────────────────────── */
+@keyframes skeleton-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    hsl(var(--muted)) 25%,
+    hsl(var(--muted) / 0.5) 37%,
+    hsl(var(--muted)) 63%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+}
+
+/* ── Surface utilities ───────────────────────────────────────────────────── */
+.surface-card {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+.surface-elevated {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+.surface-flat {
+  background: hsl(var(--card));
+  border-radius: var(--radius-md);
+}
+
+/* ── Header/hero wash — green + mint tints ───────────────────────────────── */
+.gradient-medical {
+  background: linear-gradient(135deg, hsl(var(--accent) / 0.05), hsl(var(--primary) / 0.05));
+}
+.dark .gradient-medical {
+  background: linear-gradient(135deg, hsl(var(--accent) / 0.14), hsl(var(--primary) / 0.10));
+}
+.gradient-mesh {
+  background-image:
+    radial-gradient(at 15% 10%, hsl(var(--primary) / 0.06) 0px, transparent 55%),
+    radial-gradient(at 85% 90%, hsl(var(--accent) / 0.05) 0px, transparent 55%);
+}
+
+/* ── Status badge utility ────────────────────────────────────────────────── */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.125rem 0.625rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1rem;
+  letter-spacing: 0.01em;
+}
+
+/* ── Mobile responsive ───────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  body { font-size: 0.9375rem; line-height: 1.4rem; }
+  .text-display-xl { font-size: 1.625rem; line-height: 2rem; }
+  .text-display-lg { font-size: 1.375rem; line-height: 1.75rem; }
+  .text-display-md { font-size: 1.0625rem; line-height: 1.5rem; }
+}
+
+/* ============================================================
+   Reusable spacing system — 8px grid (per RCTF prompt)
+   ============================================================ */
+
+.page-shell {
+  max-width: var(--container-max);
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: var(--space-page-x);
+  padding-right: var(--space-page-x);
+  padding-top: var(--space-page-y);
+  padding-bottom: var(--space-page-y);
+}
+@media (min-width: 1024px) {
+  .page-shell {
+    padding-left: var(--space-page-x-lg);
+    padding-right: var(--space-page-x-lg);
+  }
+}
+@media (max-width: 640px) {
+  .page-shell { padding-left: 1.25rem; padding-right: 1.25rem; padding-top: 1.5rem; padding-bottom: 1.5rem; }
+}
+
+.section-stack > * + * { margin-top: var(--space-section); }
+.card-padding { padding: var(--space-card); }
+@media (min-width: 1024px) { .card-padding { padding: var(--space-card-lg); } }
+.form-stack > * + * { margin-top: var(--space-form-group); }
+
+/* ── Sidebar nav-card ────────────────────────────────────────────────────── */
+.nav-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.875rem 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  transition: all 0.18s ease;
+}
+.nav-card:hover {
+  border-color: hsl(0 0% 100% / 0.18);
+  background: hsl(0 0% 100% / 0.04);
+  transform: translateX(2px);
+}
+.nav-card.is-active {
+  border-color: hsl(0 0% 100% / 0.35);
+  background: hsl(var(--sidebar-active-bg));
+  box-shadow: var(--shadow-sm);
+}
+
+/* ── Auth card (login / reset / OTP / etc.) ──────────────────────────────── */
+.auth-card {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  padding: var(--space-card-lg);
+  box-shadow: var(--shadow-md);
+}

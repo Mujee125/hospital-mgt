@@ -1,0 +1,60 @@
+# IT-001: Test PostgreSQL environment for Blood Bank integration tests.
+#
+# This docker-compose file provisions an isolated PostgreSQL instance for
+# running integration tests. It NEVER touches a production database.
+#
+# Usage:
+#   docker-compose -f docker-compose.test.yml up -d
+#   export DATABASE_URL=postgresql://hms_test:hms_test@localhost:5433/hms_test
+#   cargo test --test integration_tests --test concurrency_tests --test ipc_security_tests --test scheduler_tests
+#   docker-compose -f docker-compose.test.yml down -v
+#
+# Port 5433 is used (instead of 5432) to avoid conflicts with any local
+# production PostgreSQL instance.
+
+version: "3.9"
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: hms-postgres-test
+    environment:
+      POSTGRES_USER: hms_test
+      POSTGRES_PASSWORD: hms_test
+      POSTGRES_DB: hms_test
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+      - ./tests/init-test-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hms_test -d hms_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # Migration runner — runs the production migrations against the test DB.
+  # This is a one-shot container that exits after migrations complete.
+  migrate-test:
+    image: postgres:16-alpine
+    container_name: hms-migrate-test
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: hms_test
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Waiting for test DB to be ready...'
+        sleep 2
+        echo 'Test DB is ready. Migrations are run by cargo test (via run_migrations).'
+        echo 'This container is a placeholder for future standalone migration runners.'
+      "
+    restart: "no"
+
+volumes:
+  postgres_test_data:
+    driver: local

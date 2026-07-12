@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "HMS Client",
+  "identifier": "com.hospital.mgmt.client",
+  "build": {
+    "beforeDevCommand": "npm run dev:client",
+    "beforeBuildCommand": "npm run build:client"
+  }
+}
