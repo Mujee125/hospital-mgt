@@ -88,8 +88,10 @@ fn generate_bootstrap_password() -> String {
 /// installer / first-run operator can read the one-time password.
 ///
 /// Location: same directory as `config.json` (`C:\ProgramData\HMS` on
-/// Windows). On Windows the file is ACL-hardened to SYSTEM + Administrators
-/// only. The operator reads it once, logs in, and is forced to rotate.
+/// Windows). On Windows the file is ACL-hardened to SYSTEM, Administrators,
+/// and the specific account that generated it — see the per-user ACE note
+/// below on why the group-only grant alone doesn't actually work. The
+/// operator reads it once, logs in, and is forced to rotate.
 fn write_bootstrap_credentials(username: &str, password: &str) -> Result<(), String> {
     let program_data = std::env::var_os("ProgramData")
         .map(std::path::PathBuf::from)
@@ -115,14 +117,32 @@ fn write_bootstrap_credentials(username: &str, password: &str) -> Result<(), Str
 
     std::fs::write(&cred_path, &content).map_err(|e| format!("write bootstrap creds: {}", e))?;
 
-    // Windows: ACL-harden the file.
+    // Windows: ACL-harden the file — but grant the ACTUAL current user
+    // account explicitly, not just the "Administrators" group.
+    //
+    // Why: under UAC, a normal (non-elevated) process — e.g. someone just
+    // double-clicking Notepad — runs with a *filtered* access token where
+    // membership in the Administrators group is marked "deny-only". An ACE
+    // that only grants rights to the Administrators group is silently
+    // ignored by that filtered token, even for a genuine admin user, and
+    // .txt files have no "Run as administrator" option to work around it.
+    // The result was every real user hitting "You do not have permission"
+    // on first login. A per-account ACE (this user's own SID) is NOT
+    // subject to that filtering, so granting the current user directly
+    // makes the file actually readable without requiring elevation.
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("icacls")
-            .arg(cred_path.as_os_str())
+        let domain = std::env::var("USERDOMAIN").unwrap_or_else(|_| ".".to_string());
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        let mut cmd = std::process::Command::new("icacls");
+        cmd.arg(cred_path.as_os_str())
             .args(["/inheritance:r"])
             .args(["/grant:r", "SYSTEM:F"])
-            .args(["/grant:r", "Administrators:F"])
+            .args(["/grant:r", "Administrators:F"]);
+        if !user.is_empty() {
+            cmd.args(["/grant:r", &format!("{}\\{}:F", domain, user)]);
+        }
+        let _ = cmd
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();

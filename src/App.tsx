@@ -25,6 +25,7 @@ import { Reports } from "@/pages/Reports";
 import { Backup } from "@/pages/Backup";
 import { Toaster } from "sonner";
 import { Loader2, KeyRound, Fingerprint, Copy, Check, ArrowRight, ArrowLeft } from "lucide-react";
+import logo from "@/assets/logo_transparant.png";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { useChangePassword, useInstallFingerprint, useInstallLicense } from "@/lib/queries";
 import type { LicenseInfo } from "@/lib/models";
@@ -240,6 +241,11 @@ function App() {
                   Reconfigure
                 </button>
               )}
+              {!isClient && (
+                <button onClick={() => setPhase("needsSetup")} className="h-11 px-5 border border-border bg-card text-foreground rounded-lg text-sm font-semibold hover:bg-muted transition-all active:scale-[0.98]">
+                  How to fix this
+                </button>
+              )}
             </div>
           </motion.div>
         </div>
@@ -259,27 +265,39 @@ function App() {
 function BootScreen({ status, licenseInfo }: { status: string; licenseInfo: LicenseInfo | null }) {
   return (
     <div className="flex h-full w-full flex-col items-center justify-center bg-background gradient-mesh select-none gap-6">
-      <motion.div className="flex flex-col items-center gap-4" initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.3 }}>
+      <motion.div
+        className="flex flex-col items-center gap-4"
+        initial={{ opacity: 0, scale: 0.96 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.3 }}
+      >
         <div className="h-16 w-16 bg-primary/10 border border-primary/30 flex items-center justify-center">
-          <svg className="w-8 h-8 text-primary" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M19 10.5h-5.5V5c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v5.5H5c-.83 0-1.5.67-1.5 1.5s.67 1.5 1.5 1.5h5.5V19c0 .83.67 1.5 1.5 1.5s1.5-.67 1.5-1.5v-5.5H19c.83 0 1.5-.67 1.5-1.5s-.67-1.5-1.5-1.5z"/>
-          </svg>
+          <img src={logo} alt="VitalFlow HMS Logo" className="w-36 h-36 object-contain" />
         </div>
         <div className="text-center">
-          <h2 className="text-display-lg text-foreground">VitalFlow HMS</h2>
+          <h2 className="text-display-lg text-foreground">RASHEED MEDICAL CENTER HMS</h2>
           <p className="text-xs text-muted-foreground mt-1 uppercase tracking-widest">
             {licenseInfo?.hospital_name ?? "Hospital Management System"}
           </p>
         </div>
       </motion.div>
 
-      <motion.div className="surface-card px-8 py-5 max-w-sm w-full mx-4" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.1 }}>
+      <motion.div
+        className="surface-card px-8 py-5 max-w-sm w-full mx-4"
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.3, delay: 0.1 }}
+      >
         <div className="flex items-center gap-3 mb-3">
           <Loader2 className="h-4 w-4 text-primary animate-spin shrink-0" />
           <p className="text-sm font-medium text-foreground">{status}</p>
         </div>
         <div className="space-y-1.5">
-          {["Connecting to the hospital database", "Verifying tables are up to date", "Starting notification scheduler"].map((step, i) => (
+          {[
+            "Connecting to the hospital database",
+            "Verifying tables are up to date",
+            "Starting notification scheduler",
+          ].map((step, i) => (
             <div key={i} className="flex items-center gap-2">
               <div className="h-1.5 w-1.5 rounded-full bg-primary/30" />
               <p className="text-xs text-muted-foreground">{step}</p>
@@ -289,7 +307,8 @@ function BootScreen({ status, licenseInfo }: { status: string; licenseInfo: Lice
       </motion.div>
 
       <p className="text-[10px] text-muted-foreground max-w-xs text-center px-4">
-        Licensed to {licenseInfo?.hospital_name ?? "this hospital"} · {licenseInfo?.product_edition ?? "Enterprise"} edition
+        Licensed to {licenseInfo?.hospital_name ?? "this hospital"} ·{" "}
+        {licenseInfo?.product_edition ?? "Enterprise"} edition
       </p>
     </div>
   );
@@ -371,23 +390,65 @@ function ForceChangePassword({ hospitalName }: { hospitalName?: string }) {
 
   return (
     <div className="flex min-h-vh w-full items-center justify-center bg-background gradient-mesh p-6 select-none">
-      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="w-full max-w-md">
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="w-full max-w-md"
+      >
         <div className="flex flex-col items-center text-center gap-3 mb-6">
           <div className="h-14 w-14 rounded-[var(--radius-md)] bg-accent/10 border border-accent/20 flex items-center justify-center">
             <KeyRound className="h-7 w-7 text-accent" />
           </div>
           <div>
             <h1 className="text-display-lg text-foreground">Change your password</h1>
-            <p className="text-sm text-muted-foreground mt-1.5">{hospitalName ?? "VitalFlow HMS"} requires a new password before you continue.</p>
+            <p className="text-sm text-muted-foreground mt-1.5">
+              {hospitalName ?? "RASHEED MEDICAL CENTER HMS"} requires a new password before you
+              continue.
+            </p>
           </div>
         </div>
         <div className="auth-card">
           <form onSubmit={submit} className="form-stack">
-            <Field label="Current password"><input type="password" autoComplete="current-password" value={current} onChange={(e)=>setCurrent(e.target.value)} required className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15" /></Field>
-            <Field label="New password"><input type="password" autoComplete="new-password" value={next} onChange={(e)=>setNext(e.target.value)} required className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15" /></Field>
-            <Field label="Confirm new password"><input type="password" autoComplete="new-password" value={confirm} onChange={(e)=>setConfirm(e.target.value)} required className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15" /></Field>
-            {err && <div className="rounded-[var(--radius)] border border-destructive/30 bg-destructive/8 px-4 py-3 text-xs text-destructive">{err}</div>}
-            <button type="submit" disabled={changePwd.isPending} className="h-12 mt-1 rounded-full bg-primary text-primary-foreground text-[15px] font-semibold hover:bg-[hsl(var(--primary-hover))] hover:shadow-md transition-all shadow-sm disabled:opacity-60">
+            <Field label="Current password">
+              <input
+                type="password"
+                autoComplete="current-password"
+                value={current}
+                onChange={(e) => setCurrent(e.target.value)}
+                required
+                className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
+              />
+            </Field>
+            <Field label="New password">
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={next}
+                onChange={(e) => setNext(e.target.value)}
+                required
+                className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
+              />
+            </Field>
+            <Field label="Confirm new password">
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                required
+                className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
+              />
+            </Field>
+            {err && (
+              <div className="rounded-[var(--radius)] border border-destructive/30 bg-destructive/8 px-4 py-3 text-xs text-destructive">
+                {err}
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={changePwd.isPending}
+              className="h-12 mt-1 rounded-full bg-primary text-primary-foreground text-[15px] font-semibold hover:bg-[hsl(var(--primary-hover))] hover:shadow-md transition-all shadow-sm disabled:opacity-60  w-full"
+            >
               {changePwd.isPending ? "Saving…" : "Update password"}
             </button>
           </form>

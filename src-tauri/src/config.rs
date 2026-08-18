@@ -217,12 +217,19 @@ pub async fn test_server_connection(host: String, port: u16) -> Result<bool, Str
     Ok(crate::discovery::is_reachable(&host, port, 3000))
 }
 
-/// Called by the Setup/Repair screen on the server build when config.json
-/// is missing or incomplete. Writes a valid config so the app can start.
+/// Advanced/support recovery path — NOT wired to the normal Setup UI.
 ///
-/// The frontend should call this during first-run setup, passing the
-/// PostgreSQL password that the NSIS installer generated (which it prints
-/// on screen during installation).
+/// The auto-generated PostgreSQL password is never shown to a human: it's
+/// created during install and written straight into config.json, never
+/// printed or logged (see windows/hooks.nsh). So there is normally nobody
+/// who could type it into a form. The self-service fix for a missing
+/// config.json is simply re-running the installer, which detects the
+/// existing PostgreSQL data directory and repairs credentials + config on
+/// its own (see the `run_setup_repair` path in hooks.nsh).
+///
+/// This command remains for cases where support staff have manually reset
+/// the PostgreSQL password out-of-band (e.g. via psql with their own
+/// admin access) and need to make config.json match it again.
 #[tauri::command]
 pub async fn repair_server_config(
     app_handle: tauri::AppHandle,

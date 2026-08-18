@@ -9,7 +9,7 @@ import { useState } from "react";
 import { motion } from "motion/react";
 import { Loader2, Lock, User, ArrowRight, ShieldCheck } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import logo from "@/assets/logo.png";
+import logo from "@/assets/logo_transparant.png";
 export function Login({ hospitalName }: { hospitalName?: string }) {
   const { login } = useAuth();
   const [username, setUsername] = useState("");
@@ -148,8 +148,26 @@ export function Login({ hospitalName }: { hospitalName?: string }) {
               <code className="px-1.5 py-0.5 rounded bg-muted font-mono text-[10px]">
                 C:\ProgramData\HMS\bootstrap-credentials.txt
               </code>
-              . Read it with an Administrator account, log in, and you will be
-              required to change it immediately.
+              . Open it directly with the same Windows account that installed
+              HMS Server — no elevation needed. Log in, and you will be
+              required to change the password immediately. (If a different
+              account needs it, open Notepad via "Run as administrator" first,
+              then File → Open that path.)
+            </p>
+          </div>
+
+          <div className="mt-3 px-5 py-4 rounded-[var(--radius-md)] bg-card border border-border">
+            <div className="flex items-center gap-2 mb-1.5">
+              <ShieldCheck className="h-3.5 w-3.5 text-primary" />
+              <span className="text-xs font-semibold text-foreground">
+                Preparing this for a demo?
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Log in with the bootstrap credentials and set the permanent
+              admin password yourself before handing the machine to anyone
+              else — that way nobody watching the demo needs to see this
+              file, this screen, or the setup steps at all.
             </p>
           </div>
 

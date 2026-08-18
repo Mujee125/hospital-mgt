@@ -434,8 +434,9 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
             let _ = AppConfig::default().save(app_handle);
             return Err(
                 "HMS configuration file is missing. \
-                 Please use the Setup screen to enter your PostgreSQL password, \
-                 or reinstall the HMS Server application.".to_string(),
+                 Close this app and re-run the HMS Server installer as Administrator — \
+                 it will detect the existing database and repair the configuration \
+                 automatically. Your patient data is not affected.".to_string(),
             );
         }
     };

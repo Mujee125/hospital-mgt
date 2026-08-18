@@ -238,6 +238,11 @@
 html { color-scheme: light; }
 html.dark { color-scheme: dark; }
 
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
 body {
   font-family: 'Inter', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   font-size: 1rem;               /* 16px */
@@ -247,11 +252,19 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: 'cv11', 'ss01', 'ss03';
+  overflow: hidden; /* the app frame itself never scrolls — only the
+                        designated inner regions (sidebar nav, <main>) do */
 }
 
 #root {
-  min-height: 100vh;
+  height: 100vh;    /* was min-height: 100vh — with no bounded height,
+                        html/body/#root grew to fit content and the WHOLE
+                        page scrolled instead of just the inner panes.
+                        A real height (in vh, so it tracks the window) lets
+                        the flex children below correctly size themselves
+                        to fill the viewport and reflow when it's resized. */
   display: flex;
+  overflow: hidden;
 }
 
 /* ── Typography scale — Inter only (per RCTF prompt) ────────────────────────
