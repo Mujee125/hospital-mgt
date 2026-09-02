@@ -198,7 +198,7 @@ pub async fn create_radiology_order(
     session: tauri::State<'_, SessionState>,
     order: CreateRadiologyOrder,
 ) -> Result<i32, String> {
-    let s = rbac::require(&session, Permission::RadiologyCreate)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::RadiologyCreate).await?;
 
     // P1-2: Validate enums before any DB access.
     let study_type = order.study_type.trim();
@@ -312,7 +312,7 @@ pub async fn update_radiology_order_status(
     status: String,
     notes: Option<String>,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::RadiologyUpdate)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::RadiologyUpdate).await?;
     let new_status = status.trim();
 
     if new_status.is_empty() {
@@ -426,7 +426,7 @@ pub async fn delete_radiology_order(
     id: i32,
     reason: Option<String>,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::RadiologyDelete)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::RadiologyDelete).await?;
 
     let result = sqlx::query(
         r#"UPDATE radiology_orders
@@ -474,7 +474,7 @@ pub async fn get_radiology_report(
     session: tauri::State<'_, SessionState>,
     order_id: i32,
 ) -> Result<Option<RadiologyReport>, String> {
-    let _ = rbac::require(&session, Permission::RadiologyView)?;
+    let _ = rbac::require_strong(&session, pool.inner(), Permission::RadiologyView).await?;
 
     // P0-5-FOLLOWUP: Verify the parent order is not soft-deleted.
     let order_exists: Option<(i32,)> = sqlx::query_as(
@@ -519,7 +519,7 @@ pub async fn create_radiology_report(
     session: tauri::State<'_, SessionState>,
     report: CreateRadiologyReport,
 ) -> Result<i32, String> {
-    let s = rbac::require(&session, Permission::RadiologyReport)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::RadiologyReport).await?;
 
     let mut tx = pool
         .begin()
@@ -648,7 +648,7 @@ pub async fn verify_radiology_report(
     session: tauri::State<'_, SessionState>,
     report_id: i32,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::RadiologyVerify)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::RadiologyVerify).await?;
 
     let mut tx = pool
         .begin()
@@ -747,7 +747,7 @@ pub async fn get_radiology_dashboard(
     pool: tauri::State<'_, PgPool>,
     session: tauri::State<'_, SessionState>,
 ) -> Result<serde_json::Value, String> {
-    let _ = rbac::require(&session, Permission::RadiologyView)?;
+    let _ = rbac::require_strong(&session, pool.inner(), Permission::RadiologyView).await?;
 
     // P1-4: Single query for all 5 order-based KPIs using conditional
     // aggregation. Much faster than 5 separate COUNT(*) queries at scale.

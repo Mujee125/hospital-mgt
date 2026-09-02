@@ -88,6 +88,12 @@ pub enum Permission {
     // Messaging (staff chat) — per SRS NFR-15, every protected command must be gated.
     MessagingView,
     MessagingSend,
+    // WhatsApp (patient-facing comms) — separated from Messaging
+    // because external communication has distinct authorization and PHI
+    // implications. RCTF-IMPL-001 WP-1: gates the 5 WhatsApp commands that
+    // were previously AUTH_ONLY (patient-role could invoke).
+    WhatsAppSend,
+    WhatsAppView,
     // System / settings
     SettingsManage,
     LicenseManage,
@@ -148,6 +154,8 @@ impl Permission {
             Permission::ReportsView => "reports.view",
             Permission::MessagingView => "messaging.view",
             Permission::MessagingSend => "messaging.send",
+            Permission::WhatsAppSend => "whatsapp.send",
+            Permission::WhatsAppView => "whatsapp.view",
             Permission::SettingsManage => "settings.manage",
             Permission::LicenseManage => "license.manage",
             Permission::BackupsManage => "backups.manage",
@@ -206,6 +214,8 @@ impl Permission {
             Permission::ReportsView,
             Permission::MessagingView,
             Permission::MessagingSend,
+            Permission::WhatsAppSend,
+            Permission::WhatsAppView,
             Permission::SettingsManage,
             Permission::LicenseManage,
             Permission::BackupsManage,
@@ -237,6 +247,7 @@ pub fn permissions_for_role(role: &str) -> Vec<Permission> {
             BloodBankView, BloodBankCrossmatch, BloodBankIssue, BloodBankTransfuse,
             BillingView, InventoryView, PatientConsentManage, AuditView, ReportsView,
             MessagingView, MessagingSend,
+            WhatsAppSend, WhatsAppView,
         ],
         ROLE_NURSE => vec![
             DashboardView, PatientsView, PatientsUpdate, AppointmentsView,
@@ -244,12 +255,14 @@ pub fn permissions_for_role(role: &str) -> Vec<Permission> {
             LabView, InventoryView, ReportsView,
             BloodBankView, BloodBankTransfuse,
             MessagingView, MessagingSend,
+            WhatsAppSend, WhatsAppView,
         ],
         ROLE_RECEPTIONIST => vec![
             DashboardView, PatientsView, PatientsCreate, PatientsUpdate,
             AppointmentsView, AppointmentsCreate, AppointmentsUpdate,
             QueueView, QueueManage, DoctorsView, BillingView, BillingCreate,
             MessagingView, MessagingSend,
+            WhatsAppSend, WhatsAppView,
         ],
         ROLE_LAB_TECH => vec![
             DashboardView, PatientsView, LabView, LabOrder, LabResultManage,
@@ -265,6 +278,7 @@ pub fn permissions_for_role(role: &str) -> Vec<Permission> {
             DashboardView, BillingView, BillingCreate, BillingManage, PaymentsManage,
             PatientsView, AppointmentsView, ReportsView,
             MessagingView, MessagingSend,
+            WhatsAppView,
         ],
         ROLE_PATIENT => vec![DashboardView],
         _ => vec![],
@@ -297,6 +311,11 @@ pub struct Session {
     pub full_name: String,
     pub roles: Vec<String>,
     pub permissions: HashSet<String>,
+    // RCTF-IMPL-001 WP-2.1: SHA-256 hash of the session token. Used by `me`
+    // and (in WP-2.2) `require_strong` to validate that the in-memory session
+    // still exists in the DB. Without this, `me` filtered by `user_id` only —
+    // a cross-PC login (which deletes the prior session row) was not detected.
+    pub token_hash: String,
 }
 
 impl Session {
@@ -339,6 +358,51 @@ pub fn require_session(state: &SessionState) -> Result<Session, String> {
         .ok_or_else(|| "Access denied: you are not signed in.".to_string())
 }
 
+
+/// RCTF-IMPL-001 WP-2.2: Strong guard for high-risk commands.
+///
+/// Like `require`, but also validates the session against the DB:
+/// - Checks that the session's `token_hash` still exists in the `sessions` table
+/// - Checks that `expires_at > NOW()`
+/// - Checks that `users.is_active = TRUE`
+///
+/// If any check fails, clears the in-memory session and returns an error.
+/// This catches: cross-PC login (token deleted), account deactivation,
+/// role/permission changes, and password resets.
+///
+/// Used on ~22 high-risk state-changing commands (PHI-accessing).
+pub async fn require_strong(
+    state: &SessionState,
+    pool: &sqlx::PgPool,
+    perm: Permission,
+) -> Result<Session, String> {
+    // Step 1: in-memory permission check (same as require)
+    let session = require(state, perm)?;
+
+    // Step 2: DB-backed session validity check
+    let valid: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM sessions s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.token_hash = $1
+           AND s.expires_at > NOW()
+           AND u.is_active = TRUE",
+    )
+    .bind(&session.token_hash)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Session validation query failed: {}", e))?;
+
+    if valid.is_none() {
+        // Session invalidated (cross-PC login, deactivation, role change,
+        // password reset, or expiry). Clear in-memory state so future
+        // calls fail fast at the in-memory check instead of hitting DB.
+        *state.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        return Err("Session invalidated. Please sign in again.".to_string());
+    }
+
+    Ok(session)
+}
+
 /// Like `require`, but allows pre-login access (no session).
 ///
 /// Returns `Ok(None)` when there is no session (boot/setup screen before
@@ -365,5 +429,84 @@ pub fn require_if_session(
             "Access denied: this action requires the '{}' permission.",
             perm.as_str()
         )),
+    }
+}
+
+
+#[cfg(test)]
+mod wp1_tests {
+    use super::*;
+
+    #[test]
+    fn test_whatsapp_send_permission_exists() {
+        assert_eq!(Permission::WhatsAppSend.as_str(), "whatsapp.send");
+    }
+
+    #[test]
+    fn test_whatsapp_view_permission_exists() {
+        assert_eq!(Permission::WhatsAppView.as_str(), "whatsapp.view");
+    }
+
+    #[test]
+    fn test_whatsapp_permissions_in_all() {
+        let all = Permission::all();
+        assert!(all.contains(&Permission::WhatsAppSend));
+        assert!(all.contains(&Permission::WhatsAppView));
+    }
+
+    #[test]
+    fn test_doctor_has_whatsapp_send_and_view() {
+        let perms = permissions_for_role(ROLE_DOCTOR);
+        assert!(perms.contains(&Permission::WhatsAppSend));
+        assert!(perms.contains(&Permission::WhatsAppView));
+    }
+
+    #[test]
+    fn test_nurse_has_whatsapp_send_and_view() {
+        let perms = permissions_for_role(ROLE_NURSE);
+        assert!(perms.contains(&Permission::WhatsAppSend));
+        assert!(perms.contains(&Permission::WhatsAppView));
+    }
+
+    #[test]
+    fn test_receptionist_has_whatsapp_send_and_view() {
+        let perms = permissions_for_role(ROLE_RECEPTIONIST);
+        assert!(perms.contains(&Permission::WhatsAppSend));
+        assert!(perms.contains(&Permission::WhatsAppView));
+    }
+
+    #[test]
+    fn test_billing_clerk_has_view_only() {
+        let perms = permissions_for_role(ROLE_BILLING);
+        assert!(!perms.contains(&Permission::WhatsAppSend));
+        assert!(perms.contains(&Permission::WhatsAppView));
+    }
+
+    #[test]
+    fn test_patient_lacks_whatsapp_permissions() {
+        let perms = permissions_for_role(ROLE_PATIENT);
+        assert!(!perms.contains(&Permission::WhatsAppSend));
+        assert!(!perms.contains(&Permission::WhatsAppView));
+    }
+
+    #[test]
+    fn test_lab_tech_lacks_whatsapp_permissions() {
+        let perms = permissions_for_role(ROLE_LAB_TECH);
+        assert!(!perms.contains(&Permission::WhatsAppSend));
+        assert!(!perms.contains(&Permission::WhatsAppView));
+    }
+
+    #[test]
+    fn test_pharmacist_lacks_whatsapp_permissions() {
+        let perms = permissions_for_role(ROLE_PHARMACIST);
+        assert!(!perms.contains(&Permission::WhatsAppSend));
+        assert!(!perms.contains(&Permission::WhatsAppView));
+    }
+
+    #[test]
+    fn test_super_admin_has_all_whatsapp_permissions() {
+        let perms = permissions_for_role(ROLE_SUPER_ADMIN);
+        assert!(perms.contains(&Permission::WhatsAppSend));
+        assert!(perms.contains(&Permission::WhatsAppView));
     }
 }

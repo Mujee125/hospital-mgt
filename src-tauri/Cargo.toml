@@ -60,6 +60,8 @@ ed25519-dalek = { version = "2", features = ["std"] }  # License signature verif
 # windows target so non-Windows builds don't pull in the windows-rs stack.
 [target.'cfg(target_os = "windows")'.dependencies]
 wmi          = "0.14"
+# RCTF-IMPL-001 WP-3: DPAPI encryption for db_password in config.json
+windows      = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
 
 # ── IT-001: Test dependencies ────────────────────────────────────────────────
 # These are only compiled for `cargo test` and do NOT ship in production builds.

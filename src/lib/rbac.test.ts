@@ -49,6 +49,15 @@ describe("PERMISSIONS", () => {
   it("has AuditView", () => {
     expect(PERMISSIONS.AuditView).toBe("audit.view");
   });
+
+  // RCTF-IMPL-001 WP-1: WhatsApp permissions
+  it("has WhatsAppSend", () => {
+    expect(PERMISSIONS.WhatsAppSend).toBe("whatsapp.send");
+  });
+
+  it("has WhatsAppView", () => {
+    expect(PERMISSIONS.WhatsAppView).toBe("whatsapp.view");
+  });
 });
 
 describe("ROLE_LABELS", () => {

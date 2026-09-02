@@ -129,7 +129,7 @@ pub async fn admit_patient(
     session: tauri::State<'_, SessionState>,
     admission: CreateIpdAdmission,
 ) -> Result<i32, String> {
-    let s = rbac::require(&session, Permission::IpdManage)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::IpdManage).await?;
 
     // ── Atomic bed allocation per SDD §8.1 ──────────────────────────────────
     //
@@ -199,7 +199,7 @@ pub async fn discharge_patient(
     session: tauri::State<'_, SessionState>,
     discharge: DischargeIpd,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::IpdManage)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::IpdManage).await?;
 
     // FUN-09: fetch BOTH patient_id and bed_id in the same query — we need
     // patient_id to run the unpaid-bills guard below, and bed_id to free

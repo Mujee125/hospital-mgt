@@ -23,22 +23,11 @@ import {
   EmptyState,
   LoadingState,
   PageToolbar,
-  Pagination,
 } from "@/components/layout/shared";
 
 export function Patients() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [searchQuery, setSearchQuery] = useState("");
-
-  // Client-side pagination — patients are currently fetched in full via
-  // usePatients() (no backend LIMIT/OFFSET yet, unlike e.g. Radiology.tsx's
-  // server-paginated orders). This still gives every list-page benefit
-  // that matters for a demo/small-to-mid deployment: bounded row count on
-  // screen, no giant unbounded table. A hospital expecting tens of
-  // thousands of patient records would eventually want this converted to
-  // real server-side paging the same way Radiology.tsx does it.
-  const [page, setPage] = useState(1);
-  const [rowsPerPage, setRowsPerPage] = useState(10);
 
   const { data: patients = [], isLoading } = usePatients();
   const deletePatient = useDeletePatient();
@@ -96,20 +85,6 @@ export function Patients() {
   });
 
   const isSearchActive = !!searchQuery.trim();
-
-  // Any time the filtered set changes shape (new search term), snap back
-  // to page 1 — staying on e.g. page 4 of a now-2-page result would just
-  // show an empty table with no visible way to tell why.
-  useEffect(() => {
-    setPage(1);
-  }, [searchQuery]);
-
-  const totalPages = Math.max(1, Math.ceil(filteredPatients.length / rowsPerPage));
-  const safePage = Math.min(page, totalPages);
-  const pagedPatients = filteredPatients.slice(
-    (safePage - 1) * rowsPerPage,
-    safePage * rowsPerPage,
-  );
 
   return (
     <PageContainer>
@@ -174,7 +149,7 @@ export function Patients() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {pagedPatients.map((patient, i) => (
+                {filteredPatients.map((patient, i) => (
                   <motion.tr
                     key={patient.id}
                     initial={{ opacity: 0 }}
@@ -221,16 +196,6 @@ export function Patients() {
                 ))}
               </TableBody>
             </Table>
-            <Pagination
-              totalItems={filteredPatients.length}
-              page={safePage}
-              rowsPerPage={rowsPerPage}
-              onPageChange={setPage}
-              onRowsPerPageChange={(r) => {
-                setRowsPerPage(r);
-                setPage(1);
-              }}
-            />
           </>
         )}
       </SectionCard>

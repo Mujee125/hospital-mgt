@@ -56,7 +56,7 @@ pub async fn create_encounter(
     session: tauri::State<'_, SessionState>,
     encounter: CreateEncounter,
 ) -> Result<i32, String> {
-    let s = rbac::require(&session, Permission::PatientsUpdate)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::PatientsUpdate).await?;
     let row: (i32,) = sqlx::query_as(
         r#"INSERT INTO encounters
               (patient_id, doctor_id, visit_type, chief_complaint, diagnosis, notes, created_by_user_id)

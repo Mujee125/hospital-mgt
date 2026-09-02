@@ -56,6 +56,9 @@ export const PERMISSIONS = {
   RolesManage: "roles.manage",
   AuditView: "audit.view",
   ReportsView: "reports.view",
+  // RCTF-IMPL-001 WP-1: WhatsApp permissions for patient-facing comms.
+  WhatsAppSend: "whatsapp.send",
+  WhatsAppView: "whatsapp.view",
   SettingsManage: "settings.manage",
   LicenseManage: "license.manage",
   BackupsManage: "backups.manage",

@@ -28,7 +28,17 @@ pub struct AppConfig {
     pub pinned_server_cert_pem: String,
     #[serde(default)]
     pub pinned_server_fingerprint: String,
+    /// RCTF-IMPL-001 WP-3: config format version.
+    /// 1 = legacy (plaintext db_password); 2 = DPAPI-encrypted db_password.
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
+    /// RCTF-IMPL-001 WP-3: encrypted db_password (base64 DPAPI blob on Windows).
+    /// Written by `save()`, read by `load()`. Never serialized to frontend.
+    #[serde(skip_serializing)]
+    pub db_password_encrypted: Option<String>,
 }
+
+fn default_config_version() -> u32 { 1 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -49,6 +59,8 @@ impl Default for AppConfig {
             setup_complete: false,
             pinned_server_cert_pem: String::new(),
             pinned_server_fingerprint: String::new(),
+            config_version: 1,
+            db_password_encrypted: None,
         }
     }
 }
@@ -79,7 +91,32 @@ impl AppConfig {
 
     pub fn load(app_handle: &tauri::AppHandle) -> Option<Self> {
         let content = fs::read_to_string(Self::config_path(app_handle)).ok()?;
-        serde_json::from_str(&content).ok()
+
+        // Parse as generic JSON to check config_version.
+        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let version = json.get("config_version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+
+        let mut cfg: AppConfig = serde_json::from_value(json).ok()?;
+
+        if version < 2 {
+            // V1 (legacy): db_password is plaintext. Mark for migration.
+            // The actual encryption happens on the next save() call.
+            // For now, populate db_password_encrypted so save() knows to encrypt.
+            cfg.config_version = 2; // upgrade in-memory; disk upgrades on next save
+        } else {
+            // V2: decrypt db_password from db_password_encrypted.
+            if let Some(enc) = &cfg.db_password_encrypted {
+                match crate::secrets::decrypt(enc) {
+                    Ok(plain) => { cfg.db_password = plain; }
+                    Err(e) => {
+                        eprintln!("[HMS CONFIG] ERROR: failed to decrypt db_password: {}. Database connection will fail.", e);
+                        cfg.db_password = String::new();
+                    }
+                }
+            }
+        }
+
+        Some(cfg)
     }
 
     /// Persist the config to disk atomically and ACL-harden it on Windows.
@@ -93,7 +130,16 @@ impl AppConfig {
     /// private key. Any local user can no longer read the credentials. (Full
     /// DPAPI encryption of the password field is tracked as a Batch 3 item.)
     pub fn save(&self, app_handle: &tauri::AppHandle) -> Result<(), String> {
-        let content = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        // RCTF-IMPL-001 WP-3: encrypt db_password before writing to disk.
+        let mut save_cfg = self.clone();
+        if !save_cfg.db_password.is_empty() {
+            let enc = crate::secrets::encrypt(&save_cfg.db_password)
+                .map_err(|e| format!("Failed to encrypt db_password: {}", e))?;
+            save_cfg.db_password_encrypted = Some(enc);
+            save_cfg.config_version = 2;
+        }
+
+        let content = serde_json::to_string_pretty(&save_cfg).map_err(|e| e.to_string())?;
         let path = Self::config_path(app_handle);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -217,19 +263,12 @@ pub async fn test_server_connection(host: String, port: u16) -> Result<bool, Str
     Ok(crate::discovery::is_reachable(&host, port, 3000))
 }
 
-/// Advanced/support recovery path — NOT wired to the normal Setup UI.
+/// Called by the Setup/Repair screen on the server build when config.json
+/// is missing or incomplete. Writes a valid config so the app can start.
 ///
-/// The auto-generated PostgreSQL password is never shown to a human: it's
-/// created during install and written straight into config.json, never
-/// printed or logged (see windows/hooks.nsh). So there is normally nobody
-/// who could type it into a form. The self-service fix for a missing
-/// config.json is simply re-running the installer, which detects the
-/// existing PostgreSQL data directory and repairs credentials + config on
-/// its own (see the `run_setup_repair` path in hooks.nsh).
-///
-/// This command remains for cases where support staff have manually reset
-/// the PostgreSQL password out-of-band (e.g. via psql with their own
-/// admin access) and need to make config.json match it again.
+/// The frontend should call this during first-run setup, passing the
+/// PostgreSQL password that the NSIS installer generated (which it prints
+/// on screen during installation).
 #[tauri::command]
 pub async fn repair_server_config(
     app_handle: tauri::AppHandle,

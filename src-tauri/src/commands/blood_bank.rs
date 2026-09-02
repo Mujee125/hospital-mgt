@@ -46,11 +46,17 @@ const VALID_COMPONENT_TYPES: &[&str] = &[
 const VALID_UNIT_STATUSES: &[&str] = &[
     "available", "reserved", "issued", "transfused", "discarded", "expired", "quarantine",
 ];
+/// Referenced by the unit-test suite as the Rust-side contract; production
+/// donor-status validation is not yet wired (tracked in verification report).
+#[allow(dead_code)]
 const VALID_DONOR_STATUSES: &[&str] = &["active", "deferred", "blacklisted"];
 const VALID_CROSSMATCH_RESULTS: &[&str] =
     &["pending", "compatible", "incompatible", "weak", "indeterminate"];
 const VALID_CROSSMATCH_METHODS: &[&str] =
     &["saline_37c", "ahg", "gel_card", "tube_ahg", "electronic"];
+/// Referenced by the unit-test suite as the Rust-side contract; production
+/// reservation-status validation is not yet wired (tracked in verification report).
+#[allow(dead_code)]
 const VALID_RESERVATION_STATUSES: &[&str] = &["active", "fulfilled", "expired", "cancelled"];
 const VALID_PRIORITIES: &[&str] = &["routine", "urgent", "emergency", "stat"];
 const VALID_ISSUE_TYPES: &[&str] = &["routine", "emergency", "uncrossmatched", "autologous"];
@@ -187,20 +193,6 @@ const SELECT_CROSSMATCHES: &str = r#"
     LEFT JOIN doctors d ON d.id = bc.doctor_id
 "#;
 
-const SELECT_RESERVATIONS: &str = r#"
-    SELECT br.id, br.reservation_number, br.unit_id, br.patient_id, br.doctor_id,
-           br.requested_by_user_id, br.crossmatch_id, br.reserved_at, br.expires_at,
-           br.fulfilled_at, br.cancelled_at, br.status, br.priority,
-           br.clinical_indication, br.notes, br.created_at, br.updated_at,
-           bu.unit_number AS unit_number,
-           p.first_name || ' ' || p.last_name AS patient_name,
-           d.first_name || ' ' || d.last_name AS doctor_name
-    FROM blood_reservations br
-    LEFT JOIN blood_units bu ON bu.id = br.unit_id
-    LEFT JOIN patients p ON p.id = br.patient_id
-    LEFT JOIN doctors d ON d.id = br.doctor_id
-"#;
-
 const SELECT_ISSUES: &str = r#"
     SELECT bi.id, bi.issue_number, bi.unit_id, bi.patient_id, bi.reservation_id,
            bi.crossmatch_id, bi.doctor_id, bi.issued_by_user_id, bi.issued_at,
@@ -274,6 +266,8 @@ async fn record_unit_event(
     Ok(())
 }
 
+// Audit helper: mirrors the inventory_movement table columns — one arg per column.
+#[allow(clippy::too_many_arguments)]
 async fn record_movement(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     unit_id: i32,
@@ -951,6 +945,7 @@ pub async fn update_blood_donation_screening(
 /// RBAC: `BloodBankView`. Excludes soft-deleted units.
 #[tauri::command]
 #[allow(unused_assignments)] // bind_idx increments after the last condition are harmless
+#[allow(clippy::too_many_arguments)] // IPC filter surface — stable command contract
 pub async fn get_blood_units(
     pool: tauri::State<'_, PgPool>,
     session: tauri::State<'_, SessionState>,
@@ -1037,6 +1032,7 @@ pub async fn get_blood_units(
 /// "do we have compatible stock?" query). RBAC: `BloodBankView`.
 /// Returns available (non-deleted) units only.
 #[tauri::command]
+#[allow(unused_assignments)] // bind_idx increments after the last condition are harmless
 pub async fn search_blood_inventory(
     pool: tauri::State<'_, PgPool>,
     session: tauri::State<'_, SessionState>,
@@ -3028,6 +3024,10 @@ pub async fn get_blood_bank_statistics(
 // For each expired unit, records a status_history entry + inventory_movement.
 // Returns the count of expired units for scheduler logging.
 
+// Intended to be called by the background scheduler (see doc comment above);
+// the scheduler wiring is pending — tracked as a finding in the verification
+// report. Not IPC-exposed by design.
+#[allow(dead_code)]
 pub async fn expire_blood_units(pool: &PgPool) -> Result<u64, String> {
     // Single transaction: SELECT the candidates FOR UPDATE, then UPDATE them,
     // then record history + movement for each. The FOR UPDATE prevents a race
@@ -3139,6 +3139,10 @@ pub async fn expire_blood_units(pool: &PgPool) -> Result<u64, String> {
 //
 // This is a behaviour-preserving extraction — no production logic changed.
 
+// Tested reference implementation of the ABO/Rh rules; production enforcement
+// uses the seeded `blood_compatibility_matrix` table (BE-04) so this fn has no
+// production call sites. Kept as the executable specification for the matrix.
+#[allow(dead_code)]
 fn is_abo_rh_compatible(
     recipient_group: &str,
     recipient_rh: &str,
@@ -3171,15 +3175,13 @@ fn is_abo_rh_compatible(
     //   - A recipient: anti-B → A or O donors
     //   - B recipient: anti-A → B or O donors
     //   - AB recipient: neither → A, B, AB, or O donors (universal recipient)
-    let abo_compatible = match recipient_group {
+    match recipient_group {
         "O" => donor_group == "O",
         "A" => donor_group == "A" || donor_group == "O",
         "B" => donor_group == "B" || donor_group == "O",
         "AB" => true, // universal recipient
         _ => false,
-    };
-
-    abo_compatible
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

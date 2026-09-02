@@ -83,7 +83,7 @@ pub async fn create_bill(
     session: tauri::State<'_, SessionState>,
     bill: CreateBill,
 ) -> Result<i32, String> {
-    let s = rbac::require(&session, Permission::BillingCreate)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::BillingCreate).await?;
     if bill.items.is_empty() {
         return Err("A bill must contain at least one line item.".to_string());
     }
@@ -163,7 +163,7 @@ pub async fn record_payment(
     session: tauri::State<'_, SessionState>,
     payment: CreatePayment,
 ) -> Result<i32, String> {
-    let s = rbac::require(&session, Permission::PaymentsManage)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::PaymentsManage).await?;
     // IPC-07: validate the payment amount BEFORE any DB work. The previous
     // check `payment.amount <= 0.0` rejected negatives and zero but let
     // `NaN` and `Infinity` through:

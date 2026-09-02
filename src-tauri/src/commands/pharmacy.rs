@@ -338,7 +338,7 @@ pub async fn create_prescription(
     session: tauri::State<'_, SessionState>,
     prescription: CreatePrescription,
 ) -> Result<i32, String> {
-    let s = rbac::require(&session, Permission::PatientsCreate)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::PatientsCreate).await?;
     if prescription.items.is_empty() {
         return Err("A prescription must have at least one medication item.".to_string());
     }
@@ -468,7 +468,7 @@ pub async fn dispense_prescription_item(
     session: tauri::State<'_, SessionState>,
     prescription_item_id: i32,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::InventoryManage)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::InventoryManage).await?;
 
     let mut tx = pool.begin().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
 

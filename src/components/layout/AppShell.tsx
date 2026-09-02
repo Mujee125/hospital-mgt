@@ -62,7 +62,7 @@ export function AppShell({ children, serverMode, hospitalName }: AppShellProps) 
   };
 
   return (
-    <div className="flex h-full w-full bg-background text-foreground overflow-hidden">
+    <div className="flex min-h-full w-full bg-background text-foreground overflow-hidden">
       {/* Desktop sidebar */}
       <div className="hidden lg:block h-full shrink-0">
         <Sidebar

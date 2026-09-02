@@ -92,7 +92,7 @@ pub async fn create_patient(
     session: tauri::State<'_, SessionState>,
     patient: CreatePatientEhr,
 ) -> Result<i32, String> {
-    let s = rbac::require(&session, Permission::PatientsCreate)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::PatientsCreate).await?;
     let dob = parse_dob(&patient.date_of_birth)?;
 
     let row: (i32,) = sqlx::query_as(
@@ -139,7 +139,7 @@ pub async fn update_patient(
     session: tauri::State<'_, SessionState>,
     patient: UpdatePatientEhr,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::PatientsUpdate)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::PatientsUpdate).await?;
     let dob = parse_dob(&patient.date_of_birth)?;
 
     sqlx::query(
@@ -185,7 +185,7 @@ pub async fn delete_patient(
     session: tauri::State<'_, SessionState>,
     id: i32,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::PatientsDelete)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::PatientsDelete).await?;
     // CR-11: SOFT-DELETE — never hard-DELETE a patient row. Sets `deleted_at`
     // + `is_active = FALSE` so the patient disappears from active lists
     // (get_patients / get_patient filter `deleted_at IS NULL`) but every
@@ -235,7 +235,7 @@ pub async fn get_patient_consent(
     session: tauri::State<'_, SessionState>,
     patient_id: i32,
 ) -> Result<Option<PatientConsent>, String> {
-    let _ = rbac::require(&session, Permission::PatientsView)?;
+    let _ = rbac::require_strong(&session, pool.inner(), Permission::PatientsView).await?;
     sqlx::query_as::<_, PatientConsent>(
         r#"SELECT id, patient_id, consent_type, granted, granted_at,
                   granted_by_user_id, notes
@@ -261,7 +261,7 @@ pub async fn set_patient_consent(
     granted: bool,
     notes: Option<String>,
 ) -> Result<i32, String> {
-    let s = rbac::require(&session, Permission::PatientConsentManage)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::PatientConsentManage).await?;
     let ct = consent_type.trim();
     if ct.is_empty() {
         return Err("consent_type must not be empty.".to_string());
@@ -311,7 +311,7 @@ pub async fn revoke_patient_consent(
     patient_id: i32,
     consent_type: String,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::PatientConsentManage)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::PatientConsentManage).await?;
     let ct = consent_type.trim();
     if ct.is_empty() {
         return Err("consent_type must not be empty.".to_string());

@@ -241,11 +241,6 @@ function App() {
                   Reconfigure
                 </button>
               )}
-              {!isClient && (
-                <button onClick={() => setPhase("needsSetup")} className="h-11 px-5 border border-border bg-card text-foreground rounded-lg text-sm font-semibold hover:bg-muted transition-all active:scale-[0.98]">
-                  How to fix this
-                </button>
-              )}
             </div>
           </motion.div>
         </div>
@@ -390,65 +385,23 @@ function ForceChangePassword({ hospitalName }: { hospitalName?: string }) {
 
   return (
     <div className="flex min-h-vh w-full items-center justify-center bg-background gradient-mesh p-6 select-none">
-      <motion.div
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="w-full max-w-md"
-      >
+      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="w-full max-w-md">
         <div className="flex flex-col items-center text-center gap-3 mb-6">
           <div className="h-14 w-14 rounded-[var(--radius-md)] bg-accent/10 border border-accent/20 flex items-center justify-center">
             <KeyRound className="h-7 w-7 text-accent" />
           </div>
           <div>
             <h1 className="text-display-lg text-foreground">Change your password</h1>
-            <p className="text-sm text-muted-foreground mt-1.5">
-              {hospitalName ?? "RASHEED MEDICAL CENTER HMS"} requires a new password before you
-              continue.
-            </p>
+            <p className="text-sm text-muted-foreground mt-1.5">{hospitalName ?? "RASHEED MEDICAL CENTER HMS"} requires a new password before you continue.</p>
           </div>
         </div>
         <div className="auth-card">
           <form onSubmit={submit} className="form-stack">
-            <Field label="Current password">
-              <input
-                type="password"
-                autoComplete="current-password"
-                value={current}
-                onChange={(e) => setCurrent(e.target.value)}
-                required
-                className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
-              />
-            </Field>
-            <Field label="New password">
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={next}
-                onChange={(e) => setNext(e.target.value)}
-                required
-                className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
-              />
-            </Field>
-            <Field label="Confirm new password">
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                required
-                className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
-              />
-            </Field>
-            {err && (
-              <div className="rounded-[var(--radius)] border border-destructive/30 bg-destructive/8 px-4 py-3 text-xs text-destructive">
-                {err}
-              </div>
-            )}
-            <button
-              type="submit"
-              disabled={changePwd.isPending}
-              className="h-12 mt-1 rounded-full bg-primary text-primary-foreground text-[15px] font-semibold hover:bg-[hsl(var(--primary-hover))] hover:shadow-md transition-all shadow-sm disabled:opacity-60  w-full"
-            >
+            <Field label="Current password"><input type="password" autoComplete="current-password" value={current} onChange={(e)=>setCurrent(e.target.value)} required className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15" /></Field>
+            <Field label="New password"><input type="password" autoComplete="new-password" value={next} onChange={(e)=>setNext(e.target.value)} required className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15" /></Field>
+            <Field label="Confirm new password"><input type="password" autoComplete="new-password" value={confirm} onChange={(e)=>setConfirm(e.target.value)} required className="h-12 px-4 bg-card border border-border rounded-[var(--radius)] text-sm outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/15" /></Field>
+            {err && <div className="rounded-[var(--radius)] border border-destructive/30 bg-destructive/8 px-4 py-3 text-xs text-destructive">{err}</div>}
+            <button type="submit" disabled={changePwd.isPending} className="h-12 mt-1 rounded-full bg-primary text-primary-foreground text-[15px] font-semibold hover:bg-[hsl(var(--primary-hover))] hover:shadow-md transition-all shadow-sm disabled:opacity-60">
               {changePwd.isPending ? "Saving…" : "Update password"}
             </button>
           </form>

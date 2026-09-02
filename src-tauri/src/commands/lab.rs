@@ -90,7 +90,7 @@ pub async fn create_lab_order(
     session: tauri::State<'_, SessionState>,
     order: CreateLabOrder,
 ) -> Result<i32, String> {
-    let s = rbac::require(&session, Permission::LabOrder)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::LabOrder).await?;
     if order.test_catalog_ids.is_empty() {
         return Err("At least one test must be selected.".to_string());
     }
@@ -133,7 +133,7 @@ pub async fn get_lab_order_tests(
     session: tauri::State<'_, SessionState>,
     lab_order_id: i32,
 ) -> Result<Vec<LabOrderTest>, String> {
-    let _ = rbac::require(&session, Permission::LabView)?;
+    let _ = rbac::require_strong(&session, pool.inner(), Permission::LabView).await?;
     sqlx::query_as(
         r#"SELECT lot.id, lot.lab_order_id, lot.test_catalog_id, lot.result_value,
                   lot.result_unit, lot.result_abnormal_flag, lot.result_notes,
@@ -156,7 +156,7 @@ pub async fn update_lab_result(
     session: tauri::State<'_, SessionState>,
     result: UpdateLabResult,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::LabResultManage)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::LabResultManage).await?;
 
     // Update the single test row and stamp completion.
     sqlx::query(

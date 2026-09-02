@@ -175,14 +175,26 @@ export function Setup({ onSetupComplete }: SetupProps) {
   // ── Server build: this screen should not normally appear. PostgreSQL
   //    provisioning happens once, during installation (see windows/hooks.nsh),
   //    and the installer marks setup_complete before the app is ever
-  //    launched. Seeing this usually means installation didn't finish
-  //    correctly (installer not run as Administrator) — but it can also mean
-  //    PostgreSQL is fine and only config.json itself went missing/corrupt
-  //    (deleted, disk issue, etc). For that second case, repair_server_config
-  //    lets an admin re-enter the DB password and recover without a full
-  //    reinstall. ──
+  //    launched. Seeing this means installation didn't finish correctly. ──
   if (BUILD_MODE === "server") {
-    return <ServerRepairScreen />;
+    return (
+      <div className="flex-1 flex items-center justify-center h-full bg-background p-6">
+        <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.25 }}>
+          <Card className="w-full max-w-md surface-elevated border-0 text-center">
+            <CardHeader>
+              <div className="h-12 w-12 bg-amber-100 dark:bg-amber-950/30 rounded-2xl flex items-center justify-center mx-auto mb-2">
+                <Server className="h-6 w-6 text-amber-600" />
+              </div>
+              <CardTitle className="text-display-md">Setup did not complete</CardTitle>
+              <CardDescription>
+                PostgreSQL should have been installed automatically when you ran the HMS Server installer. Please re-run the installer
+                (right-click → Run as administrator), then restart this app.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        </motion.div>
+      </div>
+    );
   }
 
   // ── Client build: pair with the reception PC ───────────────────────────
@@ -253,63 +265,6 @@ export function Setup({ onSetupComplete }: SetupProps) {
               Save & continue <ArrowRight className="h-4 w-4 ml-2" />
             </Button>
           </CardFooter>
-        </Card>
-      </motion.div>
-    </div>
-  );
-}
-
-/**
- * Server build recovery screen.
- *
- * Reached when config.json is missing/incomplete on a machine that should
- * already be a provisioned HMS Server (see App.tsx `initError` handling).
- *
- * IMPORTANT: this build never asks a human for the PostgreSQL password —
- * it's auto-generated during install and written straight into
- * config.json, never shown on screen or logged anywhere. So if config.json
- * is gone, nobody — not the receptionist, not you — actually knows it.
- * There's nothing to type in here.
- *
- * The real fix already exists in windows/hooks.nsh: the installer checks
- * for an existing PostgreSQL data directory on every run. If it finds one
- * but no config.json (exactly this situation), it takes the
- * `run_setup_repair` path — resets the DB password to a fresh
- * auto-generated one via a temporary trust-auth window, and rewrites
- * config.json. Fully automatic, no prompts, and it never touches or drops
- * existing patient data (only credentials are reset). This screen's job is
- * just to point there clearly, since the running app itself deliberately
- * never requests elevation or touches the PostgreSQL service directly
- * (see pg_provision.rs) — only the elevated installer can do this repair.
- */
-function ServerRepairScreen() {
-  return (
-    <div className="flex-1 flex items-center justify-center h-full bg-background p-6">
-      <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.25 }}>
-        <Card className="w-full max-w-md surface-elevated border-0 text-center">
-          <CardHeader>
-            <div className="h-12 w-12 bg-amber-100 dark:bg-amber-950/30 rounded-2xl flex items-center justify-center mx-auto mb-2">
-              <Server className="h-6 w-6 text-amber-600" />
-            </div>
-            <CardTitle className="text-display-md">Configuration is missing</CardTitle>
-            <CardDescription className="text-left space-y-3">
-              <span className="block">
-                This app's configuration file wasn't found. Nothing here needs a password — PostgreSQL is
-                fully managed by the installer.
-              </span>
-              <span className="block font-semibold text-foreground">To fix it:</span>
-              <span className="block">
-                1. Close this app.<br />
-                2. Re-run the HMS Server installer — <span className="font-semibold">right-click → Run as
-                administrator</span>.<br />
-                3. The installer detects your existing database automatically and repairs the
-                configuration on its own.
-              </span>
-              <span className="block text-xs text-muted-foreground pt-1">
-                Your patient data is not affected — this only resets the app's connection credentials.
-              </span>
-            </CardDescription>
-          </CardHeader>
         </Card>
       </motion.div>
     </div>

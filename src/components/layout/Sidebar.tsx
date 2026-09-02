@@ -10,6 +10,7 @@ import {
   BarChart3,
   Receipt,
   ChevronsLeft,
+  ChevronsRight,
   ChevronRight,
   ListOrdered,
   BedDouble,
@@ -177,38 +178,17 @@ export function Sidebar({
           "linear-gradient(to bottom, hsl(168 89% 30%) 0%, hsl(159 91% 18%) 50%, hsl(230 94% 18%) 100%)",
       }}
     >
-      {/* Brand — click to toggle collapse; no separate button needed */}
-      {isMobileDrawer ? (
-        <div
-          data-tauri-drag-region
-          className="flex items-center gap-2 pl-3 pr-4 shrink-0 border-b border-white/10"
-          style={{ height: TITLEBAR_HEIGHT }}
-        >
-          <img src={logo} alt="Logo" className="w-10 h-10 ml-3 object-contain brightness-0 invert" />
-          <span className="text-[13px] font-semibold tracking-tight text-white">
-            {hospitalName ?? "Rasheed Medical Center"}
-          </span>
-        </div>
-      ) : (
-        <button
-          type="button"
-          onClick={onToggleCollapsed}
-          aria-pressed={collapsed}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          className={`group flex items-center gap-2 pl-3 pr-4 shrink-0 border-b border-white/10 text-left hover:bg-white/[0.06] transition-colors ${!showExpanded ? "justify-center pr-3" : ""}`}
-          style={{ height: TITLEBAR_HEIGHT }}
-        >
-          <img src={logo} alt="Logo" className="w-10 h-10 ml-3 object-contain brightness-0 invert shrink-0" />
-          {showExpanded && (
-            <>
-              <span className="text-[13px] font-semibold tracking-tight text-white truncate flex-1">
-                {hospitalName ?? "Rasheed Medical Center"}
-              </span>
-              <ChevronsLeft className="h-3.5 w-3.5 text-white/40 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
-            </>
-          )}
-        </button>
-      )}
+      {/* Brand */}
+      <div
+        data-tauri-drag-region
+        className="flex items-center gap-2 pl-3 pr-4 shrink-0 border-b border-white/10"
+        style={{ height: TITLEBAR_HEIGHT }}
+      >
+        <img src={logo} alt="Logo" className="w-10 h-10 ml-3 object-contain brightness-0 invert" />
+        <span className="text-[13px] font-semibold tracking-tight text-white">
+          {hospitalName ?? "Rasheed Medical Center"}
+        </span>
+      </div>
 
       {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto overflow-x-hidden no-scrollbar">
@@ -290,9 +270,23 @@ export function Sidebar({
         })}
       </nav>
 
-      {/* Collapse toggle moved to the brand row above — click the logo/name
-          to expand or collapse. Kept as a keyboard-focusable target there
-          via a real <button>, so no separate control is needed here. */}
+      {/* Collapse toggle (desktop) */}
+      {!isMobileDrawer && (
+        <button
+          onClick={onToggleCollapsed}
+          className="flex items-center gap-2 px-3.5 py-2.5 mx-3 mb-2 rounded-[var(--radius-md)] text-xs font-semibold text-white/55 hover:bg-white/[0.06] hover:text-white transition-colors shrink-0"
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {collapsed ? (
+            <ChevronsRight className="h-4 w-4 mx-auto" />
+          ) : (
+            <>
+              <ChevronsLeft className="h-4 w-4" />
+              <span>Collapse</span>
+            </>
+          )}
+        </button>
+      )}
 
       {/* User footer */}
       <div

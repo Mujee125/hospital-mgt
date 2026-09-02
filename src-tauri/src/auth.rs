@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashSet;
 use std::sync::Mutex;
+use tauri::Emitter;
 
 use crate::rbac::{self, Permission, Session, ROLE_SUPER_ADMIN};
 
@@ -88,10 +89,8 @@ fn generate_bootstrap_password() -> String {
 /// installer / first-run operator can read the one-time password.
 ///
 /// Location: same directory as `config.json` (`C:\ProgramData\HMS` on
-/// Windows). On Windows the file is ACL-hardened to SYSTEM, Administrators,
-/// and the specific account that generated it — see the per-user ACE note
-/// below on why the group-only grant alone doesn't actually work. The
-/// operator reads it once, logs in, and is forced to rotate.
+/// Windows). On Windows the file is ACL-hardened to SYSTEM + Administrators
+/// only. The operator reads it once, logs in, and is forced to rotate.
 fn write_bootstrap_credentials(username: &str, password: &str) -> Result<(), String> {
     let program_data = std::env::var_os("ProgramData")
         .map(std::path::PathBuf::from)
@@ -117,32 +116,14 @@ fn write_bootstrap_credentials(username: &str, password: &str) -> Result<(), Str
 
     std::fs::write(&cred_path, &content).map_err(|e| format!("write bootstrap creds: {}", e))?;
 
-    // Windows: ACL-harden the file — but grant the ACTUAL current user
-    // account explicitly, not just the "Administrators" group.
-    //
-    // Why: under UAC, a normal (non-elevated) process — e.g. someone just
-    // double-clicking Notepad — runs with a *filtered* access token where
-    // membership in the Administrators group is marked "deny-only". An ACE
-    // that only grants rights to the Administrators group is silently
-    // ignored by that filtered token, even for a genuine admin user, and
-    // .txt files have no "Run as administrator" option to work around it.
-    // The result was every real user hitting "You do not have permission"
-    // on first login. A per-account ACE (this user's own SID) is NOT
-    // subject to that filtering, so granting the current user directly
-    // makes the file actually readable without requiring elevation.
+    // Windows: ACL-harden the file.
     #[cfg(target_os = "windows")]
     {
-        let domain = std::env::var("USERDOMAIN").unwrap_or_else(|_| ".".to_string());
-        let user = std::env::var("USERNAME").unwrap_or_default();
-        let mut cmd = std::process::Command::new("icacls");
-        cmd.arg(cred_path.as_os_str())
+        let _ = std::process::Command::new("icacls")
+            .arg(cred_path.as_os_str())
             .args(["/inheritance:r"])
             .args(["/grant:r", "SYSTEM:F"])
-            .args(["/grant:r", "Administrators:F"]);
-        if !user.is_empty() {
-            cmd.args(["/grant:r", &format!("{}\\{}:F", domain, user)]);
-        }
-        let _ = cmd
+            .args(["/grant:r", "Administrators:F"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
@@ -363,7 +344,7 @@ pub async fn seed_defaults(pool: &PgPool) -> Result<(), String> {
 
 // ── Session loading helper ────────────────────────────────────────────────────
 
-async fn load_session(pool: &PgPool, user_id: i32) -> Result<Session, String> {
+async fn load_session(pool: &PgPool, user_id: i32, token_hash: &str) -> Result<Session, String> {
     let roles: Vec<(String,)> =
         sqlx::query_as("SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1")
             .bind(user_id)
@@ -395,6 +376,7 @@ async fn load_session(pool: &PgPool, user_id: i32) -> Result<Session, String> {
         full_name: user.1,
         roles: roles.into_iter().map(|r| r.0).collect(),
         permissions: perms.into_iter().map(|p| p.0).collect::<HashSet<_>>(),
+        token_hash: token_hash.to_string(),
     })
 }
 
@@ -506,6 +488,12 @@ pub async fn login(
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
+    // WP-2.2 Layer 2: emit session_invalidated event so other PCs running
+    // the same Tauri process can clear their in-memory session. (Cross-PC
+    // propagation is handled by Layer 1: `me` polling + Layer 3:
+    // `require_strong` DB check on high-risk commands.)
+    let _ = app_handle.emit("session_invalidated", serde_json::json!({"user_id": user_id}));
+
     let token = random_token();
     let token_hash = hash_token(&token);
     let expires = now + Duration::hours(SESSION_HOURS);
@@ -517,7 +505,7 @@ pub async fn login(
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    let session = load_session(pool.inner(), user_id).await?;
+    let session = load_session(pool.inner(), user_id, &token_hash).await?;
     crate::audit::record(pool.inner(), Some(user_id), Some(&username), "login_success", "auth", None, None).await.ok();
 
     // REL-02: recover from mutex poisoning instead of panicking.
@@ -574,9 +562,9 @@ pub async fn me(
     let valid: Option<(chrono::DateTime<Utc>,)> = sqlx::query_as(
         "SELECT s.expires_at FROM sessions s
          JOIN users u ON u.id = s.user_id
-         WHERE s.user_id = $1 AND u.is_active = TRUE",
+         WHERE s.token_hash = $1 AND u.is_active = TRUE",
     )
-    .bind(session.user_id)
+    .bind(&session.token_hash)
     .fetch_optional(pool.inner())
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
@@ -669,7 +657,7 @@ pub async fn create_user(
     session_state: tauri::State<'_, std::sync::Arc<Mutex<Option<Session>>>>,
     request: CreateUserRequest,
 ) -> Result<i32, String> {
-    let session = rbac::require(&session_state, Permission::UsersManage)?;
+    let session = rbac::require_strong(&session_state, pool.inner(), Permission::UsersManage).await?;
 
     if request.username.trim().is_empty() || request.password.len() < 8 {
         return Err("Username required and password must be at least 8 characters.".to_string());
@@ -700,11 +688,12 @@ pub async fn create_user(
 
 #[tauri::command]
 pub async fn update_user(
+    app_handle: tauri::AppHandle,
     pool: tauri::State<'_, PgPool>,
     session_state: tauri::State<'_, std::sync::Arc<Mutex<Option<Session>>>>,
     request: UpdateUserRequest,
 ) -> Result<(), String> {
-    let session = rbac::require(&session_state, Permission::UsersManage)?;
+    let session = rbac::require_strong(&session_state, pool.inner(), Permission::UsersManage).await?;
 
     if let Some(name) = &request.full_name {
         sqlx::query("UPDATE users SET full_name = $1, updated_at = NOW() WHERE id = $2")
@@ -730,6 +719,13 @@ pub async fn update_user(
 
     crate::audit::record(pool.inner(), Some(session.user_id), Some(&session.username),
         "user_update", "users", Some(&request.id.to_string()), None).await.ok();
+
+    // WP-2.2 Layer 2: if the target user was deactivated or had roles changed,
+    // emit session_invalidated so their in-memory session on this PC is cleared.
+    // (Cross-PC propagation via Layer 1: `me` polling + Layer 3: require_strong.)
+    if request.is_active == Some(false) || request.roles.is_some() {
+        let _ = app_handle.emit("session_invalidated", serde_json::json!({"user_id": request.id}));
+    }
     Ok(())
 }
 
@@ -739,7 +735,7 @@ pub async fn delete_user(
     session_state: tauri::State<'_, std::sync::Arc<Mutex<Option<Session>>>>,
     id: i32,
 ) -> Result<(), String> {
-    let session = rbac::require(&session_state, Permission::UsersManage)?;
+    let session = rbac::require_strong(&session_state, pool.inner(), Permission::UsersManage).await?;
     if id == session.user_id {
         return Err("You cannot delete your own account.".to_string());
     }
@@ -755,12 +751,13 @@ pub async fn delete_user(
 
 #[tauri::command]
 pub async fn reset_user_password(
+    app_handle: tauri::AppHandle,
     pool: tauri::State<'_, PgPool>,
     session_state: tauri::State<'_, std::sync::Arc<Mutex<Option<Session>>>>,
     id: i32,
     new_password: String,
 ) -> Result<(), String> {
-    let session = rbac::require(&session_state, Permission::UsersManage)?;
+    let session = rbac::require_strong(&session_state, pool.inner(), Permission::UsersManage).await?;
     if new_password.len() < 8 {
         return Err("Password must be at least 8 characters.".to_string());
     }
@@ -772,6 +769,8 @@ pub async fn reset_user_password(
     // Invalidate sessions for the target user.
     sqlx::query("DELETE FROM sessions WHERE user_id = $1").bind(id)
         .execute(pool.inner()).await.ok();
+    // WP-2.2 Layer 2: emit session_invalidated for the target user.
+    let _ = app_handle.emit("session_invalidated", serde_json::json!({"user_id": id}));
     crate::audit::record(pool.inner(), Some(session.user_id), Some(&session.username),
         "password_reset", "users", Some(&id.to_string()), None).await.ok();
     Ok(())
