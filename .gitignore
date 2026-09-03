@@ -37,3 +37,7 @@ src-tauri/gen
 
 # Logs / runtime
 hms_startup.log
+
+# AI tooling session state (review F-3: never commit)
+.mimosa/
+**/.mimosa/

@@ -281,30 +281,26 @@ impl AppConfig {
         );
         let tmp = path.with_file_name(format!("config.{}.json.tmp", unique));
         fs::write(&tmp, &content).map_err(|e| format!("Write config tmp: {}", e))?;
-        fs::rename(&tmp, path).map_err(|e| {
-            // Best-effort cleanup of the temp file on rename failure.
-            let _ = fs::remove_file(&tmp);
-            format!("Rename config: {}", e)
-        })?;
 
-        // Windows: ACL-harden the file. VF-VERIF-004: SYSTEM + Administrators
-        // only made the file unreadable by the app itself on the next launch
-        // (the app runs as the logged-in, non-admin user), so `load()` failed,
-        // the startup path mis-reported "config.json missing", and every
-        // subsequent launch was dead. Grant the current user READ in addition
-        // to the admin grants — the file still denies every other non-admin
-        // account, and the password inside is DPAPI-encrypted anyway (v2).
+        // Review F-5 (independent pass, 2026-09-03): ACL-harden the TEMP
+        // file BEFORE the rename. The previous order (rename → icacls) left a
+        // window in which the live config.json carried the parent dir's
+        // inherited ACEs (Users:Modify on C:\ProgramData\HMS). Low practical
+        // severity — the content is DPAPI-encrypted v2 by this point — but
+        // pre-applying the ACL to the temp file closes the window entirely:
+        // the rename swaps one hardened file for another, atomically.
         #[cfg(target_os = "windows")]
         {
             let mut icacls = std::process::Command::new("icacls");
-            icacls.arg(path.as_os_str())
+            icacls.arg(tmp.as_os_str())
                 .args(["/inheritance:r"])
                 .args(["/grant:r", "SYSTEM:F"])
                 .args(["/grant:r", "Administrators:F"]);
             if let Some(user) = std::env::var_os("USERNAME") {
-                // VF-VERIF-004: Modify (not just Read) — `save()` writes a
-                // temp file and RENAMES it over this one; rename needs DELETE
-                // on the target, which Read alone does not grant.
+                // VF-VERIF-004: Modify (not just Read) — `save()` renames a
+                // NEW temp file over this one on every later save; the grant
+                // must survive that, and the app itself must be able to
+                // replace its own config.
                 let _ = icacls.arg(format!("{}:(M)", user.to_string_lossy()));
             }
             let status = icacls
@@ -312,10 +308,16 @@ impl AppConfig {
                 .stderr(std::process::Stdio::null())
                 .status();
             if let Err(e) = status {
-                eprintln!("[HMS CONFIG] Warning: could not ACL-harden config.json ({}). \
-                           The file may be readable by other local users.", e);
+                eprintln!("[HMS CONFIG] Warning: could not ACL-harden the config temp file ({}). \
+                           The renamed config.json may briefly inherit weaker permissions.", e);
             }
         }
+
+        fs::rename(&tmp, path).map_err(|e| {
+            // Best-effort cleanup of the temp file on rename failure.
+            let _ = fs::remove_file(&tmp);
+            format!("Rename config: {}", e)
+        })?;
 
         Ok(())
     }
@@ -402,6 +404,33 @@ pub async fn save_config(
     // credentials (and any on-disk encryption state) are preserved from disk,
     // not from the webview.
     let mut merged = existing.unwrap_or_else(|| config.clone());
+
+    // Review F-4 (independent pass, 2026-09-03): the merge whitelist excludes
+    // db_password/db_password_encrypted on the AUTHENTICATED path, but during
+    // the pre-setup window (no existing config, or setup_complete == false)
+    // the auth guard is intentionally skipped and the raw payload is
+    // accepted — by design, because Setup must be able to write a first
+    // config. A co-resident, unauthenticated process during that window can
+    // therefore also choose db_host/db_port. Mitigate the server-build case:
+    // during first-run setup the database is ALWAYS the locally provisioned
+    // PostgreSQL (SRS: one Windows server per hospital), so pin the host to
+    // loopback unless an admin later changes it through the guarded path.
+    #[cfg(feature = "server-build")]
+    {
+        let in_setup_window = !merged.setup_complete;
+        if in_setup_window {
+            let host = config.db_host.trim().to_string();
+            let is_loopback = host == "127.0.0.1" || host == "localhost" || host == "::1";
+            if !is_loopback {
+                return Err(
+                    "During first-run setup the database host must be this machine \
+                     (127.0.0.1). Remote hosts can be configured later from Settings \
+                     after signing in.".to_string(),
+                );
+            }
+        }
+    }
+
     merged.mode = config.mode;
     merged.db_host = config.db_host;
     merged.db_port = config.db_port;

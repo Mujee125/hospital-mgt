@@ -1,16 +1,26 @@
 # Independent Review Package — VitalFlow HMS Authentication Remediation
 
-**Prepared:** 2026-09-02 · **For:** an external reviewer with NO prior context (AI session or human)
-**Repo:** `E:\hospital-mgt\hospital-mgt` (branch `main`)
+**Prepared:** 2026-09-02 · **REVISED 2026-09-03** after the first independent pass
+(REVIEW-FINDINGS-independent.md, findings F-1..F-6) **confirmed this package's original
+scope tables were wrong.** The revision below is the corrected scope. Original author's
+error, stated plainly: the WP-1..3 files were sitting **staged in the git index** while
+my scoping commands ran unstaged-only diffs (`git diff` without `--cached`) against a
+mixed tree — so the package described Set A as "already in the baseline" when it had
+never been committed. The reviewer caught it by cloning the repo and grepping
+`f2f669e:rbac.rs` (0 matches for `require_strong` / `WhatsAppSend`). Lesson now baked
+into §1: **regenerate every diff table from the repo at review time; never hand-type one.**
+
+**For:** an external reviewer with NO prior context (AI session or human)
+**Repo:** `E:\hospital-mgt\hospital-mgt` (branch `main`, remote `github.com/Mujee125/hospital-mgt`)
 
 Read this file top-to-bottom (~10 minutes), then you are reviewing, not researching.
 Everything you need is in §2–§6. Do not trust this document's conclusions — that is
 precisely what you exist to check. Every claim below is falsifiable against the cited
-file:line.
+file:line or git command. **First pass findings and their dispositions are in §8.**
 
 ---
 
-## §1 — What you are reviewing and why
+## §1 — What you are reviewing and why (CORRECTED SCOPE)
 
 This hospital management system (Tauri v2 + Rust backend + React frontend + PostgreSQL,
 Windows-only, one hospital per deployment) went through three remediation change-sets.
@@ -19,43 +29,30 @@ That is the governance failure you are here to repair (Handoff §13.6). Your job
 to re-derive the work — it is to find the bypass, the edge case, and the omission the
 author could not see in their own work.
 
-The three change-sets (all in `main`'s working tree):
+### The true commit map (verified 2026-09-03 with `git show`/`git diff` per commit)
 
-| Set | What | Authored | Baseline |
+| Commit | Date | Contents | Review status |
 |---|---|---|---|
-| **A** | WP-1..WP-3 security fixes (WhatsApp RBAC, token-hash sessions, `require_strong`, DPAPI config encryption) | Jul 14–16 (upstream, before this machine) | **already committed** in `f2f669e` "changes are commit on 18-08-26" |
-| **B** | Windows verification round: 4 defect fixes (VF-VERIF-001..004) | Aug 31–Sep 1 (this session) | uncommitted working tree |
-| **C** | AERP Part G test round: 3 new suites + 4 repaired legacy suites + 4 more production fixes + core extractions | Sep 2 (this session) | uncommitted working tree |
+| `2218ea5` | Jul 12 | Initial commit — pre-AERP application, no `require_strong`, no WhatsApp permissions, no `secrets.rs` | true baseline |
+| `f2f669e` | Aug 18 | Mixed user commit — does **NOT contain Set A** (verified: `git show f2f669e:src-tauri/src/rbac.rs \| grep -c require_strong` → 0) | — |
+| `abbc01b` | Sep 2 23:56 | **Set A: the ENTIRE WP-1..3 authorization surface** — `rbac.rs` (+143: `require_strong`, `token_hash`, WhatsApp permissions), `secrets.rs` (+190, whole file), all 34 guard call-sites across 7 `commands/*.rs` + `whatsapp/commands.rs` + `auth.rs`, frontend RBAC (`rbac.ts`, Login/Patients/Setup pages) | **ZERO independent review to date** — this, not Set B/C, is the largest unaudited change-set in the repo |
+| `795b418` | Sep 3 | **Sets B+C**: Windows-verification fixes (VF-VERIF-001..004) + test round (cores, 3 new suites, 4 repaired legacy suites, `.bak`+version-gate fixes) | reviewed once (first pass, partially) |
+| `7f630e5` | Sep 3 | `.mimosa/` tool-state artifacts + this package's `.bak` edits | now untracked (F-3 remediated) |
 
-**Diff scope, exactly:** Sets B+C are the working tree vs `f2f669e`:
+**Therefore your review scope is `2218ea5..HEAD`, application code only:**
 
+```bash
+git diff --stat 2218ea5..HEAD -- src-tauri/src src-tauri/tests src docs
 ```
-git -C E:\hospital-mgt\hospital-mgt diff --stat          # Set B+C, 14 files, +812/−211
-```
+Expect ~26 files, ≈+1,843/−1,534 application lines (Set A ≈ +544/−323 net of the 26-file
+`f2f669e..abbc01b` stat; Sets B+C = 16 files +2,627/−211 per `git show --stat 795b418`).
+`.mimosa/`, `Cargo.lock`, `package-lock.json`, playwright/dist artifacts are excluded —
+regenerate the stat yourself and reconcile against these numbers before starting;
+**if the numbers disagree, the repo has moved and this package is stale — stop and re-scope.**
 
+Untracked-but-authored files (part of scope):
 ```
- src-tauri/Cargo.toml                   |  11 +
- src-tauri/src/auth.rs                  | 215 ++++++++++------
- src-tauri/src/commands/patients.rs    |  25 ++-
- src-tauri/src/config.rs                | 172 +++++++++++++--
- src-tauri/src/db.rs                    |   7 +
- src-tauri/src/lib.rs                   |  42 +++-
- src-tauri/src/tls_provision.rs         |  18 +-
- src-tauri/src/whatsapp/automation.rs   |   2 +-
- src-tauri/src/whatsapp/commands.rs     |   81 ++++----
- src-tauri/src/whatsapp/mod.rs          |   3 +
- src-tauri/tests/common/mod.rs          | 380 ++++++++++++++++++++-----
- src-tauri/tests/concurrency_tests.rs   |   4 +-
- src-tauri/tests/integration_tests.rs   |   2 +-
- src-tauri/tests/ipc_security_tests.rs  |  61 ++++--
-```
-
-Untracked new files (Set C):
-```
- src-tauri/tests/config_tests.rs        (348 lines)
- src-tauri/tests/session_tests.rs       (879 lines)
- src-tauri/tests/whatsapp_authz_tests.rs (577 lines)
- docs/VERIFICATION-REPORT-WP1-WP3.md
+ docs/VERIFICATION-REPORT-WP1-WP3.md, docs/REVIEW-PACKAGE-P3.md (this file)
 ```
 
 To review Set A too (recommended — it was never independently reviewed either):
@@ -253,4 +250,29 @@ or this package. **Explicitly attest or refute** these five, in one line each:
 
 ---
 
-*End of review package. Good hunting — the author genuinely wants you to find something.*
+## §8 — First-pass findings & dispositions (ADDRESSED 2026-09-03)
+
+The first independent pass (Claude, cloned repo, did not take this package's tables at
+face value — exactly as instructed) returned F-1..F-6. Dispositions below; **the
+reviewer's own "what I'd do next" list items 1–2 are done, and their open items are
+folded into the re-review scope.**
+
+| ID | Severity | Verdict | Disposition |
+|---|---|---|---|
+| F-1 | P0 | **CONFIRMED** (verified locally: `git show f2f669e:rbac.rs \| grep -c require_strong` → 0; rbac.rs only touched by `2218ea5` and `abbc01b`) | Package §1 rewritten with the true commit map. `require_strong` + WP-1..3 promoted from "recommended" to **primary review scope** (it IS the scope now). Root cause documented in the revision header: staged-index vs unstaged-diff scoping error. |
+| F-2 | P1 | **CONFIRMED** (real `f2f669e..HEAD` = 183 files; the ~66k "extra" lines are the F-3 artifacts) | §1 now mandates regenerating the diff-stat from the repo at review time, with a stop-and-rescope rule if numbers disagree. No hand-typed stats remain in the package. |
+| F-3 | P2 | **CONFIRMED, remediated** | `.mimosa/` + `**/.mimosa/` added to `.gitignore`; 144 files untracked via `git rm -r --cached`. **All `task-review-*.json` and finding-ledger artifacts verified EMPTY** (`"run_status": "inconclusive"`, 0 findings, 0 files scanned — the hook never established a baseline), so the "unreviewed second findings set" concern resolves to nothing. History purge remains optional (the files contain no secrets — reviewer grepped; only tool telemetry). |
+| F-4 | P2 | Accepted with caveat | **Partially hardened:** `save_config` now pins `db_host` to loopback during the pre-`setup_complete` window on the server build (SRS: first-run setup talks to the locally provisioned PostgreSQL). The authenticated/steady-state whitelist was already safe (passwords excluded from merge). Residual: the client-build pre-setup window remains open by design (client Setup must accept a server IP) — flagged as a documented trade-off, not silently accepted. |
+| F-5 | P3 | **Accepted & fixed** | ACL now applied to the TEMP file **before** the rename (`config.rs` save_to_inner): the live config.json never carries inherited ACEs, not even briefly. Config suite 14/14 re-passed; both feature paths compile. |
+| F-6 | info | Count confirmed (34) | Reviewer correctly notes the count is syntactic, not semantic. **Their suggested spot-check (right permission per command) is now §4 item 4's explicit task** — still open. |
+
+**Attestation status from first pass:** (a) mostly-true-with-caveat (F-4; now hardened), (b) code-level-yes/runtime-unverified (**runtime verification exists: 2026-09-02 on real Windows — migrated .bak icacls showed only `user:(R)/Administrators:(F)/SYSTEM:(F)`, documented in worklog 2026-09-02**), (d) no-abuse-vector/moderate-confidence, (c) and (e) **open**.
+
+**Re-review scope (second pass):** §3 core-extraction fidelity, §4 items 4–7
+(guard-site semantics, L03 staleness, `login_core` race, harness DB isolation),
+**plus the newly promoted Set A** (`rbac.rs`, `secrets.rs`, guard sites — the P0),
+using the corrected `2218ea5..HEAD` diff from §1.
+
+---
+
+*End of review package (rev 2, 2026-09-03). Good hunting — the author genuinely wants you to find something.*
