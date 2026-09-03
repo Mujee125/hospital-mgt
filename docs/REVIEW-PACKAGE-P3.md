@@ -101,7 +101,7 @@ and **what the fix might have broken** (your attack surface).
 | (C-1) | **`patients.rh_factor` column missing from migrations** while `blood_bank.rs:1999` SELECTs it → `create_blood_issue` crashes on ANY deployment. Found by first-ever legacy-suite execution. | `db.rs:439` adds `("rh_factor", "VARCHAR(5)")` to the patients ALTER loop | Why did nothing catch this for weeks (answer: the legacy tests never compiled)? Does anything else reference patients.rh_factor (grep) — CHECK constraints, indexes? Should it be CHECK-constrained ('+','-') like blood_units (gap documented, not fixed)? |
 | (C-2) | Config `save()` temp-file race: fixed name `config.json.tmp` → concurrent saves collided (os error 2). | `config.rs:247-263` unique temp names (pid+nanos+atomic counter) | Is the rename still atomic? Can stale `config.<uniq>.json.tmp` files accumulate (leak on rename failure only cleans its own)? Is `with_file_name` correct vs `with_extension` for paths without extensions? |
 | (C-3) | Argon2 (~100ms, memory-hard) ran on tokio workers → PoolTimedOut cascades under concurrent logins. | `auth.rs:73-84` `hash_password_async`/`verify_password_async` (spawn_blocking); all async call sites migrated (`auth.rs` login_core dummy-verify + real verify, change_password, create_user, reset core, bootstrap seed) | **Fidelity:** did every async caller actually migrate (grep `hash_password(`/`verify_password(` in async fns — line 318 `seed_defaults` bootstrap is `hash_password_async` now; any stragglers)? Is the timing-flattening dummy-verify still present (enumeration resistance)? Did wrapper behavior change at all (diff the wrappers against `f2f669e`)? |
-| (C-4) | Spec behaviors missing: no `.bak` on v1→v2 migration (WP3-I05), no unknown-version rejection (WP3-N04). | `config.rs:134-146` (>2 → None); `config.rs:226-240` (.bak only when disk is v1 AND no .bak exists) | The `.bak` contains the **plaintext v1 password** — is its ACL hardened (it is a plain `fs::copy` — CHECK: the .bak likely inherits default ACLs → plaintext password readable by local users?! Verify `icacls` on a migrated .bak). The version gate: `version > 2` — what about non-numeric `config_version` (as_u64 → None → treated as v1; is that right vs corrupt?)? |
+| (C-4) | Spec behaviors missing: no `.bak` on v1→v2 migration (WP3-I05), no unknown-version rejection (WP3-N04). | `config.rs:134-146` (>2 → None); `config.rs:226-262` (.bak only when disk is v1 AND no .bak exists) | **UPDATE 2026-09-02, during package prep: the `.bak` plaintext-ACL leak was CONFIRMED and FIXED.** Evidence: `C:\ProgramData\HMS` grants inherited `BUILTIN\Users:(OI)(CI)(M)` — a plain `fs::copy` .bak left the plaintext v1 DB password modifiable by every local user. Fix in `config.rs:240-261`: the .bak now gets the same icacls hardening as config.json (SYSTEM/Admins full + current-user read). **Your checks:** run `wp3_u10`, then `icacls` the .bak in the test temp dir; confirm a FAILED icacls doesn't block the save (best-effort is intentional — is that acceptable for a plaintext holder?); confirm the read-only user grant suffices for any legitimate .bak consumer. Also: the version gate `version > 2` — what about non-numeric `config_version` (as_u64 → None → treated as v1; right vs corrupt?)? |
 
 ---
 
@@ -138,11 +138,13 @@ tests); all are the cargo feature; confirm `cargo build` (no features) compiles 
    overwrite; try to construct a payload that (a) plants a `db_password`, (b) unsets
    `setup_complete` to re-open first-run flows, (c) swaps `pinned_server_fingerprint`
    (TLS pinning bypass?). The test suite covers the happy path; adversarial payloads are yours.
-2. **The `.bak` plaintext leak (`config.rs:226-240`)** — my own §2 table flags this as
-   unverified: `fs::copy` does not ACL-harden the destination. On Windows the .bak may
-   inherit the HMS dir's Users-modify ACEs → last-known plaintext DB password readable
-   by any local user. Verify with icacls on a real migrated file; if confirmed, this is
-   a finding (severity: medium-high; fix: ACL the .bak like config.json).
+2. **The `.bak` plaintext leak (`config.rs:226-262`)** — **RESOLVED during package
+   preparation**: the leak was confirmed real (the HMS dir's inherited `Users:(OI)(CI)(M)`
+   ACE applies to new files, so the plain-`fs::copy` .bak left the plaintext v1 DB
+   password modifiable by any local user) and fixed at `config.rs:240-261` with the
+   same icacls hardening as config.json. Verify the fix end-to-end — the checks are in
+   §2 (C-4). If the icacls ordering, quoting, or best-effort semantics are wrong
+   anywhere, that is a genuine finding.
 3. **ACL grants (`config.rs:278-287`, `tls_provision.rs:137-143`)** — including the
    questions in the VF-VERIF-004 row. Also grep for OTHER ACL sites
    (`auth.rs` bootstrap-credentials writer, `pg_provision.rs`) — the same lockout bug
@@ -243,7 +245,8 @@ Produce findings as: `ID | severity (P0-P3) | file:line | claim | evidence (comm
 For each, state whether it invalidates a claim in `docs/VERIFICATION-REPORT-WP1-WP3.md`
 or this package. **Explicitly attest or refute** these five, in one line each:
 (a) the `save_config` merge cannot plant a password from the webview;
-(b) the `.bak` file is not world-readable after migration;
+(b) the `.bak` fix at `config.rs:240-261` genuinely hardens the .bak on migration
+    (the pre-fix plaintext leak was real — run `wp3_u10` and `icacls` the .bak);
 (c) every core extraction is behaviorally identical to its `f2f669e` predecessor;
 (d) the ACL grants cannot be abused via a forged `USERNAME`;
 (e) no test or harness path can write to `hospital_db`.
