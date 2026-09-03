@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20260902T085850618Z-24716-ba47f63092b8",
+  "runStatus": "inconclusive",
+  "errors": [
+    "bash-discovery:.: bash_discovery_incomplete: task baseline unavailable",
+    "baseline:.: baseline_missing: task baseline is unavailable"
+  ],
+  "target": ".",
+  "revision": "f2f669ea65540c996eedde381dc9b70f889280ce",
+  "diffHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-09-02T08:58:50.618Z",
+  "timing": {
+    "startedAt": "2026-09-02T08:58:49.570Z",
+    "completedAt": "2026-09-02T08:58:50.618Z",
+    "durationMs": 1048
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "bash_discovery_incomplete": 1,
+      "baseline_missing": 1,
+      "project_check_failed": 2
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_1c73df3d-983f-4ca1-9fbd-a00359165ae5-20260902T085850618Z-24716-ba47f63092b8.json"
+}

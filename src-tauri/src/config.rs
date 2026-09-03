@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::Manager;
 
 /// Application configuration persisted to config.json.
@@ -17,7 +17,14 @@ pub struct AppConfig {
     pub db_host: String,
     pub db_port: u16,
     pub db_user: String,
-    #[serde(skip_serializing)]
+    /// SECURITY: `#[serde(skip_serializing)]` keeps the password out of every
+    /// JSON payload — including the `get_config` IPC reply, so the frontend
+    /// never receives it. `default` additionally makes the field OPTIONAL on
+    /// deserialization: a `save_config` round-trip (which cannot echo the
+    /// password back because it never received it) must not fail with
+    /// "missing field db_password" — VF-VERIF-002. `AppConfig::load` and
+    /// `repair_server_config` set the real value in memory after parsing.
+    #[serde(skip_serializing, default)]
     pub db_password: String,
     pub db_name: String,
     pub clinic_name: String,
@@ -89,12 +96,49 @@ impl AppConfig {
         Self::user_config_path(app_handle)
     }
 
+    /// AERP Part G (config_tests): same resolution as `config_path` without
+    /// needing an AppHandle. Only the app-config-dir fallback differs —
+    /// tests always place their config at the machine path (ProgramData),
+    /// which `config_path` prefers whenever the file exists, so behavior
+    /// under test is identical to production resolution.
+    #[cfg(feature = "hms-integration-tests")]
+    pub fn config_path_for_tests() -> Option<PathBuf> {
+        Self::machine_config_path().filter(|p| p.exists())
+    }
+
     pub fn load(app_handle: &tauri::AppHandle) -> Option<Self> {
-        let content = fs::read_to_string(Self::config_path(app_handle)).ok()?;
+        let path = Self::config_path(app_handle);
+        Self::load_from_inner(&path)
+    }
+
+    /// AERP Part G (config_tests): AppHandle-free load from an explicit
+    /// path. Identical semantics to `load` — same parse / migrate /
+    /// unknown-version-reject / decrypt pipeline.
+    #[cfg(feature = "hms-integration-tests")]
+    pub fn load_from(path: &Path) -> Option<Self> {
+        Self::load_from_inner(path)
+    }
+
+    fn load_from_inner(path: &Path) -> Option<Self> {
+        let content = fs::read_to_string(path).ok()?;
 
         // Parse as generic JSON to check config_version.
         let json: serde_json::Value = serde_json::from_str(&content).ok()?;
         let version = json.get("config_version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+
+        // WP3-N04 (AERP Part G): reject config files from a NEWER format
+        // version than this binary understands. Silently treating an unknown
+        // future version as v1/v2 could mis-handle fields we don't know
+        // about (e.g. a v3 with a different encryption envelope would be
+        // decrypted as garbage or, worse, parsed as plaintext v1).
+        if version > 2 {
+            eprintln!(
+                "[HMS CONFIG] ERROR: config.json has unknown config_version {} (this build supports 1 and 2). \
+                 Refusing to load — update the application or restore a compatible config backup.",
+                version
+            );
+            return None;
+        }
 
         let mut cfg: AppConfig = serde_json::from_value(json).ok()?;
 
@@ -130,6 +174,19 @@ impl AppConfig {
     /// private key. Any local user can no longer read the credentials. (Full
     /// DPAPI encryption of the password field is tracked as a Batch 3 item.)
     pub fn save(&self, app_handle: &tauri::AppHandle) -> Result<(), String> {
+        let path = Self::config_path(app_handle);
+        self.save_to_inner(&path)
+    }
+
+    /// AERP Part G (config_tests): AppHandle-free save to an explicit
+    /// path. Identical semantics to `save` — encryption, .bak backup on
+    /// v1→v2 migration, atomic write, ACL hardening.
+    #[cfg(feature = "hms-integration-tests")]
+    pub fn save_to(&self, path: &Path) -> Result<(), String> {
+        self.save_to_inner(path)
+    }
+
+    fn save_to_inner(&self, path: &Path) -> Result<(), String> {
         // RCTF-IMPL-001 WP-3: encrypt db_password before writing to disk.
         let mut save_cfg = self.clone();
         if !save_cfg.db_password.is_empty() {
@@ -139,34 +196,122 @@ impl AppConfig {
             save_cfg.config_version = 2;
         }
 
-        let content = serde_json::to_string_pretty(&save_cfg).map_err(|e| e.to_string())?;
-        let path = Self::config_path(app_handle);
+        // VF-VERIF-003: `db_password_encrypted` is `#[serde(skip_serializing)]`
+        // so it never leaks through the `get_config` IPC reply. But `save()`
+        // serializes this same struct for the DISK write, where the field is
+        // required — a v2 file without the blob decrypts to an empty password
+        // on next launch and bricks the DB connection. Re-inject it into the
+        // JSON object after struct serialization, keeping the IPC-safe
+        // skip_serializing property intact.
+        let mut json: serde_json::Value =
+            serde_json::to_value(&save_cfg).map_err(|e| e.to_string())?;
+        if save_cfg.db_password_encrypted.is_some() {
+            json["db_password_encrypted"] =
+                serde_json::Value::String(save_cfg.db_password_encrypted.clone().unwrap());
+        }
+        let content = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
 
-        // Atomic write: temp file + rename.
-        let tmp = path.with_extension("json.tmp");
+        // WP3-I05 (AERP Part G): before the FIRST v1→v2 migration overwrites
+        // the on-disk file, preserve the current file as `config.json.bak`.
+        // The v1 file contains the last known-good plaintext password; if the
+        // v2 write later turns out unreadable (corrupt blob, ACL issue, DPAPI
+        // key loss), the operator has a recovery path that does not require
+        // re-provisioning PostgreSQL. Only written when the existing file is
+        // still v1 (a v2 file already exists → this is not a migration) and
+        // no .bak already exists (never clobber the original v1 backup).
+        if save_cfg.config_version == 2 {
+            let is_v1_on_disk = fs::read_to_string(path)
+                .ok()
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+                .map(|j| j.get("config_version").and_then(|v| v.as_u64()).unwrap_or(1) < 2)
+                .unwrap_or(false);
+            if is_v1_on_disk {
+                let bak = path.with_extension("json.bak");
+                if !bak.exists() {
+                    // Best-effort: a failed backup must not block the save —
+                    // the atomic write below is the critical path.
+                    let _ = fs::copy(path, &bak);
+
+                    // The .bak holds the PLAINTEXT v1 password, so it MUST get
+                    // the same ACL hardening as config.json itself. A plain
+                    // fs::copy inherits the parent dir's ACEs (Users:Modify on
+                    // C:\ProgramData\HMS) — leaving the last known-good
+                    // password readable by every local user. Match the
+                    // config.json ACL policy below (VF-VERIF-004 grants).
+                    #[cfg(target_os = "windows")]
+                    {
+                        let mut icacls = std::process::Command::new("icacls");
+                        icacls.arg(bak.as_os_str())
+                            .args(["/inheritance:r"])
+                            .args(["/grant:r", "SYSTEM:F"])
+                            .args(["/grant:r", "Administrators:F"]);
+                        if let Some(user) = std::env::var_os("USERNAME") {
+                            let _ = icacls.arg(format!("{}:(R)", user.to_string_lossy()));
+                        }
+                        let _ = icacls
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                    }
+                }
+            }
+        }
+
+        // Atomic write: temp file + rename. WP3-C01 (AERP Part G): the temp
+        // name must be UNIQUE per call — a fixed "config.json.tmp" lets two
+        // concurrent saves race on the same temp file (one thread renames it
+        // away while the other is mid-write → the loser's rename fails with
+        // os error 2). Uniqueness by pid + nanos + a process-local counter
+        // keeps each writer's rename atomic with no shared intermediate.
+        let unique = format!(
+            "{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0),
+            {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static SEQ: AtomicU64 = AtomicU64::new(0);
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            }
+        );
+        let tmp = path.with_file_name(format!("config.{}.json.tmp", unique));
         fs::write(&tmp, &content).map_err(|e| format!("Write config tmp: {}", e))?;
-        fs::rename(&tmp, &path).map_err(|e| {
+        fs::rename(&tmp, path).map_err(|e| {
             // Best-effort cleanup of the temp file on rename failure.
             let _ = fs::remove_file(&tmp);
             format!("Rename config: {}", e)
         })?;
 
-        // Windows: ACL-harden the file so only SYSTEM + Administrators can read it.
+        // Windows: ACL-harden the file. VF-VERIF-004: SYSTEM + Administrators
+        // only made the file unreadable by the app itself on the next launch
+        // (the app runs as the logged-in, non-admin user), so `load()` failed,
+        // the startup path mis-reported "config.json missing", and every
+        // subsequent launch was dead. Grant the current user READ in addition
+        // to the admin grants — the file still denies every other non-admin
+        // account, and the password inside is DPAPI-encrypted anyway (v2).
         #[cfg(target_os = "windows")]
         {
-            // icacls: reset inheritance, grant SYSTEM + Administrators full, remove everyone else.
-            let icacls = std::process::Command::new("icacls")
-                .arg(path.as_os_str())
+            let mut icacls = std::process::Command::new("icacls");
+            icacls.arg(path.as_os_str())
                 .args(["/inheritance:r"])
                 .args(["/grant:r", "SYSTEM:F"])
-                .args(["/grant:r", "Administrators:F"])
+                .args(["/grant:r", "Administrators:F"]);
+            if let Some(user) = std::env::var_os("USERNAME") {
+                // VF-VERIF-004: Modify (not just Read) — `save()` writes a
+                // temp file and RENAMES it over this one; rename needs DELETE
+                // on the target, which Read alone does not grant.
+                let _ = icacls.arg(format!("{}:(M)", user.to_string_lossy()));
+            }
+            let status = icacls
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
-            if let Err(e) = icacls {
+            if let Err(e) = status {
                 eprintln!("[HMS CONFIG] Warning: could not ACL-harden config.json ({}). \
                            The file may be readable by other local users.", e);
             }
@@ -248,7 +393,26 @@ pub async fn save_config(
             ).await;
         }
     }
-    config.save(&app_handle)
+    // VF-VERIF-002: merge instead of blind persist. The frontend receives
+    // AppConfig from `get_config` WITHOUT db_password (skip_serializing — the
+    // password must never cross IPC), so a save_config round-trip posts a
+    // payload whose db_password is empty. Persisting that payload verbatim
+    // would wipe the stored password and break the DB connection on next
+    // launch. Merge the UI-editable fields onto the freshly-loaded config so
+    // credentials (and any on-disk encryption state) are preserved from disk,
+    // not from the webview.
+    let mut merged = existing.unwrap_or_else(|| config.clone());
+    merged.mode = config.mode;
+    merged.db_host = config.db_host;
+    merged.db_port = config.db_port;
+    merged.db_user = config.db_user;
+    merged.db_name = config.db_name;
+    merged.clinic_name = config.clinic_name;
+    merged.doctors_whatsapp_group = config.doctors_whatsapp_group;
+    merged.setup_complete = config.setup_complete;
+    merged.pinned_server_cert_pem = config.pinned_server_cert_pem;
+    merged.pinned_server_fingerprint = config.pinned_server_fingerprint;
+    merged.save(&app_handle)
 }
 
 #[tauri::command]
