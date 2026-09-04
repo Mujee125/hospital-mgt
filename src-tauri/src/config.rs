@@ -377,23 +377,29 @@ pub async fn save_config(
     session_state: tauri::State<'_, crate::rbac::SessionState>,
     config: AppConfig,
 ) -> Result<(), String> {
-    // If setup is already complete AND a session exists, require SettingsManage.
-    // Pre-login (first-run Setup) is allowed.
+    // Review Pass 2, Finding 1 (P0, 2026-09-04): FAIL CLOSED once setup is
+    // complete. The old gate only enforced SettingsManage when a session
+    // EXISTED — after logout (SessionState == None) on a configured machine,
+    // save_config proceeded with no permission check and no audit row,
+    // letting a tampered webview flip setup_complete or swap the TLS pin.
+    // require_config_mutation denies the no-session case outright once
+    // setup_complete is true; only a genuine first-run (setup never
+    // completed) may proceed unauthenticated.
     let existing = AppConfig::load(&app_handle);
-    if existing.as_ref().map(|c| c.setup_complete).unwrap_or(false) {
-        if let Some(s) = crate::rbac::require_if_session(
-            &session_state,
-            crate::rbac::Permission::SettingsManage,
-        )? {
-            crate::audit::for_session(
-                &app_handle.state::<sqlx::PgPool>(),
-                &s,
-                "config_save",
-                "config",
-                None,
-                Some(serde_json::json!({"db_host": config.db_host, "db_port": config.db_port})),
-            ).await;
-        }
+    let session = crate::rbac::require_config_mutation(
+        &session_state,
+        existing.as_ref().map(|c| c.setup_complete).unwrap_or(false),
+        crate::rbac::Permission::SettingsManage,
+    )?;
+    if session.user_id != 0 {
+        crate::audit::for_session(
+            &app_handle.state::<sqlx::PgPool>(),
+            &session,
+            "config_save",
+            "config",
+            None,
+            Some(serde_json::json!({"db_host": config.db_host, "db_port": config.db_port})),
+        ).await;
     }
     // VF-VERIF-002: merge instead of blind persist. The frontend receives
     // AppConfig from `get_config` WITHOUT db_password (skip_serializing — the
@@ -475,23 +481,25 @@ pub async fn repair_server_config(
     if db_password.trim().is_empty() {
         return Err("Database password cannot be empty.".to_string());
     }
-    // If setup is already complete AND a session exists, require SettingsManage.
-    // Pre-login (first-run Setup) is allowed.
+    // Review Pass 2, Finding 1 (P0, 2026-09-04): fail closed once setup is
+    // complete — see save_config. This command is the more dangerous one:
+    // it writes a NEW plaintext db_password (not merged), so the no-session
+    // post-logout window made it a credential-replacement primitive.
     let existing = AppConfig::load(&app_handle);
-    if existing.as_ref().map(|c| c.setup_complete).unwrap_or(false) {
-        if let Some(s) = crate::rbac::require_if_session(
-            &session_state,
-            crate::rbac::Permission::SettingsManage,
-        )? {
-            crate::audit::for_session(
-                &app_handle.state::<sqlx::PgPool>(),
-                &s,
-                "config_repair",
-                "config",
-                None,
-                None,
-            ).await;
-        }
+    let session = crate::rbac::require_config_mutation(
+        &session_state,
+        existing.as_ref().map(|c| c.setup_complete).unwrap_or(false),
+        crate::rbac::Permission::SettingsManage,
+    )?;
+    if session.user_id != 0 {
+        crate::audit::for_session(
+            &app_handle.state::<sqlx::PgPool>(),
+            &session,
+            "config_repair",
+            "config",
+            None,
+            None,
+        ).await;
     }
     let mut cfg = AppConfig::load(&app_handle).unwrap_or_default();
     cfg.mode          = "server".to_string();
@@ -520,23 +528,26 @@ pub async fn clear_config(
     app_handle: tauri::AppHandle,
     session_state: tauri::State<'_, crate::rbac::SessionState>,
 ) -> Result<(), String> {
-    // If setup is already complete AND a session exists, require SettingsManage.
-    // Pre-login (first-run Setup / reconfigure) is allowed.
+    // Review Pass 2, Finding 1 (P0, 2026-09-04): fail closed once setup is
+    // complete — see save_config. clear_config on a configured machine is
+    // effectively an auth-reset primitive (deleting config re-opens the
+    // unauthenticated first-run window), so it must never be reachable
+    // without a SettingsManage session once setup_complete is true.
     let existing = AppConfig::load(&app_handle);
-    if existing.as_ref().map(|c| c.setup_complete).unwrap_or(false) {
-        if let Some(s) = crate::rbac::require_if_session(
-            &session_state,
-            crate::rbac::Permission::SettingsManage,
-        )? {
-            crate::audit::for_session(
-                &app_handle.state::<sqlx::PgPool>(),
-                &s,
-                "config_clear",
-                "config",
-                None,
-                None,
-            ).await;
-        }
+    let session = crate::rbac::require_config_mutation(
+        &session_state,
+        existing.as_ref().map(|c| c.setup_complete).unwrap_or(false),
+        crate::rbac::Permission::SettingsManage,
+    )?;
+    if session.user_id != 0 {
+        crate::audit::for_session(
+            &app_handle.state::<sqlx::PgPool>(),
+            &session,
+            "config_clear",
+            "config",
+            None,
+            None,
+        ).await;
     }
     let path = AppConfig::config_path(&app_handle);
     if path.exists() {

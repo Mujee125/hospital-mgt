@@ -15,6 +15,7 @@ export const PERMISSIONS = {
   PatientsUpdate: "patients.update",
   PatientsDelete: "patients.delete",
   PatientConsentManage: "patients.consent.manage",
+  PrescriptionsCreate: "prescriptions.create",
   AppointmentsView: "appointments.view",
   AppointmentsCreate: "appointments.create",
   AppointmentsUpdate: "appointments.update",

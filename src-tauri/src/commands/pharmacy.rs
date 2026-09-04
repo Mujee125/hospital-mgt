@@ -338,7 +338,12 @@ pub async fn create_prescription(
     session: tauri::State<'_, SessionState>,
     prescription: CreatePrescription,
 ) -> Result<i32, String> {
-    let s = rbac::require_strong(&session, pool.inner(), Permission::PatientsCreate).await?;
+    // Review Pass 2, Finding 2 (2026-09-04): guarded by PrescriptionsCreate,
+    // NOT PatientsCreate. Receptionists hold PatientsCreate (front-desk
+    // registration) and were therefore able to write prescriptions — a
+    // prescribing-authority bypass. Only doctors (and super admins) have
+    // PrescriptionsCreate.
+    let s = rbac::require_strong(&session, pool.inner(), Permission::PrescriptionsCreate).await?;
     if prescription.items.is_empty() {
         return Err("A prescription must have at least one medication item.".to_string());
     }

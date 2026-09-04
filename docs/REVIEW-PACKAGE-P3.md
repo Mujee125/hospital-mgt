@@ -36,43 +36,44 @@ author could not see in their own work.
 | `2218ea5` | Jul 12 | Initial commit — pre-AERP application, no `require_strong`, no WhatsApp permissions, no `secrets.rs` | true baseline |
 | `f2f669e` | Aug 18 | Mixed user commit — does **NOT contain Set A** (verified: `git show f2f669e:src-tauri/src/rbac.rs \| grep -c require_strong` → 0) | — |
 | `abbc01b` | Sep 2 23:56 | **Set A: the ENTIRE WP-1..3 authorization surface** — `rbac.rs` (+143: `require_strong`, `token_hash`, WhatsApp permissions), `secrets.rs` (+190, whole file), all 34 guard call-sites across 7 `commands/*.rs` + `whatsapp/commands.rs` + `auth.rs`, frontend RBAC (`rbac.ts`, Login/Patients/Setup pages) | **ZERO independent review to date** — this, not Set B/C, is the largest unaudited change-set in the repo |
-| `795b418` | Sep 3 | **Sets B+C**: Windows-verification fixes (VF-VERIF-001..004) + test round (cores, 3 new suites, 4 repaired legacy suites, `.bak`+version-gate fixes) | reviewed once (first pass, partially) |
+| `795b418` | Sep 3 | **Sets B+C**: Windows-verification fixes (VF-VERIF-001..004) + test round (cores, 3 new suites, 4 repaired legacy suites, `.bak`+version-gate fixes) | reviewed pass 1 (partially) and pass 2 (targeted) |
 | `7f630e5` | Sep 3 | `.mimosa/` tool-state artifacts + this package's `.bak` edits | now untracked (F-3 remediated) |
+| `d31d3b8` | Sep 3 | user commit (`.mimosa` deletion) | hygiene |
+| `d77d09a` | Sep 4 | pass-1 F-4/F-5 fixes to `config.rs` (loopback pin, ACL-before-rename) | committed without package update — the pass-2 meta-finding |
+| *(later)* | — | the repo MAY have moved again past this point. **This table is inherently stale.** | — |
 
-**Therefore your review scope is `2218ea5..HEAD`, application code only:**
+### Scope — by DESIGN there are no hand-typed diff numbers in this package anymore.
 
+Pass 2 of the review demonstrated why: both pass-1 and pass-2 of this package printed
+diff statistics that were wrong the moment code (or even a `.mimosa` artifact) moved.
+The stop-rule fired correctly both times — so now the rule IS the scope section:
+
+**Step 0 (mandatory, before anything else):**
 ```bash
-git diff --stat 2218ea5..HEAD -- src-tauri/src src-tauri/tests src docs
+git fetch origin && git log --oneline -8                  # what exists NOW?
+git diff --stat 2218ea5..HEAD -- src-tauri/src src-tauri/tests src docs   # true scope
 ```
-Expect ~26 files, ≈+1,843/−1,534 application lines (Set A ≈ +544/−323 net of the 26-file
-`f2f669e..abbc01b` stat; Sets B+C = 16 files +2,627/−211 per `git show --stat 795b418`).
-`.mimosa/`, `Cargo.lock`, `package-lock.json`, playwright/dist artifacts are excluded —
-regenerate the stat yourself and reconcile against these numbers before starting;
-**if the numbers disagree, the repo has moved and this package is stale — stop and re-scope.**
+Then read the per-commit table above against what you see. Anything after the last
+commit listed here is UNREVIEWED — treat it as a new change-set needing its own pass.
+The set composition (what to look for in each file) lives in §2/§3 and remains valid;
+only the commit hashes and counts drift.
 
-Untracked-but-authored files (part of scope):
-```
- docs/VERIFICATION-REPORT-WP1-WP3.md, docs/REVIEW-PACKAGE-P3.md (this file)
-```
-
-To review Set A too (recommended — it was never independently reviewed either):
-it is the diff `2218ea5 → f2f669e`, concentrated in `rbac.rs`, `auth.rs`,
-`whatsapp/commands.rs`, `config.rs`, `secrets.rs` (new file), plus 34 guard call-site
-changes across `commands/*.rs`. The Handoff (`documentation/VitalFlow-HMS-Project-Handoff.md`
-§4 "Files Modified by Implementation") tabulates it.
-
-**Reproduce the test suite before reading any code** (30 min, gives you ground truth):
+**Reproduce the test suite before reading any code** (~30 min, gives you ground truth):
 ```bash
 cd E:\hospital-mgt\hospital-mgt\src-tauri
 # <pw> = the DPAPI-decrypted db password; see §6 note if you can't read it
 HMS_TEST_DB_URL="postgresql://postgres:<pw>@127.0.0.1:5432/postgres?sslmode=require" \
   cargo test --features hms-integration-tests --tests -- --test-threads=1
 ```
-Expected: 205 passing (103 lib + 14 config + 20 WP-1 + 28 WP-2 + 15/12/9/4 legacy).
-Gates: `cargo check --lib` 0 errors, `cargo clippy --lib` 0 warnings,
-`npx tsc --noEmit` / `npx eslint .` exit 0, `npx vitest run` 109 pass.
+As of the 2026-09-04 pass-2 fixes: **212 passing, authoritatively re-run 2026-09-04**
+(110 lib incl. pass-2 regressions, 14 config, 20 WP-1, 28 WP-2, 40 legacy).
+Re-derive the count from your own run — do not trust this number either. Gates: `cargo check --lib` 0 errors (both
+feature paths), `cargo clippy --lib` 0 warnings, `npx tsc --noEmit` / `npx eslint .`
+exit 0, `npx vitest run` passes.
 The suite runs against an isolated `hospital_db_test` it creates itself; production
 `hospital_db` is never touched (verified post-run; see §6 note 3).
+Build-environment warning: do NOT build while VS Code's rust-analyzer is running —
+it races cargo on the same target dir and produces phantom E0463/E0786 errors.
 
 ---
 
@@ -275,4 +276,30 @@ using the corrected `2218ea5..HEAD` diff from §1.
 
 ---
 
-*End of review package (rev 2, 2026-09-03). Good hunting — the author genuinely wants you to find something.*
+## §9 — Second-pass findings & dispositions (ADDRESSED 2026-09-04)
+
+Pass 2 (fresh external reviewer, cloned repo, targeted §4 pass) returned one meta-finding
+and two code findings. Both code findings **confirmed and fixed**; the meta-finding
+triggered the §1 redesign above.
+
+| ID | Severity | Verdict | Disposition |
+|---|---|---|---|
+| Meta | — | **Accepted** — the package's own stop-rule fired: rev 2's hand-typed stats (claimed ~26 files +1,843/−1,534; actual 33 files +3,488/−810) were stale because the pass-1 F-4/F-5 fixes were committed (`d77d09a`) after rev 2 was written. Symptom fixed twice, cause reproduced twice. | **§1 redesigned: no hand-typed diff numbers remain in this package.** Scope is now the per-commit table (which self-declares its own staleness) + the mandatory regenerate-first rule. |
+| F-1 (P2-1) | **P0** | **Confirmed** — `save_config` / `repair_server_config` / `clear_config` failed OPEN whenever `SessionState == None` (the post-logout state) on a configured machine: no permission check, no audit row. A tampered webview could unset `setup_complete` or swap the pinned TLS cert; `repair_server_config` could additionally replace the DB credential. No test covered it. | **Fixed:** new fail-closed gate `rbac::require_config_mutation` (rbac.rs) wired into all three commands. Once `setup_complete == true`, config mutation REQUIRES a signed-in `SettingsManage` session — no-session is denied outright. The unauthenticated path exists ONLY while setup has never completed (genuine first run). Recovery path preserved: an operator with file-admin rights can delete the corrupt config.json (ACL-hardened against non-admins) to re-enter first-run setup. Regression tests added (fail-closed configured + no-session → deny; first-run + no-session → allow; configured + session-without-permission → deny; first-run + signed-in low-priv user → deny). |
+| F-2 (P2-2) | **P1** | **Confirmed** — `create_prescription` was guarded by `PatientsCreate`, which both doctor AND receptionist hold → **receptionists could write prescriptions**. The §4.4 "syntactic not semantic" warning, concretely instantiated. | **Fixed:** new `PrescriptionsCreate` permission (`prescriptions.create`), granted to doctor + super_admin only; guard swapped in `pharmacy.rs`; frontend `rbac.ts` mirrored; regression tests (receptionist/nurse/pharmacist lack it; doctor has it). |
+
+**Attestation deltas from pass 2:** (a) is now the *right* question answered correctly —
+the merge whitelist was always safe; the AUTH GATE was not, and now fails closed;
+(c) `login_core` spot-checked (lockout/dummy-verify/session-DELETE intact) — full
+six-pair fidelity diff still open; (d), (e) still open from pass 1.
+
+**Remaining open for pass 3:** Set A semantic review (§8 re-review scope), the full
+core-extraction fidelity diff (§3), §4 items 4–7 semantics, forged-`USERNAME` depth-test
+((d)), and harness URL-construction grep ((e)). Also: no integration test yet pins
+`create_prescription` end-to-end under a receptionist session — the fix is unit- and
+guard-tested, but the command-level wiring is only covered by the wp2_i11 source
+inventory and manual inspection.
+
+---
+
+*End of review package (rev 3, 2026-09-04). Good hunting — the author genuinely wants you to find something.*

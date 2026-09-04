@@ -33,6 +33,12 @@ pub enum Permission {
     PatientsUpdate,
     PatientsDelete,
     PatientConsentManage,
+    // Prescriptions (pharmacy) — prescribing authority is distinct from
+    // patient registration: a receptionist registers patients but must
+    // never write prescriptions. (Review Pass 2, Finding 2, 2026-09-04:
+    // create_prescription was previously guarded by PatientsCreate, which
+    // both doctor AND receptionist hold.)
+    PrescriptionsCreate,
     // Appointments
     AppointmentsView,
     AppointmentsCreate,
@@ -111,6 +117,7 @@ impl Permission {
             Permission::PatientsUpdate => "patients.update",
             Permission::PatientsDelete => "patients.delete",
             Permission::PatientConsentManage => "patients.consent.manage",
+            Permission::PrescriptionsCreate => "prescriptions.create",
             Permission::AppointmentsView => "appointments.view",
             Permission::AppointmentsCreate => "appointments.create",
             Permission::AppointmentsUpdate => "appointments.update",
@@ -171,6 +178,7 @@ impl Permission {
             Permission::PatientsUpdate,
             Permission::PatientsDelete,
             Permission::PatientConsentManage,
+            Permission::PrescriptionsCreate,
             Permission::AppointmentsView,
             Permission::AppointmentsCreate,
             Permission::AppointmentsUpdate,
@@ -248,6 +256,7 @@ pub fn permissions_for_role(role: &str) -> Vec<Permission> {
             BillingView, InventoryView, PatientConsentManage, AuditView, ReportsView,
             MessagingView, MessagingSend,
             WhatsAppSend, WhatsAppView,
+            PrescriptionsCreate,
         ],
         ROLE_NURSE => vec![
             DashboardView, PatientsView, PatientsUpdate, AppointmentsView,
@@ -432,6 +441,63 @@ pub fn require_if_session(
     }
 }
 
+/// Review Pass 2, Finding 1 (P0, 2026-09-04): fail-closed guard for config
+/// mutation on a system whose setup is ALREADY complete.
+///
+/// The problem with `require_if_session` for this use: it returns `Ok(None)`
+/// ("allow") whenever no session exists — correct for the true first-run
+/// Setup screen, but `SessionState` is also `None` after LOGOUT on a
+/// configured machine. In that window `save_config` / `repair_server_config`
+/// proceeded with no permission check and no audit row (the reviewer
+/// constructed exactly the §4.1 adversarial payloads: unset
+/// `setup_complete`, swap the pinned TLS cert).
+///
+/// This gate distinguishes the two "no session" situations the only way
+/// the server can: it does NOT. Absence of a session is indistinguishable
+/// from "post-logout on a configured machine" vs "first-run before any
+/// admin exists." The safe rule: once `setup_complete` is true, config
+/// mutation REQUIRES an authenticated, permission-holding session — the
+/// pre-setup flow is only permitted while setup has never completed. Local
+/// co-resident attackers during the genuine first-run window are handled
+/// at the transport/IPC layer (the Tauri webview), and the server-build
+/// host pin (F-4) bounds what a first-run payload can reach.
+pub fn require_config_mutation(
+    state: &SessionState,
+    setup_complete: bool,
+    perm: Permission,
+) -> Result<Session, String> {
+    if !setup_complete {
+        // First-run Setup (before configuration exists): allowed without a
+        // session — this is the boot flow that creates the initial config.
+        // Deny if a session EXISTS but lacks the permission (a logged-in
+        // low-privilege user must not be able to steer first-run setup).
+        if let Some(s) = state.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            if !s.has(perm) {
+                return Err(format!(
+                    "Access denied: this action requires the '{}' permission.",
+                    perm.as_str()
+                ));
+            }
+        }
+        return Ok(state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or(Session {
+                user_id: 0,
+                username: "system-setup".to_string(),
+                full_name: "First-run setup".to_string(),
+                roles: vec![],
+                permissions: Default::default(),
+                token_hash: String::new(),
+            }));
+    }
+    // Setup complete: a permission-holding session is REQUIRED — no
+    // session means post-logout (or pre-login on a configured machine);
+    // fail closed in both cases.
+    require(state, perm)
+}
+
 
 #[cfg(test)]
 mod wp1_tests {
@@ -508,5 +574,82 @@ mod wp1_tests {
         let perms = permissions_for_role(ROLE_SUPER_ADMIN);
         assert!(perms.contains(&Permission::WhatsAppSend));
         assert!(perms.contains(&Permission::WhatsAppView));
+    }
+
+    // ── Review Pass 2 regressions (2026-09-04) ────────────────────────────
+
+    #[test]
+    fn test_prescriptions_create_permission_exists() {
+        assert_eq!(Permission::PrescriptionsCreate.as_str(), "prescriptions.create");
+        assert!(Permission::all().contains(&Permission::PrescriptionsCreate));
+    }
+
+    #[test]
+    fn test_doctor_has_prescriptions_create() {
+        let perms = permissions_for_role(ROLE_DOCTOR);
+        assert!(perms.contains(&Permission::PrescriptionsCreate));
+    }
+
+    #[test]
+    fn test_receptionist_lacks_prescriptions_create() {
+        // Review Pass 2 Finding 2: receptionists hold PatientsCreate but
+        // must NOT hold PrescriptionsCreate.
+        let perms = permissions_for_role(ROLE_RECEPTIONIST);
+        assert!(perms.contains(&Permission::PatientsCreate));
+        assert!(!perms.contains(&Permission::PrescriptionsCreate));
+    }
+
+    #[test]
+    fn test_nurse_and_pharmacist_lack_prescriptions_create() {
+        assert!(!permissions_for_role(ROLE_NURSE).contains(&Permission::PrescriptionsCreate));
+        assert!(!permissions_for_role(ROLE_PHARMACIST).contains(&Permission::PrescriptionsCreate));
+    }
+
+    #[test]
+    fn test_config_mutation_gate_fail_closed_when_configured() {
+        // Review Pass 2 Finding 1 (P0): on a configured machine, NO session
+        // (the post-logout state) must be DENIED for config mutation.
+        let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let r = require_config_mutation(&state, true, Permission::SettingsManage);
+        assert!(r.is_err(), "no-session + setup_complete must fail closed");
+    }
+
+    #[test]
+    fn test_config_mutation_gate_open_on_first_run() {
+        // Genuine first-run (setup never completed): no session allowed.
+        let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let r = require_config_mutation(&state, false, Permission::SettingsManage);
+        assert!(r.is_ok(), "first-run must be reachable pre-login");
+    }
+
+    #[test]
+    fn test_config_mutation_gate_configured_with_session() {
+        // Configured + session that HOLDS the permission → allow.
+        let s = Session {
+            user_id: 1,
+            username: "admin".into(),
+            full_name: "Admin".into(),
+            roles: vec![ROLE_SUPER_ADMIN.into()],
+            permissions: [Permission::SettingsManage.as_str().to_string()].into_iter().collect(),
+            token_hash: "hash".into(),
+        };
+        let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(Some(s)));
+        assert!(require_config_mutation(&state, true, Permission::SettingsManage).is_ok());
+
+        // Configured + session WITHOUT the permission → deny.
+        let s2 = Session {
+            user_id: 2,
+            username: "nurse".into(),
+            full_name: "Nurse".into(),
+            roles: vec![ROLE_NURSE.into()],
+            permissions: [].into_iter().collect(),
+            token_hash: "hash2".into(),
+        };
+        let state2: SessionState = std::sync::Arc::new(std::sync::Mutex::new(Some(s2)));
+        assert!(require_config_mutation(&state2, true, Permission::SettingsManage).is_err());
+
+        // First-run + session WITHOUT the permission → deny (a signed-in
+        // low-privilege user must not steer first-run setup either).
+        assert!(require_config_mutation(&state2, false, Permission::SettingsManage).is_err());
     }
 }
