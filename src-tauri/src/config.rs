@@ -106,6 +106,21 @@ impl AppConfig {
         Self::machine_config_path().filter(|p| p.exists())
     }
 
+    /// Review Pass 3, P3-4: tri-state disk probe for the config-mutation gate.
+    /// Distinguishes "never set up" (Missing) from "exists but unreadable"
+    /// (Corrupt) so a corrupt file on a configured machine cannot be treated
+    /// as first-run by the auth gate.
+    fn disk_config_state(app_handle: &tauri::AppHandle) -> crate::rbac::ConfigDiskState {
+        let path = Self::config_path(app_handle);
+        if !path.exists() {
+            return crate::rbac::ConfigDiskState::Missing;
+        }
+        match Self::load_from_inner(&path) {
+            Some(c) => crate::rbac::ConfigDiskState::Active { setup_complete: c.setup_complete },
+            None => crate::rbac::ConfigDiskState::Corrupt,
+        }
+    }
+
     pub fn load(app_handle: &tauri::AppHandle) -> Option<Self> {
         let path = Self::config_path(app_handle);
         Self::load_from_inner(&path)
@@ -168,11 +183,15 @@ impl AppConfig {
     /// Atomicity: write to `config.json.tmp` then `rename` → `config.json`. A
     /// crash mid-write leaves the temp file, not a truncated config. (REL-10.)
     ///
-    /// ACL hardening (CR-5, Windows only): config.json contains the plaintext
-    /// DB password, so we restrict the file ACL to `SYSTEM` + `Administrators`
-    /// only — the same treatment `pg_provision.rs` applies to the Postgres
-    /// private key. Any local user can no longer read the credentials. (Full
-    /// DPAPI encryption of the password field is tracked as a Batch 3 item.)
+    /// ACL hardening (CR-5, Windows only). RESIDUAL-THREAT NOTE (Review
+    /// Pass 3, P3-9): the v2 file no longer contains a plaintext password —
+    /// the blob is DPAPI LOCAL_MACHINE-encrypted, which ANY process on THIS
+    /// machine can transparently decrypt. The ACL's real value is therefore
+    /// TAMPER-INTEGRITY (stop other accounts modifying/replacing the config
+    /// the app trusts at boot), not confidentiality. The .bak is the one
+    /// artifact whose ACL is confidentiality-load-bearing (genuine v1
+    /// plaintext). Do not cite "plaintext password" as the reason for this
+    /// ACL again — it misdirects future hardening work.
     pub fn save(&self, app_handle: &tauri::AppHandle) -> Result<(), String> {
         let path = Self::config_path(app_handle);
         self.save_to_inner(&path)
@@ -377,29 +396,32 @@ pub async fn save_config(
     session_state: tauri::State<'_, crate::rbac::SessionState>,
     config: AppConfig,
 ) -> Result<(), String> {
-    // Review Pass 2, Finding 1 (P0, 2026-09-04): FAIL CLOSED once setup is
-    // complete. The old gate only enforced SettingsManage when a session
-    // EXISTED — after logout (SessionState == None) on a configured machine,
-    // save_config proceeded with no permission check and no audit row,
-    // letting a tampered webview flip setup_complete or swap the TLS pin.
-    // require_config_mutation denies the no-session case outright once
-    // setup_complete is true; only a genuine first-run (setup never
-    // completed) may proceed unauthenticated.
+    // Review Pass 2, Finding 1 (P0, 2026-09-04) + Pass 3 P3-4/P3-5 hardening:
+    // FAIL CLOSED once the system is configured — and crucially, "configured"
+    // is now a TRI-STATE read of disk, not `existing.map(setup_complete)`:
+    //   Missing            → first-run window (no session required)
+    //   Corrupt            → treated as configured (fail closed)
+    //   Active{true}       → SettingsManage session REQUIRED
+    // The previous formulation collapsed "file exists but unparseable" into
+    // "first run", re-opening the fail-open hole one level down (P3-4).
+    let disk = AppConfig::disk_config_state(&app_handle);
     let existing = AppConfig::load(&app_handle);
-    let session = crate::rbac::require_config_mutation(
+    match crate::rbac::require_config_mutation(
         &session_state,
-        existing.as_ref().map(|c| c.setup_complete).unwrap_or(false),
+        disk,
         crate::rbac::Permission::SettingsManage,
-    )?;
-    if session.user_id != 0 {
-        crate::audit::for_session(
-            &app_handle.state::<sqlx::PgPool>(),
-            &session,
-            "config_save",
-            "config",
-            None,
-            Some(serde_json::json!({"db_host": config.db_host, "db_port": config.db_port})),
-        ).await;
+    )? {
+        crate::rbac::ConfigMutationGrant::Authorized(s) => {
+            crate::audit::for_session(
+                &app_handle.state::<sqlx::PgPool>(),
+                &s,
+                "config_save",
+                "config",
+                None,
+                Some(serde_json::json!({"db_host": config.db_host, "db_port": config.db_port})),
+            ).await;
+        }
+        crate::rbac::ConfigMutationGrant::FirstRun => { /* no principal to audit */ }
     }
     // VF-VERIF-002: merge instead of blind persist. The frontend receives
     // AppConfig from `get_config` WITHOUT db_password (skip_serializing — the
@@ -411,19 +433,16 @@ pub async fn save_config(
     // not from the webview.
     let mut merged = existing.unwrap_or_else(|| config.clone());
 
-    // Review F-4 (independent pass, 2026-09-03): the merge whitelist excludes
-    // db_password/db_password_encrypted on the AUTHENTICATED path, but during
-    // the pre-setup window (no existing config, or setup_complete == false)
-    // the auth guard is intentionally skipped and the raw payload is
-    // accepted — by design, because Setup must be able to write a first
-    // config. A co-resident, unauthenticated process during that window can
-    // therefore also choose db_host/db_port. Mitigate the server-build case:
-    // during first-run setup the database is ALWAYS the locally provisioned
-    // PostgreSQL (SRS: one Windows server per hospital), so pin the host to
-    // loopback unless an admin later changes it through the guarded path.
+    // Review Pass 3, P3-5: the loopback window is computed from DISK state,
+    // never from the payload. With no existing config, `merged` IS the raw
+    // payload — a first-run payload of `{setup_complete: true, db_host:
+    // <remote>}` previously set `in_setup_window = false` itself and skipped
+    // this pin. Only disk proof of a completed setup releases the pin;
+    // Missing and Corrupt both count as "window" (conservative).
     #[cfg(feature = "server-build")]
     {
-        let in_setup_window = !merged.setup_complete;
+        let in_setup_window =
+            !matches!(disk, crate::rbac::ConfigDiskState::Active { setup_complete: true });
         if in_setup_window {
             let host = config.db_host.trim().to_string();
             let is_loopback = host == "127.0.0.1" || host == "localhost" || host == "::1";
@@ -481,25 +500,27 @@ pub async fn repair_server_config(
     if db_password.trim().is_empty() {
         return Err("Database password cannot be empty.".to_string());
     }
-    // Review Pass 2, Finding 1 (P0, 2026-09-04): fail closed once setup is
-    // complete — see save_config. This command is the more dangerous one:
-    // it writes a NEW plaintext db_password (not merged), so the no-session
-    // post-logout window made it a credential-replacement primitive.
-    let existing = AppConfig::load(&app_handle);
-    let session = crate::rbac::require_config_mutation(
+    // Review Pass 2 Finding 1 + Pass 3 P3-4: fail-closed tri-state gate —
+    // see save_config. This command is the more dangerous one: it writes a
+    // NEW db_password (not merged), so the unauthenticated window made it a
+    // credential-replacement primitive. Corrupt disk counts as configured.
+    let disk = AppConfig::disk_config_state(&app_handle);
+    match crate::rbac::require_config_mutation(
         &session_state,
-        existing.as_ref().map(|c| c.setup_complete).unwrap_or(false),
+        disk,
         crate::rbac::Permission::SettingsManage,
-    )?;
-    if session.user_id != 0 {
-        crate::audit::for_session(
-            &app_handle.state::<sqlx::PgPool>(),
-            &session,
-            "config_repair",
-            "config",
-            None,
-            None,
-        ).await;
+    )? {
+        crate::rbac::ConfigMutationGrant::Authorized(s) => {
+            crate::audit::for_session(
+                &app_handle.state::<sqlx::PgPool>(),
+                &s,
+                "config_repair",
+                "config",
+                None,
+                None,
+            ).await;
+        }
+        crate::rbac::ConfigMutationGrant::FirstRun => { /* no principal to audit */ }
     }
     let mut cfg = AppConfig::load(&app_handle).unwrap_or_default();
     cfg.mode          = "server".to_string();
@@ -528,26 +549,28 @@ pub async fn clear_config(
     app_handle: tauri::AppHandle,
     session_state: tauri::State<'_, crate::rbac::SessionState>,
 ) -> Result<(), String> {
-    // Review Pass 2, Finding 1 (P0, 2026-09-04): fail closed once setup is
-    // complete — see save_config. clear_config on a configured machine is
-    // effectively an auth-reset primitive (deleting config re-opens the
-    // unauthenticated first-run window), so it must never be reachable
-    // without a SettingsManage session once setup_complete is true.
-    let existing = AppConfig::load(&app_handle);
-    let session = crate::rbac::require_config_mutation(
+    // Review Pass 2 Finding 1 + Pass 3 P3-4: fail-closed tri-state gate —
+    // see save_config. clear_config on a configured machine is effectively
+    // an auth-reset primitive (deleting config re-opens the unauthenticated
+    // first-run window), so it must never be reachable without a
+    // SettingsManage session once the machine is configured (or corrupt).
+    let disk = AppConfig::disk_config_state(&app_handle);
+    match crate::rbac::require_config_mutation(
         &session_state,
-        existing.as_ref().map(|c| c.setup_complete).unwrap_or(false),
+        disk,
         crate::rbac::Permission::SettingsManage,
-    )?;
-    if session.user_id != 0 {
-        crate::audit::for_session(
-            &app_handle.state::<sqlx::PgPool>(),
-            &session,
-            "config_clear",
-            "config",
-            None,
-            None,
-        ).await;
+    )? {
+        crate::rbac::ConfigMutationGrant::Authorized(s) => {
+            crate::audit::for_session(
+                &app_handle.state::<sqlx::PgPool>(),
+                &s,
+                "config_clear",
+                "config",
+                None,
+                None,
+            ).await;
+        }
+        crate::rbac::ConfigMutationGrant::FirstRun => { /* no principal to audit */ }
     }
     let path = AppConfig::config_path(&app_handle);
     if path.exists() {

@@ -505,23 +505,31 @@ pub async fn login_core(
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    // Single active session: invalidate previous tokens.
-    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .map_err(|e| crate::db::sanitize_db_error(&e))?;
-
+    // Single active session, ATOMICALLY. Review Pass 3, P3-7: the old
+    // DELETE-then-INSERT pair was two non-transactional statements — two
+    // concurrent logins could interleave, each deleting nothing, both
+    // inserting, leaving TWO valid tokens for one user (both passing
+    // require_strong's per-token query). The UNIQUE(user_id) index (db.rs
+    // migration) + this single upsert makes the rotation one atomic
+    // statement: the new token always replaces the previous row.
     let token = random_token();
     let token_hash = hash_token(&token);
     let expires = now + Duration::hours(SESSION_HOURS);
-    sqlx::query("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)")
-        .bind(&token_hash)
-        .bind(user_id)
-        .bind(expires)
-        .execute(pool)
-        .await
-        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    sqlx::query(
+        "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3) \
+         ON CONFLICT (user_id) DO UPDATE SET \
+             token_hash = EXCLUDED.token_hash, \
+             expires_at = EXCLUDED.expires_at, \
+             issued_at  = NOW(), \
+             ip         = NULL, \
+             user_agent = NULL",
+    )
+    .bind(&token_hash)
+    .bind(user_id)
+    .bind(expires)
+    .execute(pool)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     let session = load_session(pool, user_id, &token_hash).await?;
     crate::audit::record(pool, Some(user_id), Some(&username), "login_success", "auth", None, None).await.ok();
@@ -769,6 +777,20 @@ pub async fn update_user_core(
     }
     if let Some(roles) = &request.roles {
         sync_user_roles(pool, request.id, roles).await?;
+        // Review Pass 3, P3-10: a role change can REVOKE permissions, and
+        // require_strong re-checks session VALIDITY, not the permission set
+        // (the documented L03 trade-off — in-memory snapshots persist up to
+        // the 12h session lifetime). Closing that window from the sanctioned
+        // admin path: delete the target's session rows so their next
+        // require_strong fails with "Session invalidated" and forces a
+        // re-login that reloads the (now reduced) permission set. Direct DB
+        // edits by a DBA remain outside the app's control — a DBA can delete
+        // sessions too, by definition.
+        sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+            .bind(request.id)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Invalidate target sessions: {}", e))?;
     }
 
     crate::audit::record(pool, Some(session.user_id), Some(&session.username),

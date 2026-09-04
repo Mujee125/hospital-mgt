@@ -115,7 +115,7 @@ were moved out.** Any behavioral drift here is a silent authz change.
 |---|---|---|
 | `auth.rs:413 login_core` | `login` (+ emits `session_invalidated` on success, WARN log on failure — **verify the event fires on exactly the same conditions as before**, incl. user_id) | lockout counter, dummy-verify timing, single-session DELETE, audit rows, session-state write |
 | `auth.rs:601 me_core` | `me` (pure pass-through) | token_hash SQL, expiry check, state-clear on invalid |
-| `auth.rs:745 update_user_core` | `update_user` (emits event when `is_active==Some(false) \|\| roles.is_some()` — **note the wrapper pre-computes `emits` before the call; verify no ordering bug**) | role sync, audit, cannot-target-self rules |
+| `auth.rs:745 update_user_core` | `update_user` (emits event when `is_active==Some(false) \|\| roles.is_some()` — **note the wrapper pre-computes `emits` before the call; verify no ordering bug**) | role sync, audit (pass-3 correction: there is NO cannot-target-self rule here — only `delete_user` has one; fidelity itself held) |
 | `auth.rs:821 reset_user_password_core` | `reset_user_password` (emits on success) | hash update, must_change flag, session DELETE, audit |
 | `commands/patients.rs:92 create_patient_core` | `create_patient` (pure pass-through) | require_strong guard, audit |
 | `whatsapp/commands.rs:98 send_to_patient_checks` | inline call inside `send_whatsapp_to_patient` (guard runs BEFORE checks — **verify guard order preserved**) | patient-lookup, soft-delete filter, 1000-char cap |
@@ -183,6 +183,11 @@ finding — not a test-failure to repair:
    of a *permission* lands on the next `me`/re-login; *deactivation*/*password reset*/
    *cross-PC login* are caught immediately. Rationale: per-command permission re-query
    would defeat the in-memory cache (AERP G.2.7 note).
+   **UPDATED (pass-3, P3-10):** the sanctioned admin path now CLOSES the revocation
+   window — `update_user_core` deletes the target's session rows on any role change,
+   forcing immediate re-login (test: `rev3_p3_10_role_change_sweeps_target_sessions`).
+   Direct SQL edits by a DBA remain outside the app's control (a DBA can delete
+   sessions by definition); that residual is accepted.
 2. **Low-risk commands are in-memory-only** (WP2-I06): a deactivated user's READ commands
    keep working until the session clears. Two-tier design.
 3. **34 (not 22) require_strong sites** — decision-log widening, "regex caught 12 extra."
@@ -302,4 +307,46 @@ inventory and manual inspection.
 
 ---
 
-*End of review package (rev 3, 2026-09-04). Good hunting — the author genuinely wants you to find something.*
+## §10 — Third-pass findings & dispositions (ADDRESSED 2026-09-04)
+
+Pass 3 (fresh external reviewer, fresh clone, kernel-verification discipline: checked
+whether the "fixed" symbols exist at PUBLISHED HEAD before reviewing anything else).
+Outcome: the publication failure was the headline; two genuine bypasses were found in
+the pass-2 fix itself; Set A (the long-unaudited authorization core) was finally
+deep-reviewed and **held up sound**.
+
+**THE PUBLICATION RULE (new, permanent):** no disposition in this package may say
+"Fixed" unless the symbol is reachable from `origin/main`. A fix that exists only as
+working-tree changes is NOT fixed — it is a promise. **P3-1 applies to this very
+section until the maintainer commits and pushes the pass-3 fix-set.**
+
+| ID | Severity | Verdict | Disposition |
+|---|---|---|---|
+| P3-1 | P0 (process) | Confirmed | Pass-2 fixes were uncommitted working-tree changes while §9 said "Fixed." Fix-set now includes pass-3 changes; the maintainer MUST commit+push (commands provided in the worklog entry). This rule added to the package. |
+| P3-2 | P0 (live at HEAD) | Confirmed | Pass-2 P0 re-confirmed at published HEAD; fixed in working tree since pass-2, hardened further by P3-4; becomes live for cloners the moment the fix-set is pushed. |
+| P3-3 | P1 (live at HEAD) | Confirmed | Pass-2 P1 re-confirmed at published HEAD; same publication status as P3-2. |
+| P3-4 | P1 (new) | **Confirmed & fixed** | The pass-2 gate treated an unreadable/corrupt config as "first run" (load→None→unwrap_or(false)), re-opening the fail-open hole one level down. **Fix: tri-state `ConfigDiskState` (Missing/Corrupt/Active) — Corrupt now fails closed** (requires an authenticated SettingsManage session). Gate grants via `ConfigMutationGrant` enum (removes the sentinel-session hack, per P3-6). Unit tests cover all disk-state × session-state combinations. |
+| P3-5 | P1 (new) | **Confirmed & fixed** | Loopback pin computed its window from `merged` — which IS the raw payload when no disk config exists, so a payload of `{setup_complete: true, db_host: remote}` skipped the pin. **Fix: window now derived from disk state only** (`!matches!(disk, Active{setup_complete:true})`); Missing and Corrupt both enforce the pin. |
+| P3-7 | P2 (new) | **Confirmed & fixed** | Single-session invariant was application-only; concurrent DELETE+INSERT could leave two valid tokens. **Fix: schema-enforced** — migration dedupes then creates `UNIQUE INDEX idx_sessions_single_user ON sessions(user_id)`; `login_core` now rotates the session with one atomic `INSERT … ON CONFLICT (user_id) DO UPDATE`. Tests: `rev3_p3_7_unique_user_session_schema_enforced`, `rev3_p3_7_upsert_replaces_prior_token`. |
+| P3-8 | P2 (new) | **Confirmed & fixed** | Harness `test_db_url()` dropped `?sslmode=require`. Query string now preserved in the URL rewrite. |
+| P3-9 | P2 (new) | **Confirmed & fixed** | Stale "contains the plaintext DB password" comment on the config ACL (the v2 blob is DPAPI LOCAL_MACHINE — decryptable by any local process; the ACL's real value is tamper-integrity; the `.bak` ACL is the confidentiality-load-bearing one). Comment corrected; package updated here. |
+| P3-10 | P2 | **Confirmed & fixed** | L03 window closed on the sanctioned path: `update_user_core` deletes the target's sessions on role change (test: `rev3_p3_10_role_change_sweeps_target_sessions`). DBA-level SQL edits remain out of scope (documented). §5 deviation #1 updated. |
+| P3-11 | P3 | **Confirmed & fixed** | `Pharmacy.tsx canPrescribe` now checks `PrescriptionsCreate`. |
+| P3-12 | P3 | Confirmed | §3 fidelity row corrected (no self-target rule in `update_user_core`); fidelity itself held. |
+| P3-6 | P2 (nits) | Addressed | Gate redesigned with `ConfigMutationGrant` enum: sentinel `user_id != 0` and fabricated "system-setup" session eliminated; single mutex read. |
+
+**Set A verdict (the reason this pass existed): SOUND.** 54-permission model, roles
+matrix, all 34 guard sites re-counted and semantically spot-checked (one wrong pairing
+— the known P1), DPAPI implementation correct with no further windows-rs misuse, error
+paths sound, harness isolation real. **§7 attestations: (a) PASS at the merge layer,
+FAIL at the auth layer at published HEAD (now fixed in working tree — publish it!);
+(b) PASS; (c) PASS — all six pairs faithful modulo four documented intended deltas;
+(d) PASS (with two non-exploitable caveats documented); (e) PASS (sslmode caveat fixed).**
+
+**Open for pass 4 (shrinking):** verify the pushed repo matches this document (P3-1
+closure), a command-level receptionist-cannot-prescribe IPC test, and the standing
+hardware-gated items (2-PC LAN, DPAPI sysprep-class).
+
+---
+
+*End of review package (rev 4, 2026-09-04). Good hunting — the author genuinely wants you to find something.*

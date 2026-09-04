@@ -407,6 +407,22 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
         )
     "#).execute(pool).await.map_err(|e| format!("sessions: {}", e))?;
 
+    // Review Pass 3, P3-7: enforce the single-active-session invariant at the
+    // SCHEMA level, not just in login's DELETE+INSERT sequence. Previously a
+    // concurrent double-login could interleave between the two statements and
+    // leave TWO valid tokens for one user — both passing require_strong's
+    // per-token check. First dedupe any pre-existing duplicates (keep the
+    // newest row per user), then create the unique index that
+    // (a) makes the invariant schema-real, and (b) lets login_core rotate the
+    // session with a single atomic INSERT ... ON CONFLICT upsert.
+    sqlx::query(
+        "DELETE FROM sessions a USING sessions b \
+         WHERE a.user_id = b.user_id AND a.issued_at < b.issued_at",
+    ).execute(pool).await.ok();
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_single_user ON sessions(user_id)")
+        .execute(pool).await
+        .map_err(|e| format!("sessions unique-user index: {}", e))?;
+
     sqlx::query(r#"
         CREATE TABLE IF NOT EXISTS audit_logs (
             id          BIGSERIAL PRIMARY KEY,

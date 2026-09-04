@@ -60,20 +60,20 @@ async fn login_on(
 #[tokio::test]
 async fn wp2_i01_me_rejects_after_cross_pc_login() {
     let pool = setup().await;
-    seed_user(&pool, "aerp_user_i01", "Passw0rd!", &["doctor"]).await;
+    seed_user(&pool, "aerp_user_i01", &fixture_pw(), &["doctor"]).await;
 
     // PC-A and PC-B = two independent in-memory session states.
     let pc_a: SessionState = Arc::new(Mutex::new(None));
     let pc_b: SessionState = Arc::new(Mutex::new(None));
 
     // Login on PC-A.
-    login_on(&pool, &pc_a, "aerp_user_i01", "Passw0rd!")
+    login_on(&pool, &pc_a, "aerp_user_i01", &fixture_pw())
         .await
         .expect("PC-A login");
     let token_a = current_token_hash(&pool).await;
 
     // Login on PC-B — single-session policy deletes PC-A's row.
-    login_on(&pool, &pc_b, "aerp_user_i01", "Passw0rd!")
+    login_on(&pool, &pc_b, "aerp_user_i01", &fixture_pw())
         .await
         .expect("PC-B login");
     let token_b = current_token_hash(&pool).await;
@@ -101,9 +101,9 @@ async fn current_token_hash(pool: &PgPool) -> String {
 #[tokio::test]
 async fn wp2_i02_me_accepts_when_valid() {
     let pool = setup().await;
-    seed_user(&pool, "aerp_user_i02", "Passw0rd!", &["doctor"]).await;
+    seed_user(&pool, "aerp_user_i02", &fixture_pw(), &["doctor"]).await;
     let pc: SessionState = Arc::new(Mutex::new(None));
-    login_on(&pool, &pc, "aerp_user_i02", "Passw0rd!")
+    login_on(&pool, &pc, "aerp_user_i02", &fixture_pw())
         .await
         .expect("login");
 
@@ -122,7 +122,7 @@ async fn wp2_i02_me_accepts_when_valid() {
 #[tokio::test]
 async fn wp2_i03_require_strong_rejects_after_deactivation() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_i03", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_i03", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_i03").await;
     let state = state_for(&pool, uid, "hash_i03").await;
 
@@ -151,7 +151,7 @@ async fn wp2_i03_require_strong_rejects_after_deactivation() {
 #[tokio::test]
 async fn wp2_i04_role_change_documented_limitation() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_i04", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_i04", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_i04").await;
     let state = state_for(&pool, uid, "hash_i04").await;
 
@@ -185,8 +185,8 @@ async fn wp2_i04_role_change_documented_limitation() {
 #[tokio::test]
 async fn wp2_i05_require_strong_rejects_after_password_reset() {
     let pool = setup().await;
-    let admin = seed_user(&pool, "aerp_admin_i05", "Passw0rd!", &["super_admin"]).await;
-    let target = seed_user(&pool, "aerp_doc_i05", "Passw0rd!", &["doctor"]).await;
+    let admin = seed_user(&pool, "aerp_admin_i05", &fixture_pw(), &["super_admin"]).await;
+    let target = seed_user(&pool, "aerp_doc_i05", &fixture_pw(), &["doctor"]).await;
 
     seed_session_row(&pool, admin, "hash_i05_admin").await;
     seed_session_row(&pool, target, "hash_i05_target").await;
@@ -195,7 +195,7 @@ async fn wp2_i05_require_strong_rejects_after_password_reset() {
 
     // Admin resets the target's password via the production core.
     hospital_mgmt_lib::auth::reset_user_password_core(
-        &pool, &admin_state, target, "NewPassw0rd!!".to_string(),
+        &pool, &admin_state, target, fixture_pw(),
     )
     .await
     .expect("reset");
@@ -216,7 +216,7 @@ async fn wp2_i05_require_strong_rejects_after_password_reset() {
 #[tokio::test]
 async fn wp2_i06_low_risk_command_not_db_checked() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_i06", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_i06", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_i06").await;
     let state = state_for(&pool, uid, "hash_i06").await;
 
@@ -241,10 +241,10 @@ async fn wp2_i06_low_risk_command_not_db_checked() {
 #[tokio::test]
 async fn wp2_i07_i09_invalidation_observables() {
     let pool = setup().await;
-    let admin = seed_user(&pool, "aerp_admin_i07", "Passw0rd!", &["super_admin"]).await;
-    let t_reset = seed_user(&pool, "aerp_t_reset", "Passw0rd!", &["doctor"]).await;
-    let t_deact = seed_user(&pool, "aerp_t_deact", "Passw0rd!", &["nurse"]).await;
-    let t_role = seed_user(&pool, "aerp_t_role", "Passw0rd!", &["doctor"]).await;
+    let admin = seed_user(&pool, "aerp_admin_i07", &fixture_pw(), &["super_admin"]).await;
+    let t_reset = seed_user(&pool, "aerp_t_reset", &fixture_pw(), &["doctor"]).await;
+    let t_deact = seed_user(&pool, "aerp_t_deact", &fixture_pw(), &["nurse"]).await;
+    let t_role = seed_user(&pool, "aerp_t_role", &fixture_pw(), &["doctor"]).await;
 
     seed_session_row(&pool, admin, "hash_i07_admin").await;
     let admin_state = state_for(&pool, admin, "hash_i07_admin").await;
@@ -252,7 +252,7 @@ async fn wp2_i07_i09_invalidation_observables() {
     // Reset → sessions deleted.
     seed_session_row(&pool, t_reset, "hash_i07_reset").await;
     hospital_mgmt_lib::auth::reset_user_password_core(
-        &pool, &admin_state, t_reset, "NewPassw0rd!!".to_string(),
+        &pool, &admin_state, t_reset, fixture_pw(),
     )
     .await
     .unwrap();
@@ -310,13 +310,13 @@ async fn wp2_i07_i09_invalidation_observables() {
 #[tokio::test]
 async fn wp2_i10_login_invalidates_prior_sessions() {
     let pool = setup().await;
-    seed_user(&pool, "aerp_user_i10", "Passw0rd!", &["doctor"]).await;
+    seed_user(&pool, "aerp_user_i10", &fixture_pw(), &["doctor"]).await;
 
     let pc_a: SessionState = Arc::new(Mutex::new(None));
     let pc_b: SessionState = Arc::new(Mutex::new(None));
-    login_on(&pool, &pc_a, "aerp_user_i10", "Passw0rd!").await.unwrap();
+    login_on(&pool, &pc_a, "aerp_user_i10", &fixture_pw()).await.unwrap();
     let token_a = current_token_hash(&pool).await;
-    login_on(&pool, &pc_b, "aerp_user_i10", "Passw0rd!").await.unwrap();
+    login_on(&pool, &pc_b, "aerp_user_i10", &fixture_pw()).await.unwrap();
     let token_b = current_token_hash(&pool).await;
 
     assert_ne!(token_a, token_b);
@@ -375,7 +375,7 @@ async fn wp2_i11_high_risk_command_inventory() {
 #[tokio::test]
 async fn wp2_n01_stale_session_cannot_create() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_n01", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_n01", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_n01_old").await;
     let stale = state_for(&pool, uid, "hash_n01_old").await;
 
@@ -398,7 +398,7 @@ async fn wp2_n01_stale_session_cannot_create() {
 #[tokio::test]
 async fn wp2_n02_deleted_user_cannot_act() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_n02", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_n02", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_n02").await;
     let state = state_for(&pool, uid, "hash_n02").await;
 
@@ -421,9 +421,9 @@ async fn wp2_n02_deleted_user_cannot_act() {
 #[tokio::test]
 async fn wp2_n03_token_hash_not_in_frontend_responses() {
     let pool = setup().await;
-    seed_user(&pool, "aerp_user_n03", "Passw0rd!", &["doctor"]).await;
+    seed_user(&pool, "aerp_user_n03", &fixture_pw(), &["doctor"]).await;
     let pc: SessionState = Arc::new(Mutex::new(None));
-    let resp = login_on(&pool, &pc, "aerp_user_n03", "Passw0rd!")
+    let resp = login_on(&pool, &pc, "aerp_user_n03", &fixture_pw())
         .await
         .unwrap();
     let json = serde_json::to_string(&resp).unwrap();
@@ -461,7 +461,7 @@ async fn wp2_n03_token_hash_not_in_frontend_responses() {
 #[tokio::test]
 async fn wp2_p01_dead_token_replay_rejected() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_p01", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_p01", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_p01").await;
     sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
         .bind("hash_p01")
@@ -489,7 +489,7 @@ async fn wp2_p01_dead_token_replay_rejected() {
 #[tokio::test]
 async fn wp2_p02_race_deactivate_vs_commands() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_p02", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_p02", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_p02").await;
     let state = state_for(&pool, uid, "hash_p02").await;
 
@@ -530,7 +530,7 @@ async fn wp2_p02_race_deactivate_vs_commands() {
 #[tokio::test]
 async fn wp2_p03_no_listener_still_enforced() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_p03", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_p03", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_p03").await;
     let state = state_for(&pool, uid, "hash_p03").await;
     set_user_active(&pool, uid, false).await; // "event" would have been nooped
@@ -546,16 +546,16 @@ async fn wp2_p03_no_listener_still_enforced() {
 #[tokio::test]
 async fn wp2_p04_me_bypass_still_enforced() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_p04", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_p04", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_p04").await;
     let state = state_for(&pool, uid, "hash_p04").await;
 
     // Invalidate WITHOUT calling me: reset the password via admin core.
-    let admin = seed_user(&pool, "aerp_admin_p04", "Passw0rd!", &["super_admin"]).await;
+    let admin = seed_user(&pool, "aerp_admin_p04", &fixture_pw(), &["super_admin"]).await;
     seed_session_row(&pool, admin, "hash_p04_admin").await;
     let admin_state = state_for(&pool, admin, "hash_p04_admin").await;
     hospital_mgmt_lib::auth::reset_user_password_core(
-        &pool, &admin_state, uid, "NewPassw0rd!!".to_string(),
+        &pool, &admin_state, uid, fixture_pw(),
     )
     .await
     .unwrap();
@@ -573,7 +573,7 @@ async fn wp2_p04_me_bypass_still_enforced() {
 #[tokio::test]
 async fn wp2_c01_concurrent_logins_single_session() {
     let pool = setup().await;
-    seed_user(&pool, "aerp_user_c01", "Passw0rd!", &["doctor"]).await;
+    seed_user(&pool, "aerp_user_c01", &fixture_pw(), &["doctor"]).await;
 
     let pool = Arc::new(pool);
     let pc_a: SessionState = Arc::new(Mutex::new(None));
@@ -587,7 +587,7 @@ async fn wp2_c01_concurrent_logins_single_session() {
                 &pc_a,
                 hospital_mgmt_lib::auth::LoginRequest {
                     username: "aerp_user_c01".into(),
-                    password: "Passw0rd!".into(),
+                    password: fixture_pw(),
                 },
             )
             .await
@@ -598,7 +598,7 @@ async fn wp2_c01_concurrent_logins_single_session() {
                 &pc_b,
                 hospital_mgmt_lib::auth::LoginRequest {
                     username: "aerp_user_c01".into(),
-                    password: "Passw0rd!".into(),
+                    password: fixture_pw(),
                 },
             )
             .await
@@ -619,7 +619,7 @@ async fn wp2_c01_concurrent_logins_single_session() {
 #[tokio::test]
 async fn wp2_c02_concurrent_create_patient_vs_deactivation() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_c02", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_c02", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_c02").await;
     let session = load_session_for(&pool, uid, "hash_c02").await;
 
@@ -688,7 +688,7 @@ async fn wp2_c02_concurrent_create_patient_vs_deactivation() {
 #[tokio::test]
 async fn wp2_c03_concurrent_role_change_vs_commands() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_c03", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_c03", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_c03").await;
     let state = state_for(&pool, uid, "hash_c03").await;
 
@@ -730,7 +730,7 @@ async fn wp2_c03_concurrent_role_change_vs_commands() {
 #[tokio::test]
 async fn wp2_c04_and_h2_001_14_concurrent_require_strong_benchmark() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_c04", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_c04", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_c04").await;
     let state = state_for(&pool, uid, "hash_c04").await;
 
@@ -787,7 +787,7 @@ async fn wp2_u01_session_struct_has_token_hash() {
 #[tokio::test]
 async fn wp2_u02_load_session_populates_token_hash() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_u02", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_u02", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_u02").await;
     let s = hospital_mgmt_lib::auth::load_session(&pool, uid, "hash_u02")
         .await
@@ -799,7 +799,7 @@ async fn wp2_u02_load_session_populates_token_hash() {
 #[tokio::test]
 async fn wp2_u03_rejects_invalid_token() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_u03", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_u03", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_u03").await;
     let state = state_for(&pool, uid, "hash_u03").await;
 
@@ -818,7 +818,7 @@ async fn wp2_u03_rejects_invalid_token() {
 #[tokio::test]
 async fn wp2_u04_rejects_inactive_user() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_u04", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_u04", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_u04").await;
     let state = state_for(&pool, uid, "hash_u04").await;
     set_user_active(&pool, uid, false).await;
@@ -829,7 +829,7 @@ async fn wp2_u04_rejects_inactive_user() {
 #[tokio::test]
 async fn wp2_u05_rejects_expired_session() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_u05", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_u05", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_u05").await;
     sqlx::query("UPDATE sessions SET expires_at = NOW() - INTERVAL '1 hour' WHERE token_hash = 'hash_u05'")
         .execute(&pool)
@@ -843,7 +843,7 @@ async fn wp2_u05_rejects_expired_session() {
 #[tokio::test]
 async fn wp2_u06_accepts_valid_session() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_u06", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_u06", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_u06").await;
     let state = state_for(&pool, uid, "hash_u06").await;
     let s = rbac::require_strong(&state, &pool, Permission::PatientsCreate)
@@ -856,7 +856,7 @@ async fn wp2_u06_accepts_valid_session() {
 #[tokio::test]
 async fn wp2_u07_state_cleared_on_failure() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_u07", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_u07", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_u07").await;
     let state = state_for(&pool, uid, "hash_u07").await;
     sqlx::query("DELETE FROM sessions WHERE token_hash = 'hash_u07'")
@@ -876,4 +876,105 @@ async fn wp2_u08_inherits_require_behavior() {
         .await
         .unwrap_err();
     assert!(r.contains("not signed in"), "got: {}", r);
+}
+
+// ── Review Pass 3 regressions (2026-09-04) ─────────────────────────────────────
+
+/// P3-7: the single-active-session invariant is now enforced by the SCHEMA
+/// (UNIQUE index on sessions.user_id) — a second token for the same user is
+/// rejected by the database itself, independent of any application logic.
+#[tokio::test]
+async fn rev3_p3_7_unique_user_session_schema_enforced() {
+    let pool = setup().await;
+    let uid = seed_user(&pool, "aerp_p3_7", &fixture_pw(), &["doctor"]).await;
+    seed_session_row(&pool, uid, "hash_p3_7_a").await;
+
+    // Direct INSERT of a second row for the same user → unique violation.
+    let dup = sqlx::query(
+        "INSERT INTO sessions (token_hash, user_id, expires_at) \
+         VALUES ('hash_p3_7_b', $1, NOW() + INTERVAL '12 hours')",
+    )
+    .bind(uid)
+    .execute(&pool)
+    .await;
+    assert!(dup.is_err(), "UNIQUE(user_id) must reject a second session");
+
+    // A different user's session is unaffected by the index.
+    let uid2 = seed_user(&pool, "aerp_p3_7b", &fixture_pw(), &["nurse"]).await;
+    seed_session_row(&pool, uid2, "hash_p3_7_c").await;
+    assert_eq!(count_sessions(&pool, uid2).await, 1);
+}
+
+/// P3-10: an admin changing a user's roles now deletes the target's session
+/// rows — permission revocation takes effect on the target's NEXT command
+/// (require_strong → "Session invalidated") instead of persisting up to the
+/// 12h session lifetime. The sanctioned-path L03 window is closed.
+#[tokio::test]
+async fn rev3_p3_10_role_change_sweeps_target_sessions() {
+    let pool = setup().await;
+    let admin = seed_user(&pool, "aerp_admin_p3_10", &fixture_pw(), &["super_admin"]).await;
+    let target = seed_user(&pool, "aerp_doc_p3_10", &fixture_pw(), &["doctor"]).await;
+
+    seed_session_row(&pool, admin, "hash_p3_10_admin").await;
+    seed_session_row(&pool, target, "hash_p3_10_target").await;
+    let admin_state = state_for(&pool, admin, "hash_p3_10_admin").await;
+    let target_state = state_for(&pool, target, "hash_p3_10_target").await;
+
+    // Baseline: target can use high-risk commands.
+    rbac::require_strong(&target_state, &pool, Permission::PatientsCreate)
+        .await
+        .expect("baseline high-risk access");
+
+    // Admin demotes the target to patient (no permissions at all).
+    hospital_mgmt_lib::auth::update_user_core(
+        &pool,
+        &admin_state,
+        hospital_mgmt_lib::auth::UpdateUserRequest {
+            id: target,
+            full_name: None,
+            email: None,
+            is_active: None,
+            roles: Some(vec!["patient".into()]),
+        },
+    )
+    .await
+    .expect("role change");
+
+    // The sweep deleted the target's session rows…
+    assert_eq!(count_sessions(&pool, target).await, 0);
+
+    // …so the target's next high-risk command is rejected immediately.
+    let r = rbac::require_strong(&target_state, &pool, Permission::PatientsCreate)
+        .await
+        .unwrap_err();
+    assert!(r.contains("Session invalidated"), "got: {}", r);
+}
+
+/// P3-7 companion: login_core's upsert keeps the WP-2.1 invariant — a second
+/// login REPLACES the row (previous token dies) rather than adding a row.
+#[tokio::test]
+async fn rev3_p3_7_upsert_replaces_prior_token() {
+    let pool = setup().await;
+    seed_user(&pool, "aerp_user_p3_up", &fixture_pw(), &["doctor"]).await;
+
+    let pc_a: SessionState = Arc::new(Mutex::new(None));
+    let pc_b: SessionState = Arc::new(Mutex::new(None));
+    login_on(&pool, &pc_a, "aerp_user_p3_up", &fixture_pw()).await.unwrap();
+    let token_a = current_token_hash(&pool).await;
+    login_on(&pool, &pc_b, "aerp_user_p3_up", &fixture_pw()).await.unwrap();
+    let token_b = current_token_hash(&pool).await;
+    assert_ne!(token_a, token_b);
+
+    let uid: (i32,) = sqlx::query_as("SELECT id FROM users WHERE username = 'aerp_user_p3_up'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count_sessions(&pool, uid.0).await, 1);
+    // Old token is gone; only the new one survives.
+    let alive: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions WHERE token_hash = $1")
+        .bind(&token_a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(alive.0, 0);
 }

@@ -16,13 +16,30 @@
 
 #![cfg(feature = "hms-integration-tests")]
 
+mod common;
+use common::fixture_pw;
+
 use hospital_mgmt_lib::config::AppConfig;
 use std::path::PathBuf;
 
 // ── Harness ──────────────────────────────────────────────────────────────────
 
 fn test_hms_dir(tag: &str) -> PathBuf {
-    let hms = std::env::temp_dir().join(format!("hms_cfg_test_{}/HMS", tag));
+    // Unique PER PROCESS (not just per tag): the .bak-never-clobbered rule
+    // in save() means a persistent dir turns any fixture change into a
+    // stale-state failure on the next run (observed when de-literalizing
+    // the fixture passwords — the old literal .bak survived). Per-process
+    // uniqueness makes every run start from a clean slate.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let hms = std::env::temp_dir().join(format!(
+        "hms_cfg_test_{}_{}_{}/HMS",
+        tag,
+        std::process::id(),
+        nanos
+    ));
     std::fs::create_dir_all(&hms).unwrap();
     hms
 }
@@ -70,7 +87,7 @@ fn wp3_u06_default_is_v1() {
 fn wp3_u07_save_encrypts_password_on_disk() {
     let hms = test_hms_dir("u07");
     let mut c = AppConfig::default();
-    c.db_password = "secret_pw_u07".into();
+    c.db_password = fixture_pw();
     c.setup_complete = true;
     c.save_to(&cfg(&hms)).expect("save");
 
@@ -88,12 +105,12 @@ fn wp3_u07_save_encrypts_password_on_disk() {
 fn wp3_u08_load_v2_decrypts() {
     let hms = test_hms_dir("u08");
     let mut c = AppConfig::default();
-    c.db_password = "secret_pw_u08".into();
+    c.db_password = fixture_pw();
     c.setup_complete = true;
     c.save_to(&cfg(&hms)).expect("save");
 
     let loaded = AppConfig::load_from(&cfg(&hms)).expect("load");
-    assert_eq!(loaded.db_password, "secret_pw_u08", "decrypt round-trip failed");
+    assert_eq!(loaded.db_password, fixture_pw(), "decrypt round-trip failed");
     assert_eq!(loaded.config_version, 2);
 }
 
@@ -102,10 +119,10 @@ fn wp3_u08_load_v2_decrypts() {
 #[test]
 fn wp3_u09_load_v1_reads_plaintext_and_marks_v2() {
     let hms = test_hms_dir("u09");
-    write_v1(&hms, "plaintext_pw_u09");
+    write_v1(&hms, &fixture_pw());
 
     let loaded = AppConfig::load_from(&cfg(&hms)).expect("load v1");
-    assert_eq!(loaded.db_password, "plaintext_pw_u09");
+    assert_eq!(loaded.db_password, fixture_pw());
     assert_eq!(loaded.config_version, 2, "in-memory upgrade to v2");
 
     let json: serde_json::Value =
@@ -121,7 +138,7 @@ fn wp3_u09_load_v1_reads_plaintext_and_marks_v2() {
 #[test]
 fn wp3_u10_v1_migrate_then_reload_v2() {
     let hms = test_hms_dir("u10");
-    write_v1(&hms, "cycle_pw_u10");
+    write_v1(&hms, &fixture_pw());
 
     let mut c = AppConfig::load_from(&cfg(&hms)).expect("load v1");
     c.save_to(&cfg(&hms)).expect("save (migration)");
@@ -135,12 +152,12 @@ fn wp3_u10_v1_migrate_then_reload_v2() {
         serde_json::from_str(&std::fs::read_to_string(bak(&hms)).expect(".bak must exist")).unwrap();
     assert_eq!(
         bak_json["db_password"].as_str().unwrap(),
-        "cycle_pw_u10",
+        fixture_pw(),
         ".bak preserves the original v1 content"
     );
 
     let reloaded = AppConfig::load_from(&cfg(&hms)).expect("reload v2");
-    assert_eq!(reloaded.db_password, "cycle_pw_u10");
+    assert_eq!(reloaded.db_password, fixture_pw());
 }
 
 // ── G.3.2 Integration tests (WP3-I03, I05) ───────────────────────────────────
@@ -151,7 +168,7 @@ fn wp3_u10_v1_migrate_then_reload_v2() {
 #[test]
 fn wp3_i03_ipc_reply_never_contains_password() {
     let mut c = AppConfig::default();
-    c.db_password = "ipc_secret".into();
+    c.db_password = fixture_pw();
     c.db_password_encrypted = Some("BLOB".into());
     let json = serde_json::to_value(&c).unwrap();
     assert!(json.get("db_password").is_none(), "plaintext leaked to IPC shape");
@@ -163,7 +180,7 @@ fn wp3_i03_ipc_reply_never_contains_password() {
 #[test]
 fn wp3_i05_bak_created_once_not_clobbered() {
     let hms = test_hms_dir("i05");
-    write_v1(&hms, "bak_pw");
+    write_v1(&hms, &fixture_pw());
 
     let mut c = AppConfig::load_from(&cfg(&hms)).unwrap();
     c.save_to(&cfg(&hms)).unwrap(); // migration → .bak created
@@ -195,7 +212,7 @@ fn wp3_i05_bak_created_once_not_clobbered() {
 fn wp3_n01_n02_wrong_key_or_corrupted_blob() {
     let hms = test_hms_dir("n01");
     let mut c = AppConfig::default();
-    c.db_password = "pw_to_corrupt".into();
+    c.db_password = fixture_pw();
     c.setup_complete = true;
     c.save_to(&cfg(&hms)).unwrap();
 
@@ -217,9 +234,9 @@ fn wp3_n01_n02_wrong_key_or_corrupted_blob() {
 #[test]
 fn wp3_n03_missing_version_treated_as_v1() {
     let hms = test_hms_dir("n03");
-    write_v1(&hms, "noversion_pw"); // fixture has no config_version key
+    write_v1(&hms, &fixture_pw()); // fixture has no config_version key
     let c = AppConfig::load_from(&cfg(&hms)).expect("missing version == v1");
-    assert_eq!(c.db_password, "noversion_pw");
+    assert_eq!(c.db_password, fixture_pw());
     assert_eq!(c.config_version, 2, "marked for v2 migration");
 }
 
@@ -251,11 +268,11 @@ fn wp3_n04_unknown_version_rejected() {
 fn wp3_p01_stolen_config_yields_nothing() {
     let hms = test_hms_dir("p01");
     let mut c = AppConfig::default();
-    c.db_password = "ATOMIC-SECRET-9931".into();
+    c.db_password = fixture_pw();
     c.save_to(&cfg(&hms)).unwrap();
 
     let raw = std::fs::read_to_string(cfg(&hms)).unwrap();
-    assert!(!raw.contains("ATOMIC-SECRET-9931"), "plaintext on disk!");
+    assert!(!raw.contains(&fixture_pw()), "plaintext on disk!");
 
     let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let blob = json["db_password_encrypted"].as_str().unwrap();
@@ -263,7 +280,7 @@ fn wp3_p01_stolen_config_yields_nothing() {
     let decoded = base64::engine::general_purpose::STANDARD.decode(blob).unwrap();
     let decoded_str = String::from_utf8_lossy(&decoded);
     assert!(
-        !decoded_str.contains("ATOMIC-SECRET-9931"),
+        !decoded_str.contains(&fixture_pw()),
         "blob must be real ciphertext, not a re-encoding of the plaintext"
     );
 }
@@ -287,7 +304,7 @@ fn wp3_p02_no_embedded_keys_in_source() {
 #[test]
 fn wp3_c01_c02_concurrent_save_load_and_migration() {
     let hms = test_hms_dir("c01");
-    write_v1(&hms, "conc_migration_pw");
+    write_v1(&hms, &fixture_pw());
 
     let hms_shared = hms.clone();
     let handles: Vec<_> = (0..10)
@@ -301,7 +318,7 @@ fn wp3_c01_c02_concurrent_save_load_and_migration() {
                 c.save_to(&path).expect("save");
                 let re = AppConfig::load_from(&path).expect("reload");
                 assert!(
-                    re.db_password == "conc_migration_pw",
+                    re.db_password == fixture_pw(),
                     "reload must never see a torn write (got {:?})",
                     re.db_password
                 );
@@ -319,7 +336,7 @@ fn wp3_c01_c02_concurrent_save_load_and_migration() {
     assert!(json.get("db_password_encrypted").is_some());
     let bak_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(bak(&hms)).unwrap()).unwrap();
-    assert_eq!(bak_json["db_password"].as_str().unwrap(), "conc_migration_pw");
+    assert_eq!(bak_json["db_password"].as_str().unwrap(), fixture_pw());
 }
 
 // ── G.3.6 Offline test (WP3-O01) ──────────────────────────────────────────────
@@ -332,10 +349,10 @@ fn wp3_c01_c02_concurrent_save_load_and_migration() {
 fn wp3_o01_load_is_offline() {
     let hms = test_hms_dir("o01");
     let mut c = AppConfig::default();
-    c.db_password = "offline_pw".into();
+    c.db_password = fixture_pw();
     c.save_to(&cfg(&hms)).unwrap();
     let loaded = AppConfig::load_from(&cfg(&hms)).expect("offline load");
-    assert_eq!(loaded.db_password, "offline_pw");
+    assert_eq!(loaded.db_password, fixture_pw());
 }
 
 // ── G.3.7/3.8 LAN + Windows-only tests ────────────────────────────────────────

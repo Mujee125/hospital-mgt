@@ -34,10 +34,21 @@ fn maintenance_url() -> String {
 
 fn test_db_url() -> String {
     let url = maintenance_url();
-    let (prefix, _db) = url
+    // Review Pass 3, P3-8: preserve the query string. The old
+    // `rsplit_once('/')` rewrite silently DROPPED `?sslmode=require`, so
+    // test-DB connections ran with libpq's default SSL negotiation instead
+    // of the mandated encryption.
+    let (base, query) = match url.split_once('?') {
+        Some((b, q)) => (b.to_string(), Some(q.to_string())),
+        None => (url.clone(), None),
+    };
+    let (prefix, _db) = base
         .rsplit_once('/')
         .expect("HMS_TEST_DB_URL must end with a database name");
-    format!("{}/hospital_db_test", prefix)
+    match query {
+        Some(q) => format!("{}/hospital_db_test?{}", prefix, q),
+        None => format!("{}/hospital_db_test", prefix),
+    }
 }
 
 /// Connect to the maintenance database.
@@ -60,6 +71,24 @@ pub async fn maintenance_pool() -> PgPool {
 /// PoolTimedOut cascades). The rule: share the DATABASE across tests,
 /// never the POOL.
 static DB_PROVISIONED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+/// Fixture password for test users/configs — GENERATED AT RUNTIME, never a
+/// source literal (Mimosa L3 flags hardcoded credential-like strings, and
+/// correctly so: a literal habit in tests migrates into production code).
+/// Built once per test PROCESS and cached, so all call sites within one
+/// binary agree (seed_user then login_on with the same value).
+pub fn fixture_pw() -> String {
+    static PW: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PW.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        // Length ≥ 8 satisfies reset_user_password_core's policy check.
+        format!("Vfpw{}x", nanos)
+    })
+    .clone()
+}
 
 /// Per-test pool against the shared test database. Created on the CURRENT
 /// test's runtime and dropped with it — no cross-runtime connections.

@@ -441,63 +441,73 @@ pub fn require_if_session(
     }
 }
 
-/// Review Pass 2, Finding 1 (P0, 2026-09-04): fail-closed guard for config
-/// mutation on a system whose setup is ALREADY complete.
-///
-/// The problem with `require_if_session` for this use: it returns `Ok(None)`
-/// ("allow") whenever no session exists — correct for the true first-run
-/// Setup screen, but `SessionState` is also `None` after LOGOUT on a
-/// configured machine. In that window `save_config` / `repair_server_config`
-/// proceeded with no permission check and no audit row (the reviewer
-/// constructed exactly the §4.1 adversarial payloads: unset
-/// `setup_complete`, swap the pinned TLS cert).
-///
-/// This gate distinguishes the two "no session" situations the only way
-/// the server can: it does NOT. Absence of a session is indistinguishable
-/// from "post-logout on a configured machine" vs "first-run before any
-/// admin exists." The safe rule: once `setup_complete` is true, config
-/// mutation REQUIRES an authenticated, permission-holding session — the
-/// pre-setup flow is only permitted while setup has never completed. Local
-/// co-resident attackers during the genuine first-run window are handled
-/// at the transport/IPC layer (the Tauri webview), and the server-build
-/// host pin (F-4) bounds what a first-run payload can reach.
-pub fn require_config_mutation(
-    state: &SessionState,
-    setup_complete: bool,
-    perm: Permission,
-) -> Result<Session, String> {
-    if !setup_complete {
-        // First-run Setup (before configuration exists): allowed without a
-        // session — this is the boot flow that creates the initial config.
-        // Deny if a session EXISTS but lacks the permission (a logged-in
-        // low-privilege user must not be able to steer first-run setup).
-        if let Some(s) = state.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            if !s.has(perm) {
-                return Err(format!(
-                    "Access denied: this action requires the '{}' permission.",
-                    perm.as_str()
-                ));
-            }
-        }
-        return Ok(state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .unwrap_or(Session {
-                user_id: 0,
-                username: "system-setup".to_string(),
-                full_name: "First-run setup".to_string(),
-                roles: vec![],
-                permissions: Default::default(),
-                token_hash: String::new(),
-            }));
-    }
-    // Setup complete: a permission-holding session is REQUIRED — no
-    // session means post-logout (or pre-login on a configured machine);
-    // fail closed in both cases.
-    require(state, perm)
+/// Tri-state view of the on-disk config, distinguishing "never set up" from
+/// "exists but unreadable". Review Pass 3, P3-4: a CORRUPT config must NOT be
+/// treated as first-run — that would let an unauthenticated caller mutate
+/// config on a configured machine whose file merely failed to parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigDiskState {
+    /// No config.json on disk — genuine first-run.
+    Missing,
+    /// File exists but could not be read/parsed (or unknown version).
+    /// Fail closed: require an authenticated admin.
+    Corrupt,
+    /// File loaded; carries its `setup_complete` flag.
+    Active { setup_complete: bool },
 }
 
+/// What a config-mutation command may proceed with.
+/// (Review Pass 3, P3-6: replaces the earlier sentinel-session hack —
+/// callers pattern-match instead of sniffing `user_id != 0`, and no
+/// fabricated "system-setup" session is ever constructed.)
+#[derive(Debug)]
+pub enum ConfigMutationGrant {
+    /// First-run on an unprovisioned machine: no principal exists to audit.
+    FirstRun,
+    /// A signed-in, permission-holding principal. Audit with this session.
+    Authorized(Session),
+}
+
+/// Fail-closed guard for config mutation (Review Pass 2 Finding 1; hardened
+/// in Pass 3 for P3-4).
+///
+/// Rules:
+///   - `Active { setup_complete: true }`  → a `SettingsManage` session is
+///     REQUIRED. No session (post-logout) → denied.
+///   - `Corrupt`                         → same as above: the machine is
+///     clearly provisioned-adjacent, deny unauthenticated mutation.
+///   - `Missing` / `Active { setup_complete: false }` → first-run window:
+///     no session allowed (Setup must work before any admin exists), but a
+///     signed-in session WITHOUT the permission is still denied (a logged-in
+///     low-privilege user must not steer first-run setup).
+///
+/// Recovery path preserved: an operator with file-admin rights can delete a
+/// corrupt config.json (ACL-hardened against non-admins) to return the
+/// machine to the `Missing` state and re-enter first-run setup.
+pub fn require_config_mutation(
+    state: &SessionState,
+    disk: ConfigDiskState,
+    perm: Permission,
+) -> Result<ConfigMutationGrant, String> {
+    let first_run_allowed = match disk {
+        ConfigDiskState::Missing => true,
+        ConfigDiskState::Active { setup_complete: false } => true,
+        ConfigDiskState::Active { setup_complete: true } => false,
+        ConfigDiskState::Corrupt => false,
+    };
+    let session = state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    match session {
+        Some(s) if s.has(perm) => Ok(ConfigMutationGrant::Authorized(s)),
+        Some(_) => Err(format!(
+            "Access denied: this action requires the '{}' permission.",
+            perm.as_str()
+        )),
+        None if first_run_allowed => Ok(ConfigMutationGrant::FirstRun),
+        None => Err(
+            "This system is already configured — sign in with a settings administrator              to change its configuration.".to_string(),
+        ),
+    }
+}
 
 #[cfg(test)]
 mod wp1_tests {
@@ -606,26 +616,44 @@ mod wp1_tests {
     }
 
     #[test]
-    fn test_config_mutation_gate_fail_closed_when_configured() {
+    fn test_config_gate_fail_closed_when_configured() {
         // Review Pass 2 Finding 1 (P0): on a configured machine, NO session
         // (the post-logout state) must be DENIED for config mutation.
         let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let r = require_config_mutation(&state, true, Permission::SettingsManage);
+        let r = require_config_mutation(
+            &state,
+            ConfigDiskState::Active { setup_complete: true },
+            Permission::SettingsManage,
+        );
         assert!(r.is_err(), "no-session + setup_complete must fail closed");
     }
 
     #[test]
-    fn test_config_mutation_gate_open_on_first_run() {
-        // Genuine first-run (setup never completed): no session allowed.
+    fn test_config_gate_corrupt_disk_fails_closed() {
+        // Review Pass 3, P3-4: an existing-but-unreadable config must NOT be
+        // treated as first-run — an unauthenticated mutation would re-open
+        // the pass-2 P0 one level down, on any machine with a corrupt file.
         let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let r = require_config_mutation(&state, false, Permission::SettingsManage);
-        assert!(r.is_ok(), "first-run must be reachable pre-login");
+        let r = require_config_mutation(&state, ConfigDiskState::Corrupt, Permission::SettingsManage);
+        assert!(r.is_err(), "no-session + corrupt disk must fail closed");
     }
 
     #[test]
-    fn test_config_mutation_gate_configured_with_session() {
-        // Configured + session that HOLDS the permission → allow.
-        let s = Session {
+    fn test_config_gate_open_on_first_run() {
+        // Genuine first-run (no file, or setup never completed): no session
+        // allowed, and the grant is explicitly FirstRun.
+        let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(None));
+        for disk in [ConfigDiskState::Missing, ConfigDiskState::Active { setup_complete: false }] {
+            match require_config_mutation(&state, disk, Permission::SettingsManage) {
+                Ok(ConfigMutationGrant::FirstRun) => {}
+                other => panic!("expected FirstRun grant for {:?}, got {:?}", disk, other.is_ok()),
+            }
+        }
+    }
+
+    #[test]
+    fn test_config_gate_authorized_and_low_priv_states() {
+        let admin = Session {
             user_id: 1,
             username: "admin".into(),
             full_name: "Admin".into(),
@@ -633,11 +661,22 @@ mod wp1_tests {
             permissions: [Permission::SettingsManage.as_str().to_string()].into_iter().collect(),
             token_hash: "hash".into(),
         };
-        let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(Some(s)));
-        assert!(require_config_mutation(&state, true, Permission::SettingsManage).is_ok());
+        let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(Some(admin)));
 
-        // Configured + session WITHOUT the permission → deny.
-        let s2 = Session {
+        // Configured + session that HOLDS the permission → Authorized.
+        assert!(matches!(
+            require_config_mutation(&state, ConfigDiskState::Active { setup_complete: true }, Permission::SettingsManage),
+            Ok(ConfigMutationGrant::Authorized(_))
+        ));
+        // Corrupt disk + admin session → Authorized (repair is reachable).
+        assert!(matches!(
+            require_config_mutation(&state, ConfigDiskState::Corrupt, Permission::SettingsManage),
+            Ok(ConfigMutationGrant::Authorized(_))
+        ));
+
+        // Signed-in session WITHOUT the permission → deny in EVERY disk state,
+        // including first-run (a low-priv user must not steer setup).
+        let nurse = Session {
             user_id: 2,
             username: "nurse".into(),
             full_name: "Nurse".into(),
@@ -645,11 +684,18 @@ mod wp1_tests {
             permissions: [].into_iter().collect(),
             token_hash: "hash2".into(),
         };
-        let state2: SessionState = std::sync::Arc::new(std::sync::Mutex::new(Some(s2)));
-        assert!(require_config_mutation(&state2, true, Permission::SettingsManage).is_err());
-
-        // First-run + session WITHOUT the permission → deny (a signed-in
-        // low-privilege user must not steer first-run setup either).
-        assert!(require_config_mutation(&state2, false, Permission::SettingsManage).is_err());
+        let state2: SessionState = std::sync::Arc::new(std::sync::Mutex::new(Some(nurse)));
+        for disk in [
+            ConfigDiskState::Missing,
+            ConfigDiskState::Corrupt,
+            ConfigDiskState::Active { setup_complete: false },
+            ConfigDiskState::Active { setup_complete: true },
+        ] {
+            assert!(
+                require_config_mutation(&state2, disk, Permission::SettingsManage).is_err(),
+                "low-priv session must be denied for disk={:?}",
+                disk
+            );
+        }
     }
 }

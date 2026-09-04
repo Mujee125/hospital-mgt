@@ -47,7 +47,7 @@ async fn empty_state() -> SessionState {
 #[tokio::test]
 async fn wp1_i01_i05_patient_denied_all_whatsapp_commands() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_patient", "Passw0rd!", &["patient"]).await;
+    let uid = seed_user(&pool, "aerp_patient", &fixture_pw(), &["patient"]).await;
     seed_session_row(&pool, uid, "hash_patient_i01").await;
     let state = session_state_for(&pool, uid, "hash_patient_i01").await;
 
@@ -84,7 +84,7 @@ async fn wp1_i01_i05_patient_denied_all_whatsapp_commands() {
 #[tokio::test]
 async fn wp1_i06_doctor_passes_send_guard() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doctor", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doctor", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_doctor_i06").await;
     let state = session_state_for(&pool, uid, "hash_doctor_i06").await;
 
@@ -97,7 +97,7 @@ async fn wp1_i06_doctor_passes_send_guard() {
 #[tokio::test]
 async fn wp1_i07_doctor_passes_view_guard() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doctor2", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doctor2", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_doctor_i07").await;
     let state = session_state_for(&pool, uid, "hash_doctor_i07").await;
 
@@ -110,7 +110,7 @@ async fn wp1_i07_doctor_passes_view_guard() {
 #[tokio::test]
 async fn wp1_i08_billing_clerk_view_only() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_billing", "Passw0rd!", &["billing_clerk"]).await;
+    let uid = seed_user(&pool, "aerp_billing", &fixture_pw(), &["billing_clerk"]).await;
     seed_session_row(&pool, uid, "hash_billing_i08").await;
     let state = session_state_for(&pool, uid, "hash_billing_i08").await;
 
@@ -125,7 +125,7 @@ async fn wp1_i08_billing_clerk_view_only() {
 #[tokio::test]
 async fn wp1_i09_super_admin_all_guards() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_admin", "Passw0rd!", &["super_admin"]).await;
+    let uid = seed_user(&pool, "aerp_admin", &fixture_pw(), &["super_admin"]).await;
     seed_session_row(&pool, uid, "hash_admin_i09").await;
     let state = session_state_for(&pool, uid, "hash_admin_i09").await;
 
@@ -239,7 +239,7 @@ async fn wp1_n02_rogue_permission_string_inert() {
     .await
     .unwrap();
 
-    let uid = seed_user(&pool, "aerp_patient_n02", "Passw0rd!", &["patient"]).await;
+    let uid = seed_user(&pool, "aerp_patient_n02", &fixture_pw(), &["patient"]).await;
     seed_session_row(&pool, uid, "hash_n02").await;
     let state = session_state_for(&pool, uid, "hash_n02").await;
 
@@ -264,7 +264,7 @@ async fn wp1_n02_rogue_permission_string_inert() {
 #[tokio::test]
 async fn wp1_n03_stale_db_grant_inert_until_relogin() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_patient_n03", "Passw0rd!", &["patient"]).await;
+    let uid = seed_user(&pool, "aerp_patient_n03", &fixture_pw(), &["patient"]).await;
     seed_session_row(&pool, uid, "hash_n03").await;
     let state = session_state_for(&pool, uid, "hash_n03").await;
 
@@ -344,7 +344,7 @@ async fn wp1_n04_consent_gate_still_applies() {
 #[tokio::test]
 async fn wp1_p01_replay_after_role_change_rejected() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_p01", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_p01", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_p01_a").await;
     let state = session_state_for(&pool, uid, "hash_p01_a").await;
 
@@ -456,7 +456,7 @@ async fn wp1_p03_db_injection_cannot_grant_user() {
 #[tokio::test]
 async fn wp1_p04_frontend_spoof_irrelevant_to_backend() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_patient_p04", "Passw0rd!", &["patient"]).await;
+    let uid = seed_user(&pool, "aerp_patient_p04", &fixture_pw(), &["patient"]).await;
     seed_session_row(&pool, uid, "hash_p04").await;
 
     // The server-derived session (what the backend actually consults):
@@ -477,7 +477,7 @@ async fn wp1_p04_frontend_spoof_irrelevant_to_backend() {
 #[tokio::test]
 async fn wp1_c01_concurrent_patient_denials() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_patient_c01", "Passw0rd!", &["patient"]).await;
+    let uid = seed_user(&pool, "aerp_patient_c01", &fixture_pw(), &["patient"]).await;
     seed_session_row(&pool, uid, "hash_c01").await;
     let state = session_state_for(&pool, uid, "hash_c01").await;
 
@@ -507,7 +507,7 @@ async fn wp1_c01_concurrent_patient_denials() {
 #[tokio::test]
 async fn wp1_c02_concurrent_revoke_and_guard() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_c02", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_c02", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_c02").await;
     let state = session_state_for(&pool, uid, "hash_c02").await;
 
@@ -556,7 +556,7 @@ async fn wp1_c02_concurrent_revoke_and_guard() {
 #[tokio::test]
 async fn wp1_l01_client_session_denied_server_side() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_patient_l01", "Passw0rd!", &["patient"]).await;
+    let uid = seed_user(&pool, "aerp_patient_l01", &fixture_pw(), &["patient"]).await;
     seed_session_row(&pool, uid, "hash_l01").await;
     // A "client PC" state — a session loaded over the network.
     let state = session_state_for(&pool, uid, "hash_l01").await;
@@ -569,7 +569,7 @@ async fn wp1_l01_client_session_denied_server_side() {
 #[tokio::test]
 async fn wp1_l02_role_sync_post_seed() {
     let pool = setup().await;
-    let uid = seed_user(&pool, "aerp_doc_l02", "Passw0rd!", &["doctor"]).await;
+    let uid = seed_user(&pool, "aerp_doc_l02", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_l02").await;
     let session = load_session_for(&pool, uid, "hash_l02").await;
     assert!(session.permissions.contains("whatsapp.send"));

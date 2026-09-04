@@ -13,7 +13,7 @@
  *
  *   2. Prescriptions (FR-0121) — table of all prescriptions (newest
  *      first), filterable by patient + status. "New prescription"
- *      button is gated by `PatientsCreate` (doctors). Each row opens a
+ *      button is gated by `PrescriptionsCreate` (doctors). Each row opens a
  *      detail dialog showing the line items + a "Dispense" action per
  *      item, gated by `InventoryManage` (pharmacists).
  *
@@ -163,7 +163,10 @@ function isControlledSchedule(schedule: string): boolean {
 export function Pharmacy() {
   const { has } = useAuth();
   const canManageInventory = has(PERMISSIONS.InventoryManage);
-  const canPrescribe = has(PERMISSIONS.PatientsCreate);
+  // Review Pass 3, P3-11: prescribing authority is `PrescriptionsCreate`
+  // (doctor/super-admin), NOT `PatientsCreate` — receptionists hold the
+  // latter and were shown the prescribe button (backend denied with a 403).
+  const canPrescribe = has(PERMISSIONS.PrescriptionsCreate);
 
   return (
     <PageContainer>
