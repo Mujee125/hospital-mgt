@@ -60,6 +60,32 @@ fn backups_dir() -> Result<PathBuf, String> {
     })?;
     let dir = PathBuf::from(program_data).join("HMS").join("backups");
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create backups directory: {}", e))?;
+
+    // Phase 2 review (2026-09-05): a pg_dump custom-format archive is
+    // compressed but NOT ENCRYPTED — a backup IS the entire PHI store in
+    // readable form. This directory inherits Users:Modify from
+    // ProgramData/HMS, so on pre-fix deployments every local user could
+    // read (or silently replace) every backup. Harden the DIRECTORY on
+    // every call (idempotent — also repairs existing deployments); files
+    // created afterwards inherit the restrictive ACEs via (OI)(CI).
+    // Pre-existing backup files keep their creation-time ACLs — delete or
+    // re-create them after upgrading.
+    #[cfg(target_os = "windows")]
+    {
+        let mut icacls = std::process::Command::new("icacls");
+        icacls.arg(dir.as_os_str())
+            .args(["/inheritance:r"])
+            .args(["/grant:r", "SYSTEM:(OI)(CI)F"])
+            .args(["/grant:r", "Administrators:(OI)(CI)F"]);
+        if let Some(user) = std::env::var_os("USERNAME") {
+            let _ = icacls.arg(format!("{}:(OI)(CI)M", user.to_string_lossy()));
+        }
+        let _ = icacls
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
     Ok(dir)
 }
 
@@ -109,6 +135,12 @@ fn validate_filename(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Feature-gated test surface for `validate_filename` (Phase 2 tests).
+#[cfg(all(feature = "server-build", feature = "hms-integration-tests"))]
+pub fn validate_filename_for_tests(name: &str) -> Result<(), String> {
+    validate_filename(name)
+}
+
 /// Formats a `SystemTime` as a stable, ISO-ish UTC string for display in the
 /// frontend (`YYYY-MM-DD HH:MM:SS UTC`). We use UTC rather than local time so
 /// the timestamp is unambiguous across hospital timezones and DST changes.
@@ -143,7 +175,7 @@ pub async fn create_backup(
     session: tauri::State<'_, SessionState>,
     app_handle: tauri::AppHandle,
 ) -> Result<BackupInfo, String> {
-    let s = rbac::require(&session, Permission::BackupsManage)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::BackupsManage).await?;
 
     let cfg = AppConfig::load(&app_handle).ok_or_else(|| {
         "Server config not found — run first-run setup before creating a backup.".to_string()
@@ -151,8 +183,15 @@ pub async fn create_backup(
     let pg_dump = pg_bin("pg_dump.exe")?;
     let dir = backups_dir()?;
 
-    let now = Utc::now();
-    let filename = format!("hospital_db_{}.sql", now.format("%Y%m%d_%H%M%S"));
+    // Filename: timestamp + random suffix. The old timestamp-only name
+    // collided when two backups were created within the same second
+    // (silently overwriting the first archive — Phase 2 review).
+    use rand::RngCore;
+    let filename = format!(
+        "hospital_db_{}_{:08x}.sql",
+        Utc::now().format("%Y%m%d_%H%M%S"),
+        rand::rngs::OsRng.next_u32()
+    );
     let path = dir.join(&filename);
 
     // Run pg_dump. We discard stdout (it would duplicate the file content via
@@ -306,7 +345,7 @@ pub async fn restore_backup(
     app_handle: tauri::AppHandle,
     backup_filename: String,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::BackupsManage)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::BackupsManage).await?;
     validate_filename(&backup_filename)?;
 
     let cfg = AppConfig::load(&app_handle).ok_or_else(|| {
@@ -317,6 +356,58 @@ pub async fn restore_backup(
     let path = dir.join(&backup_filename);
     if !path.exists() {
         return Err(format!("Backup file not found: {}", backup_filename));
+    }
+
+    // Phase 2 review (2026-09-05): SAFETY BACKUP before the destructive
+    // restore. pg_restore --clean drops every object before recreating from
+    // the archive; if the archive is corrupt or the restore aborts midway,
+    // the database can be left partially dropped with no way back. A
+    // pre-restore dump gives the operator a recovery point. Best-effort by
+    // design: if the safety dump itself fails, we still proceed — the
+    // operator explicitly requested the restore and the audit row records
+    // it (blocking on a failing safety dump could strand a hospital with
+    // no path forward during an incident).
+    {
+        use rand::RngCore;
+        let safety_name = format!(
+            "hospital_db_pre_restore_{}_{:08x}.sql",
+            Utc::now().format("%Y%m%d_%H%M%S"),
+            rand::rngs::OsRng.next_u32()
+        );
+        let safety_path = dir.join(&safety_name);
+        let pg_dump = pg_bin("pg_dump.exe")?;
+        let safety = tokio::process::Command::new(&pg_dump)
+            .arg("-h").arg(&cfg.db_host)
+            .arg("-p").arg(cfg.db_port.to_string())
+            .arg("-U").arg(&cfg.db_user)
+            .arg("-Fc")
+            .arg("-d").arg(&cfg.db_name)
+            .arg("--file").arg(&safety_path)
+            .env("PGPASSWORD", &cfg.db_password)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await;
+        match safety {
+            Ok(o) if o.status.success() => {
+                audit::for_session(
+                    pool.inner(),
+                    &s,
+                    "backup_pre_restore_safety",
+                    "backup",
+                    Some(&safety_name),
+                    Some(serde_json::json!({"restoring": backup_filename})),
+                )
+                .await;
+            }
+            _ => {
+                let _ = fs::remove_file(&safety_path);
+                eprintln!(
+                    "[HMS BACKUP] Warning: pre-restore safety dump FAILED — proceeding with restore of {} as requested (audit row notes this).",
+                    backup_filename
+                );
+            }
+        }
     }
 
     // Run pg_restore with --clean --if-exists so existing objects are dropped
@@ -392,7 +483,7 @@ pub async fn delete_backup(
     app_handle: tauri::AppHandle,
     backup_filename: String,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::BackupsManage)?;
+    let s = rbac::require_strong(&session, pool.inner(), Permission::BackupsManage).await?;
     validate_filename(&backup_filename)?;
 
     // `app_handle` is unused here but kept in the signature for symmetry with

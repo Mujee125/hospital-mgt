@@ -341,6 +341,7 @@ async fn wp2_i11_high_risk_command_inventory() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let expected: &[(&str, usize)] = &[
         ("src/commands/billing.rs", 2),
+        ("src/commands/backup.rs", 3), // Phase 2: backup/restore/delete upgraded
         ("src/commands/encounters.rs", 1),
         ("src/commands/ipd.rs", 2),
         ("src/commands/lab.rs", 3),
@@ -365,7 +366,7 @@ async fn wp2_i11_high_risk_command_inventory() {
         );
         total += n;
     }
-    assert_eq!(total, 34, "total high-risk guard sites must match the decision log");
+    assert_eq!(total, 37, "total high-risk guard sites must match the decision log + Phase 2 backup upgrades");
 }
 
 // ── G.2.3 Negative tests (WP2-N01 … N03) ──────────────────────────────────────
