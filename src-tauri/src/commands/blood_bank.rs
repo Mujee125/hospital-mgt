@@ -3024,10 +3024,8 @@ pub async fn get_blood_bank_statistics(
 // For each expired unit, records a status_history entry + inventory_movement.
 // Returns the count of expired units for scheduler logging.
 
-// Intended to be called by the background scheduler (see doc comment above);
-// the scheduler wiring is pending — tracked as a finding in the verification
-// report. Not IPC-exposed by design.
-#[allow(dead_code)]
+// Called every scheduler tick (BE-05 wiring, 2026-09-05) — not IPC-exposed
+// by design (see doc comment above).
 pub async fn expire_blood_units(pool: &PgPool) -> Result<u64, String> {
     // Single transaction: SELECT the candidates FOR UPDATE, then UPDATE them,
     // then record history + movement for each. The FOR UPDATE prevents a race

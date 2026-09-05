@@ -199,15 +199,27 @@ async fn test_sec008_patients_rh_factor_check() {
     )
     .execute(&pool)
     .await;
-    // NOTE (first-ever run, 2026-09-02): the patients.rh_factor CHECK
-    // constraint (chk_patients_rh_factor) from the SEC-008 spec was never
-    // implemented in run_migrations — the column accepts ANY string today.
-    // This test documents the GAP: assert the CURRENT behavior so the suite
-    // is honest, and flag the missing CHECK for the schema review (P5).
+    // RESOLVED 2026-09-05 (Phase 1 schema review): the SEC-008 CHECK
+    // constraint is now implemented in run_migrations (with NULL-normalizing
+    // of pre-existing invalid values). 'positive' is rejected by the CHECK
+    // itself — previously this test passed only accidentally via the
+    // VARCHAR(5) length limit.
     assert!(
         result.is_err(),
-        "chk_patients_rh_factor must reject 'positive' (GAP: check not implemented in db.rs — see test comment)"
+        "chk_patients_rh_factor must reject 'positive' (CHECK now implemented in db.rs)"
     );
+    // And the constraint accepts the two valid clinical values.
+    for rh in ["+", "-"] {
+        let ok = sqlx::query(
+            r#"INSERT INTO patients
+                   (first_name, last_name, phone, date_of_birth, gender, blood_group, rh_factor)
+               VALUES ('Test', 'Patient', '92300000003', '1990-01-01', 'male', 'O', $1)"#,
+        )
+        .bind(rh)
+        .execute(&pool)
+        .await;
+        assert!(ok.is_ok(), "rh_factor '{}' must be accepted: {:?}", rh, ok.err());
+    }
 }
 
 /// SEC-009: patients.rh_factor accepts NULL (unknown blood type is valid).

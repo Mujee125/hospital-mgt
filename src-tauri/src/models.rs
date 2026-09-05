@@ -1029,7 +1029,7 @@ pub struct PrescriptionItem {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CreatePrescriptionItem {
     pub medication_id: Option<i32>,
     pub medication_name: String,
@@ -1044,7 +1044,7 @@ pub struct CreatePrescriptionItem {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CreatePrescription {
     pub patient_id: i32,
     #[serde(default)]

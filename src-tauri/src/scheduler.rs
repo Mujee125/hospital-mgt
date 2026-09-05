@@ -87,6 +87,22 @@ pub fn start_scheduler(
                 eprintln!("[HMS Scheduler] Reminder error: {}", e);
             }
 
+            // ── Blood-unit expiry sweep (BE-05, wired 2026-09-05) ───────
+            // expire_blood_units was written + unit-tested but never called
+            // (found during the review passes) — expired units sat in the
+            // 'available'/'quarantine' state indefinitely. The function is a
+            // single transaction with FOR UPDATE locking; on a no-op tick it
+            // costs one indexed SELECT. Logged count on success for audit.
+            match crate::commands::blood_bank::expire_blood_units(&pool).await {
+                Ok(n) if n > 0 => {
+                    eprintln!("[HMS Scheduler] Blood expiry sweep: {} unit(s) transitioned to 'expired'", n);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("[HMS Scheduler] Blood expiry sweep error: {}", e);
+                }
+            }
+
             // REL-03: break the 5-minute tick into 5-second chunks so the
             // running flag is observed promptly on shutdown (otherwise the
             // scheduler could keep running for up to 5 minutes after the

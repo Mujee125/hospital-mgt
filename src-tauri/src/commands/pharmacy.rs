@@ -338,12 +338,24 @@ pub async fn create_prescription(
     session: tauri::State<'_, SessionState>,
     prescription: CreatePrescription,
 ) -> Result<i32, String> {
+    create_prescription_core(pool.inner(), &session, prescription).await
+}
+
+/// Prescription-creation logic core (AERP Part G extraction pattern): guard +
+/// validation + INSERT + audit, callable without a Tauri AppHandle so the
+/// receptionist-cannot-prescribe regression runs at command level
+/// (session_tests.rs rev3_f2_*).
+pub async fn create_prescription_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    prescription: CreatePrescription,
+) -> Result<i32, String> {
     // Review Pass 2, Finding 2 (2026-09-04): guarded by PrescriptionsCreate,
     // NOT PatientsCreate. Receptionists hold PatientsCreate (front-desk
     // registration) and were therefore able to write prescriptions — a
     // prescribing-authority bypass. Only doctors (and super admins) have
     // PrescriptionsCreate.
-    let s = rbac::require_strong(&session, pool.inner(), Permission::PrescriptionsCreate).await?;
+    let s = rbac::require_strong(session_state, pool, Permission::PrescriptionsCreate).await?;
     if prescription.items.is_empty() {
         return Err("A prescription must have at least one medication item.".to_string());
     }
@@ -421,7 +433,7 @@ pub async fn create_prescription(
     tx.commit().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(
-        pool.inner(),
+        pool,
         &s,
         "prescription_create",
         "prescriptions",

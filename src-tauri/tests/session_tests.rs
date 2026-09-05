@@ -978,3 +978,76 @@ async fn rev3_p3_7_upsert_replaces_prior_token() {
         .unwrap();
     assert_eq!(alive.0, 0);
 }
+
+/// Pass-2 Finding 2 + pass-3 open item: a RECEPTIONIST session cannot invoke
+/// create_prescription at the command level — the guard demands
+/// PrescriptionsCreate, which only doctors/super-admins hold. This exercises
+/// the real core (guard → validation → INSERT), closing the last §10 gap.
+#[tokio::test]
+async fn rev3_f2_receptionist_cannot_prescribe_command_level() {
+    let pool = setup().await;
+    let rx_id = seed_user(&pool, "aerp_rx_presc", &fixture_pw(), &["receptionist"]).await;
+    let doc_id = seed_user(&pool, "aerp_doc_presc", &fixture_pw(), &["doctor"]).await;
+    let patient_id = seed_patient_with_phone(&pool, "CmdLevel", "Prescribe", "+923007778889").await;
+
+    seed_session_row(&pool, rx_id, "hash_rx_presc").await;
+    seed_session_row(&pool, doc_id, "hash_doc_presc").await;
+    let rx_state = state_for(&pool, rx_id, "hash_rx_presc").await;
+    let doc_state = state_for(&pool, doc_id, "hash_doc_presc").await;
+
+    let rx = hospital_mgmt_lib::models::CreatePrescription {
+        patient_id,
+        doctor_id: None,
+        encounter_id: None,
+        items: vec![hospital_mgmt_lib::models::CreatePrescriptionItem {
+            medication_id: None,
+            medication_name: "Paracetamol".into(),
+            dose: "500mg".into(),
+            route: Some("oral".into()),
+            frequency: "BD".into(),
+            duration: Some("5 days".into()),
+            quantity: Some(10),
+        }],
+        notes: None,
+    };
+
+    // Receptionist: denied at the permission guard, exact error.
+    let err = hospital_mgmt_lib::commands::pharmacy::create_prescription_core(
+        &pool, &rx_state, rx.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("requires the 'prescriptions.create'"),
+        "receptionist must be denied by the PrescriptionsCreate guard, got: {}",
+        err
+    );
+
+    // Doctor: passes the guard (proceeds into business logic — empty-items
+    // validation proves the guard let it through).
+    let mut empty = rx.clone();
+    empty.items = vec![];
+    let err2 = hospital_mgmt_lib::commands::pharmacy::create_prescription_core(
+        &pool, &doc_state, empty,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err2.contains("at least one medication"),
+        "doctor must pass the guard and hit business validation, got: {}",
+        err2
+    );
+
+    // Doctor with a complete payload: full success, prescription persisted.
+    let id = hospital_mgmt_lib::commands::pharmacy::create_prescription_core(
+        &pool, &doc_state, rx,
+    )
+    .await
+    .expect("doctor must be able to prescribe");
+    let stored: (i32,) = sqlx::query_as("SELECT patient_id FROM prescriptions WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored.0, patient_id);
+}

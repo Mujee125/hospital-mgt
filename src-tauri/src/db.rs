@@ -466,6 +466,23 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             .execute(pool).await.map_err(|e| format!("patients.{}: {}", col, e))?;
     }
 
+    // SEC-008 (AERP): CHECK constraint on patients.rh_factor — the column was
+    // added (see above) but never constrained, so any 5-char string passed
+    // validation. Invalid pre-existing values are normalized to NULL first
+    // (NULL = "unknown blood type" is a valid clinical state per SEC-009),
+    // then the constraint is re-created idempotently.
+    sqlx::query("UPDATE patients SET rh_factor = NULL WHERE rh_factor IS NOT NULL AND rh_factor NOT IN ('+', '-')")
+        .execute(pool).await
+        .map_err(|e| format!("patients.rh_factor normalize: {}", e))?;
+    sqlx::query(
+        "ALTER TABLE patients DROP CONSTRAINT IF EXISTS chk_patients_rh_factor",
+    ).execute(pool).await.ok();
+    sqlx::query(
+        "ALTER TABLE patients ADD CONSTRAINT chk_patients_rh_factor \
+         CHECK (rh_factor IS NULL OR rh_factor IN ('+', '-'))",
+    ).execute(pool).await
+    .map_err(|e| format!("patients.rh_factor check: {}", e))?;
+
     sqlx::query(r#"
         CREATE TABLE IF NOT EXISTS patient_consent (
             id                 SERIAL PRIMARY KEY,
