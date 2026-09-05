@@ -1049,13 +1049,18 @@ async fn check_db_connection(
 // Returning "client:<ip>" tells the frontend to navigate to the main app.
 
 #[tauri::command]
-async fn complete_pairing_and_connect(app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn complete_pairing_and_connect(
+    app_handle: tauri::AppHandle,
+    session_state: tauri::State<'_, std::sync::Arc<std::sync::Mutex<Option<crate::rbac::Session>>>>,
+) -> Result<String, String> {
     log_info!(&app_handle, "complete_pairing_and_connect called (Save & continue)");
 
-    pairing::verify_pairing(app_handle.clone()).await.map_err(|e| {
-        log_error!(&app_handle, "verify_pairing failed: {}", e);
-        e
-    })?;
+    pairing::verify_pairing(app_handle.clone(), session_state)
+        .await
+        .map_err(|e| {
+            log_error!(&app_handle, "verify_pairing failed: {}", e);
+            e
+        })?;
 
     log_info!(&app_handle, "verify_pairing OK — calling initialize_database");
     initialize_database(app_handle).await

@@ -39,7 +39,8 @@ interface SetupProps {
 
 interface PairingCreds {
   db_user: string;
-  db_password: string;
+  // Phase 4 review S-1: db_password intentionally absent — the backend
+  // persists it to config itself; it never crosses IPC again.
   db_name: string;
   db_port: number;
   fingerprint: string;

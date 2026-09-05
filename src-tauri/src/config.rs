@@ -110,7 +110,7 @@ impl AppConfig {
     /// Distinguishes "never set up" (Missing) from "exists but unreadable"
     /// (Corrupt) so a corrupt file on a configured machine cannot be treated
     /// as first-run by the auth gate.
-    fn disk_config_state(app_handle: &tauri::AppHandle) -> crate::rbac::ConfigDiskState {
+    pub(crate) fn disk_config_state(app_handle: &tauri::AppHandle) -> crate::rbac::ConfigDiskState {
         let path = Self::config_path(app_handle);
         if !path.exists() {
             return crate::rbac::ConfigDiskState::Missing;

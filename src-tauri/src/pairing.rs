@@ -578,9 +578,30 @@ pub async fn get_pairing_status(
 #[tauri::command]
 pub async fn redeem_pairing_code(
     app_handle: tauri::AppHandle,
+    session_state: tauri::State<'_, crate::rbac::SessionState>,
     server_ip: String,
     code: String,
 ) -> Result<serde_json::Value, String> {
+    // ── Phase 4 review, S-2 (2026-09-05): this command WRITES config and
+    // previously bypassed the config-mutation gate entirely. On a CONFIGURED
+    // machine a pre-login webview could call it (pairing commands were
+    // NO_GUARD) and overwrite the local config — mode→client, host→an
+    // attacker-controlled IP, credentials→the attacker's — so the next
+    // launch would connect to the attacker's database. The tri-state gate
+    // preserves every legitimate flow: client first-run (config Missing →
+    // FirstRun allowed), client re-setup (goes through clear_config first,
+    // so the disk is Missing again), and an admin re-pairing a configured
+    // machine (signed-in SettingsManage session → Authorized).
+    let disk = crate::config::AppConfig::disk_config_state(&app_handle);
+    match crate::rbac::require_config_mutation(
+        &session_state,
+        disk,
+        crate::rbac::Permission::SettingsManage,
+    )? {
+        crate::rbac::ConfigMutationGrant::FirstRun => { /* first-run setup */ }
+        crate::rbac::ConfigMutationGrant::Authorized(_) => { /* admin re-pairing */ }
+    }
+
     let (db_user, db_password, db_name, db_port, server_cert_pem, fingerprint) =
         redeem_code(&server_ip, &code).await?;
 
@@ -593,7 +614,7 @@ pub async fn redeem_pairing_code(
     cfg.db_host                    = server_ip.clone();
     cfg.db_port                    = db_port;
     cfg.db_user                    = db_user.clone();
-    cfg.db_password                = db_password.clone();
+    cfg.db_password                = db_password;
     cfg.db_name                    = db_name.clone();
     cfg.pinned_server_cert_pem     = server_cert_pem;
     cfg.pinned_server_fingerprint  = fingerprint.clone();
@@ -605,9 +626,14 @@ pub async fn redeem_pairing_code(
     cfg.save(&app_handle)
         .map_err(|e| format!("Failed to save config after pairing: {}", e))?;
 
+    // ── Phase 4 review, S-1 (2026-09-05): the response previously included
+    // the raw db_password — the ONE remaining IPC path that crossed the
+    // untrusted-webview boundary with the database credential (get_config
+    // strips it; save_config merges it away). The frontend never needed
+    // it: the backend has already persisted it, verify_pairing re-reads
+    // config, and the visible summary shows user/host/db/port only.
     Ok(serde_json::json!({
         "db_user":     db_user,
-        "db_password": db_password,
         "db_name":     db_name,
         "db_port":     db_port,
         "fingerprint": fingerprint,
@@ -626,7 +652,24 @@ pub async fn redeem_pairing_code(
 /// continue" had no backend to call and therefore did nothing (the button
 /// spinner ran forever or the page just hung).
 #[tauri::command]
-pub async fn verify_pairing(app_handle: tauri::AppHandle) -> Result<String, String> {
+pub async fn verify_pairing(
+    app_handle: tauri::AppHandle,
+    session_state: tauri::State<'_, crate::rbac::SessionState>,
+) -> Result<String, String> {
+    // Phase 4 review, S-2: verify_pairing also WRITES config (flips
+    // setup_complete=true below) and previously bypassed the mutation
+    // gate. Same tri-state gate as redeem_pairing_code: first-run open,
+    // configured machine requires a SettingsManage session.
+    let disk = crate::config::AppConfig::disk_config_state(&app_handle);
+    match crate::rbac::require_config_mutation(
+        &session_state,
+        disk,
+        crate::rbac::Permission::SettingsManage,
+    )? {
+        crate::rbac::ConfigMutationGrant::FirstRun => {}
+        crate::rbac::ConfigMutationGrant::Authorized(_) => {}
+    }
+
     let cfg = crate::config::AppConfig::load(&app_handle)
         .ok_or_else(|| "Configuration not found. Please pair again.".to_string())?;
 
