@@ -166,10 +166,20 @@ skip_initdb_and_register:
   ;    auth + LAN scoping in place now; the app layers SSL on top of that
   ;    moments later, before ever exposing credentials to a client. ──
   DetailPrint "Configuring PostgreSQL security settings..."
-  FileOpen $3 "$APPDATA\HMS\pgdata\postgresql.conf" a
-  FileSeek $3 0 END
-  FileWrite $3 "$\r$\nlisten_addresses = '*'$\r$\nport = 5432$\r$\nidle_in_transaction_session_timeout = 300000$\r$\n"
-  FileClose $3
+  ; Phase 3 review (2026-09-05): this append used to run on EVERY pass that
+  ; reached the common path, duplicating listen_addresses/port/timeout each
+  ; time (observed live: listen_addresses x2 in postgresql.conf). Last-wins
+  ; made it functionally harmless, but the file grew unboundedly and manual
+  ; inspection became misleading. Guard: only append when not already there
+  ; (findstr: exit 0 = found, 1 = not found).
+  nsExec::ExecToLog 'findstr /C:"listen_addresses" "$APPDATA\HMS\pgdata\postgresql.conf"'
+  Pop $0
+  ${If} $0 != 0
+    FileOpen $3 "$APPDATA\HMS\pgdata\postgresql.conf" a
+    FileSeek $3 0 END
+    FileWrite $3 "$\r$\nlisten_addresses = '*'$\r$\nport = 5432$\r$\nidle_in_transaction_session_timeout = 300000$\r$\n"
+    FileClose $3
+  ${EndIf}
 
   FileOpen $4 "$APPDATA\HMS\pgdata\pg_hba.conf" w
   FileWrite $4 "# HMS managed rules — local app + LAN clients only, scram-sha-256 required.$\r$\n"
