@@ -74,6 +74,11 @@ export interface AppConfig {
   setup_complete: boolean;
   pinned_server_cert_pem: string;
   pinned_server_fingerprint: string;
+  // Phase 7: auto-backup settings (server-build defaults applied backend-side).
+  auto_backup_enabled?: boolean;
+  auto_backup_hour?: number;
+  backup_retention_count?: number;
+  usb_backup_path?: string;
 }
 
 type BootPhase =

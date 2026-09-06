@@ -764,6 +764,29 @@ export interface BackupStatusReport {
   files: { filename: string; size_bytes: number; age_days: number }[];
 }
 
+// ── System Health (Phase 7, SettingsManage-gated) ──────────────────────────
+//
+// Returned by `get_system_health`. `scheduler_last_tick_age_secs` null means
+// the scheduler has not ticked yet since process start; `latest_backup_age_
+// hours` null means no backup archives exist; disk fields null = unknown
+// (non-Windows or the OS call failed).
+
+export interface SystemHealth {
+  server_time: string;
+  app_version: string;
+  db_name: string;
+  db_size_bytes: number;
+  active_connections: number;
+  postgres_version: string;
+  scheduler_last_tick_age_secs: number | null;
+  scheduler_healthy: boolean;
+  backup_count: number;
+  latest_backup_age_hours: number | null;
+  latest_backup_filename: string | null;
+  disk_free_bytes: number | null;
+  disk_total_bytes: number | null;
+}
+
 // ── Backup & Restore (SRS §9 A-07 — Phase 2) ───────────────────────────────
 //
 // Returned by `list_backups` and `create_backup`. All four fields are

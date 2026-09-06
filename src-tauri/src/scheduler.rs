@@ -28,6 +28,28 @@ pub struct SchedulerHandle {
     pub running: Arc<AtomicBool>,
 }
 
+// ── Heartbeat (Phase 7 system health) ───────────────────────────────────────
+//
+// Unix seconds of the last completed scheduler tick. `get_system_health`
+// reads this to tell the operator whether the background worker is alive
+// (a dead scheduler silently stops reminders AND the nightly backup — the
+// health dashboard must be able to surface that).
+static LAST_TICK_UNIX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Seconds since the last scheduler tick, or `None` if the scheduler has
+/// never ticked since process start (fresh boot before the warm-up delay).
+pub fn last_tick_age_secs() -> Option<u64> {
+    let last = LAST_TICK_UNIX.load(Ordering::Relaxed);
+    if last == 0 {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(now.saturating_sub(last))
+}
+
 /// Spawn the background scheduler. The `running` flag is owned by the
 /// caller (created in `lib.rs` setup, stored in `ShutdownFlags` Tauri app
 /// state) so the `RunEvent::ExitRequested` handler can flip it to false on
@@ -58,12 +80,24 @@ pub fn start_scheduler(
         }
 
         let mut last_digest_day: Option<u32> = None;
+        // Only read by the server-build nightly job; silenced for client
+        // builds where the job compiles out.
+        #[allow(unused_mut, unused_variables)]
+        let mut last_auto_backup_day: Option<u32> = None;
 
         loop {
             if !running_inner.load(Ordering::Relaxed) {
                 eprintln!("[HMS Scheduler] Shutdown flag observed — exiting scheduler loop");
                 break;
             }
+
+            // Heartbeat: stamp the tick BEFORE the jobs run so the health
+            // dashboard reflects a live loop even when a job is slow.
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            LAST_TICK_UNIX.store(now_unix, Ordering::Relaxed);
 
             let now = Local::now();
 
@@ -103,6 +137,28 @@ pub fn start_scheduler(
                 }
             }
 
+            // ── Nightly auto-backup (Phase 7, server build only) ────────
+            // At the configured local hour, once per day: reload the config
+            // from disk (so Settings changes apply WITHOUT an app restart),
+            // run pg_dump via the same core the manual command uses, verify
+            // the archive, copy to the optional USB directory, apply
+            // retention, and write a system-attributed audit row. A backup
+            // failure is logged — never panicked — so one bad night cannot
+            // take down reminders/notifications for the whole hospital.
+            #[cfg(feature = "server-build")]
+            if last_auto_backup_day != Some(today_day) {
+                // Reload per tick inside the target hour window — a cheap
+                // file read that keeps the hour/retention/USB settings live.
+                if let Some(cfg) = AppConfig::load(&app_handle) {
+                    if cfg.auto_backup_enabled && now.hour() == cfg.auto_backup_hour.min(23) {
+                        last_auto_backup_day = Some(today_day);
+                        if let Err(e) = run_nightly_backup(&pool, &cfg).await {
+                            eprintln!("[HMS Scheduler] Auto-backup FAILED: {}", e);
+                        }
+                    }
+                }
+            }
+
             // REL-03: break the 5-minute tick into 5-second chunks so the
             // running flag is observed promptly on shutdown (otherwise the
             // scheduler could keep running for up to 5 minutes after the
@@ -117,6 +173,55 @@ pub fn start_scheduler(
     });
 
     SchedulerHandle { running }
+}
+
+/// One nightly auto-backup: dump → verify (inside `run_backup_core`) →
+/// optional USB copy → retention prune → system-attributed audit row.
+/// Runs the (potentially minutes-long) pg_dump on the blocking thread pool.
+#[cfg(feature = "server-build")]
+async fn run_nightly_backup(pool: &PgPool, cfg: &AppConfig) -> Result<(), String> {
+    let cfg_owned = cfg.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || {
+        crate::commands::backup::run_backup_core(&cfg_owned, "auto_db")
+    })
+    .await
+    .map_err(|e| format!("Auto-backup task join failed: {}", e))??;
+
+    eprintln!(
+        "[HMS Scheduler] Auto-backup OK: {} ({} bytes)",
+        info.filename, info.size_bytes
+    );
+
+    // Optional USB/secondary copy — best-effort, never fails the backup.
+    match crate::commands::backup::copy_to_usb(&cfg.usb_backup_path, std::path::Path::new(&info.path)) {
+        Ok(true) => eprintln!("[HMS Scheduler] Auto-backup copied to USB path"),
+        Ok(false) => {}
+        Err(e) => eprintln!("[HMS Scheduler] USB copy skipped: {}", e),
+    }
+
+    // Retention (keep >= 1). Non-fatal on failure.
+    let keep = cfg.backup_retention_count.max(1) as usize;
+    if let Err(e) = crate::commands::backup::prune_backups(keep) {
+        eprintln!("[HMS Scheduler] Retention prune failed (non-fatal): {}", e);
+    }
+
+    // System-attributed audit row: user_id NULL, username 'system' —
+    // clearly distinguishable from human operators in the audit viewer.
+    crate::audit::record(
+        pool,
+        None,
+        Some("system"),
+        "auto_backup",
+        "backup",
+        Some(&info.filename),
+        Some(serde_json::json!({
+            "size_bytes": info.size_bytes,
+            "hour": cfg.auto_backup_hour,
+            "usb_copied": !cfg.usb_backup_path.is_empty(),
+        })),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Find appointments starting between 55 and 65 minutes from now,

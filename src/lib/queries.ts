@@ -61,6 +61,7 @@ import type {
   StockStatusReport,
   UserActivityReport,
   BackupStatusReport,
+  SystemHealth,
   BackupInfo,
   Medication,
   CreateMedication,
@@ -1532,6 +1533,20 @@ export const useStockStatusReport = () =>
 
 export const useBackupStatusReport = () =>
   useAsOfReport<BackupStatusReport>("get_backup_status_report", "backup-status");
+
+// ── System Health (Phase 7, SettingsManage-gated) ──────────────────────────
+//
+// Polled every 30 s while the Settings page is open — the dashboard exists
+// to catch silent failures (dead scheduler, stale backup, full disk), so a
+// stale-on-load snapshot would defeat its purpose.
+
+export function useSystemHealth() {
+  return useQuery({
+    queryKey: ["system-health"],
+    queryFn: () => invoke<SystemHealth>("get_system_health"),
+    refetchInterval: 30_000,
+  });
+}
 
 /**
  * Generic CSV export mutation. `reportType` selects the report;

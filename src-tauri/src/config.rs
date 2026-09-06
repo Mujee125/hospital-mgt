@@ -43,6 +43,41 @@ pub struct AppConfig {
     /// Written by `save()`, read by `load()`. Never serialized to frontend.
     #[serde(skip_serializing)]
     pub db_password_encrypted: Option<String>,
+    // ── Phase 7: automatic backups + system health ─────────────────────────
+    //
+    // All four fields carry serde defaults so every pre-Phase-7 config.json
+    // deserializes unchanged (backward compatibility — no config_version
+    // bump needed for additive optional fields).
+    /// Nightly automatic pg_dump (server build only). Defaults ON for
+    /// server builds — a hospital deployment without backups is one disk
+    /// failure from losing everything.
+    #[serde(default = "default_auto_backup_enabled")]
+    pub auto_backup_enabled: bool,
+    /// Local hour (0-23) the nightly backup runs at. Default 02:00 —
+    /// the quietest window for a clinic.
+    #[serde(default = "default_auto_backup_hour")]
+    pub auto_backup_hour: u32,
+    /// How many recent backup archives to keep in the backups directory.
+    /// Oldest beyond this count are deleted after each successful backup.
+    #[serde(default = "default_backup_retention_count")]
+    pub backup_retention_count: u32,
+    /// Optional directory (e.g. a USB drive path) that every new backup is
+    /// copied to after creation — an offline copy survives machine theft/
+    /// ransomware. Empty = disabled.
+    #[serde(default)]
+    pub usb_backup_path: String,
+}
+
+fn default_auto_backup_enabled() -> bool {
+    cfg!(feature = "server-build")
+}
+
+fn default_auto_backup_hour() -> u32 {
+    2
+}
+
+fn default_backup_retention_count() -> u32 {
+    14
 }
 
 fn default_config_version() -> u32 { 1 }
@@ -68,6 +103,10 @@ impl Default for AppConfig {
             pinned_server_fingerprint: String::new(),
             config_version: 1,
             db_password_encrypted: None,
+            auto_backup_enabled: cfg!(feature = "server-build"),
+            auto_backup_hour: 2,
+            backup_retention_count: 14,
+            usb_backup_path: String::new(),
         }
     }
 }

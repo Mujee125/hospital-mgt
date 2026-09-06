@@ -150,6 +150,170 @@ fn format_timestamp(t: SystemTime) -> String {
     dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
+// ── Phase 7: backup core (shared by the manual command and the nightly
+//    scheduler job) ─────────────────────────────────────────────────────────
+
+/// Run one pg_dump archive + verify its readability + return its metadata.
+/// Extracted from `create_backup` (Phase 7) so the scheduler can run the
+/// EXACT same code path — the command adds RBAC + audit on top.
+///
+/// `tag` distinguishes the trigger in the filename prefix ("hospital_db"
+/// for manual, "auto_db" for scheduled) so an operator can tell a 2 AM
+/// machine backup from a click.
+#[cfg(feature = "server-build")]
+pub fn run_backup_core(cfg: &AppConfig, tag: &str) -> Result<BackupInfo, String> {
+    let pg_dump = pg_bin("pg_dump.exe")?;
+    let dir = backups_dir()?;
+
+    // Filename: timestamp + random suffix. The old timestamp-only name
+    // collided when two backups were created within the same second
+    // (silently overwriting the first archive — Phase 2 review).
+    use rand::RngCore;
+    let filename = format!(
+        "{}_{}_{:08x}.sql",
+        tag,
+        Utc::now().format("%Y%m%d_%H%M%S"),
+        rand::rngs::OsRng.next_u32()
+    );
+    let path = dir.join(&filename);
+
+    // Run pg_dump (custom format `-Fc`: compressed, restorable via
+    // pg_restore). PGPASSWORD is set on the child process only — it never
+    // leaks into the parent process's environment.
+    let output = std::process::Command::new(&pg_dump)
+        .arg("-h")
+        .arg(&cfg.db_host)
+        .arg("-p")
+        .arg(cfg.db_port.to_string())
+        .arg("-U")
+        .arg(&cfg.db_user)
+        .arg("-Fc")
+        .arg("-d")
+        .arg(&cfg.db_name)
+        .arg("--file")
+        .arg(&path)
+        .env("PGPASSWORD", &cfg.db_password)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("Failed to spawn pg_dump: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Best-effort cleanup of the partial file so the next list_backups
+        // call doesn't show a 0-byte artifact.
+        let _ = fs::remove_file(&path);
+        return Err(format!(
+            "pg_dump failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        ));
+    }
+
+    // Verify the archive is a readable pg_dump custom-format archive BEFORE
+    // declaring success (Phase 7 restore-verification): `pg_restore -l`
+    // lists the archive's table-of-contents — a truncated/corrupt dump
+    // fails here, so we delete the partial file and surface the error
+    // instead of silently keeping a backup that cannot be restored.
+    let pg_restore = pg_bin("pg_restore.exe")?;
+    let check = std::process::Command::new(&pg_restore)
+        .arg("-l")
+        .arg(&path)
+        .env("PGPASSWORD", &cfg.db_password)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("Failed to spawn pg_restore (verify): {}", e))?;
+    if !check.status.success() {
+        let stderr = String::from_utf8_lossy(&check.stderr);
+        let _ = fs::remove_file(&path);
+        return Err(format!(
+            "Backup written but FAILED archive verification (pg_restore -l): {}",
+            stderr.trim()
+        ));
+    }
+
+    let meta = fs::metadata(&path)
+        .map_err(|e| format!("Backup file written but metadata could not be read: {}", e))?;
+    let created_at = meta
+        .created()
+        .map(format_timestamp)
+        .unwrap_or_else(|_| format_timestamp(SystemTime::now()));
+    Ok(BackupInfo {
+        filename,
+        path: path.to_string_lossy().to_string(),
+        size_bytes: meta.len(),
+        created_at,
+    })
+}
+
+/// Copy a finished backup archive to the optional USB/secondary directory
+/// (Phase 7). Best-effort: a missing/unplugged drive logs a warning and
+/// returns Ok — the primary archive is already safe. Returns Ok(true) when
+/// the copy happened.
+#[cfg(feature = "server-build")]
+pub fn copy_to_usb(usb_path: &str, source: &std::path::Path) -> Result<bool, String> {
+    if usb_path.trim().is_empty() {
+        return Ok(false);
+    }
+    let dest_dir = PathBuf::from(usb_path.trim());
+    // Only attempt when the destination volume is actually mounted — an
+    // unplugged USB stick must not fail the (already-successful) backup.
+    if !dest_dir.is_dir() {
+        return Ok(false);
+    }
+    let Some(filename) = source.file_name() else {
+        return Ok(false);
+    };
+    fs::copy(source, dest_dir.join(filename))
+        .map(|_| true)
+        .map_err(|e| format!("USB copy failed: {}", e))
+}
+
+/// Retention: delete the oldest backup files beyond `keep`, newest-first
+/// ordering by file modification time. Manual backups and auto backups
+/// share one pool — an operator's manual snapshot counts toward retention
+/// too, so the directory can never grow unbounded. (Sorted by mtime, not
+/// filename: manual and scheduled archives carry different prefixes, so a
+/// filename sort would interleave the two tags non-chronologically.)
+/// Returns how many files were removed. Only deletes `.sql` files directly
+/// inside the given directory.
+#[cfg(feature = "server-build")]
+pub fn prune_backups(keep: usize) -> Result<usize, String> {
+    prune_backups_in(&backups_dir()?, keep)
+}
+
+/// The retention core over an explicit directory — testable against a temp
+/// dir (the real backups directory must never be touched by tests).
+#[cfg(feature = "server-build")]
+pub fn prune_backups_in(dir: &std::path::Path, keep: usize) -> Result<usize, String> {
+    if keep == 0 {
+        return Err("Retention must keep at least 1 backup.".to_string());
+    }
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(dir)
+        .map_err(|e| format!("Read backups dir: {}", e))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file() && p.extension().map(|x| x == "sql").unwrap_or(false)
+        })
+        .filter_map(|p| {
+            let mtime = fs::metadata(&p).ok()?.modified().ok()?;
+            Some((mtime, p))
+        })
+        .collect();
+    // Newest first by modification time; ties broken by filename for
+    // determinism in tests.
+    files.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.file_name().cmp(&a.1.file_name())));
+    let mut removed = 0;
+    for (_, old) in files.into_iter().skip(keep) {
+        if fs::remove_file(&old).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 // ── Commands (server-build only) ────────────────────────────────────────────
 
 /// Create a new full-database backup. Runs
@@ -180,82 +344,35 @@ pub async fn create_backup(
     let cfg = AppConfig::load(&app_handle).ok_or_else(|| {
         "Server config not found — run first-run setup before creating a backup.".to_string()
     })?;
-    let pg_dump = pg_bin("pg_dump.exe")?;
-    let dir = backups_dir()?;
 
-    // Filename: timestamp + random suffix. The old timestamp-only name
-    // collided when two backups were created within the same second
-    // (silently overwriting the first archive — Phase 2 review).
-    use rand::RngCore;
-    let filename = format!(
-        "hospital_db_{}_{:08x}.sql",
-        Utc::now().format("%Y%m%d_%H%M%S"),
-        rand::rngs::OsRng.next_u32()
-    );
-    let path = dir.join(&filename);
-
-    // Run pg_dump. We discard stdout (it would duplicate the file content via
-    // --file) and capture stderr so we can surface a useful diagnostic on
-    // failure. tokio::process::Command is the async equivalent of
-    // std::process::Command and won't block the Tauri async runtime.
-    //
-    // PGPASSWORD is set on the child process only — it never leaks into the
-    // parent process's environment, so concurrent Tauri commands cannot
-    // observe it via `std::env::var("PGPASSWORD")`.
-    let output = tokio::process::Command::new(&pg_dump)
-        .arg("-h")
-        .arg(&cfg.db_host)
-        .arg("-p")
-        .arg(cfg.db_port.to_string())
-        .arg("-U")
-        .arg(&cfg.db_user)
-        .arg("-Fc")
-        .arg("-d")
-        .arg(&cfg.db_name)
-        .arg("--file")
-        .arg(&path)
-        .env("PGPASSWORD", &cfg.db_password)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
+    // Phase 7: pg_dump + archive verification moved into `run_backup_core`
+    // (shared verbatim with the nightly scheduler job). This call is
+    // spawn_blocking because the core runs the dump synchronously; the
+    // async runtime must not block on a potentially minutes-long dump.
+    let retention = cfg.backup_retention_count.max(1) as usize;
+    let info = tauri::async_runtime::spawn_blocking(move || run_backup_core(&cfg, "hospital_db"))
         .await
-        .map_err(|e| format!("Failed to spawn pg_dump: {}", e))?;
+        .map_err(|e| format!("Backup task join failed: {}", e))??;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Best-effort cleanup of the partial file so the next list_backups
-        // call doesn't show a 0-byte artifact.
-        let _ = fs::remove_file(&path);
-        return Err(format!(
-            "pg_dump failed (exit {}): {}",
-            output.status.code().unwrap_or(-1),
-            stderr.trim()
-        ));
+    // Retention is applied after every successful backup — manual or
+    // scheduled — so the backups directory can never grow unbounded.
+    match prune_backups(retention) {
+        Ok(n) if n > 0 => {
+            eprintln!("[HMS Backup] Retention: removed {} archive(s) beyond keep={}", n, retention);
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[HMS Backup] Retention prune failed (non-fatal): {}", e),
     }
-
-    let meta = fs::metadata(&path)
-        .map_err(|e| format!("Backup file written but metadata could not be read: {}", e))?;
-    let created_at = meta
-        .created()
-        .map(format_timestamp)
-        .unwrap_or_else(|_| format_timestamp(SystemTime::now()));
-    let path_str = path.to_string_lossy().to_string();
-    let info = BackupInfo {
-        filename: filename.clone(),
-        path: path_str.clone(),
-        size_bytes: meta.len(),
-        created_at,
-    };
 
     audit::for_session(
         pool.inner(),
         &s,
         "backup_create",
         "backup",
-        Some(&filename),
+        Some(&info.filename),
         Some(serde_json::json!({
             "size_bytes": info.size_bytes,
-            "path": path_str,
+            "path": info.path,
         })),
     )
     .await;

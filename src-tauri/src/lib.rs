@@ -1333,6 +1333,10 @@ pub fn run() {
             commands::backup::restore_backup,
             #[cfg(feature = "server-build")]
             commands::backup::delete_backup,
+            // Phase 7: System Health dashboard (SettingsManage-gated) —
+            // DB size/connections/version, scheduler heartbeat, backup age,
+            // disk free.
+            commands::system_health::get_system_health,
             // Messaging
             messaging::send_message,
             messaging::get_messages,

@@ -355,6 +355,48 @@ fn wp3_o01_load_is_offline() {
     assert_eq!(loaded.db_password, fixture_pw());
 }
 
+// ── Phase 7: auto-backup config fields — backward compatibility ──────────────
+
+/// A pre-Phase-7 config.json (v1 shape, no auto-backup fields) must load
+/// with sensible defaults: enabled on server builds, 02:00, keep 14, no USB
+/// path. This is what every upgraded deployment's first restart reads.
+#[test]
+fn phase7_old_config_gains_auto_backup_defaults() {
+    let hms = test_hms_dir("p7defaults");
+    write_v1(&hms, &fixture_pw());
+    let loaded = AppConfig::load_from(&cfg(&hms)).expect("load legacy config");
+    assert_eq!(
+        loaded.auto_backup_enabled,
+        cfg!(feature = "server-build"),
+        "auto-backup default must follow the build mode"
+    );
+    assert_eq!(loaded.auto_backup_hour, 2);
+    assert_eq!(loaded.backup_retention_count, 14);
+    assert!(loaded.usb_backup_path.is_empty());
+}
+
+/// A config that HAS the Phase 7 fields must round-trip them through
+/// save→load unchanged (the Settings save path), with the legacy
+/// db_password invariant intact alongside.
+#[test]
+fn phase7_auto_backup_fields_round_trip() {
+    let hms = test_hms_dir("p7roundtrip");
+    let mut c = AppConfig::default();
+    c.db_password = fixture_pw();
+    c.auto_backup_enabled = true;
+    c.auto_backup_hour = 3;
+    c.backup_retention_count = 30;
+    c.usb_backup_path = r"E:\HMS-Backups".to_string();
+    c.save_to(&cfg(&hms)).unwrap();
+
+    let loaded = AppConfig::load_from(&cfg(&hms)).expect("reload");
+    assert!(loaded.auto_backup_enabled);
+    assert_eq!(loaded.auto_backup_hour, 3);
+    assert_eq!(loaded.backup_retention_count, 30);
+    assert_eq!(loaded.usb_backup_path, r"E:\HMS-Backups");
+    assert_eq!(loaded.db_password, fixture_pw());
+}
+
 // ── G.3.7/3.8 LAN + Windows-only tests ────────────────────────────────────────
 // LAN (L01-L03) and the destructive Windows-only DPAPI tests (W01 sysprep,
 // W02 service-account, W04 service restart, W05 OS reboot) require

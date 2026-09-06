@@ -175,3 +175,66 @@ fn rand_nanos() -> u32 {
         .unwrap()
         .subsec_nanos()
 }
+
+// ── Phase 7: retention prune ──────────────────────────────────────────────────
+
+/// prune_backups_in keeps the N newest archives by mtime (mixed manual +
+/// auto filename prefixes must not confuse the ordering), deletes the rest,
+/// and never touches non-.sql files. Runs against a TEMP dir — the real
+/// %ProgramData%\HMS\backups must never be touched by a test.
+#[test]
+fn phase7_prune_keeps_newest_n_and_spares_non_sql() {
+    let dir = std::env::temp_dir().join(format!(
+        "hms_prune_test_{}_{}",
+        std::process::id(),
+        rand_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 5 archives across BOTH filename tags, oldest first, mtime gaps wide
+    // enough (25 ms) to be unambiguous on NTFS (100 ns resolution).
+    let names = [
+        "hospital_db_20260901_020000_00000001.sql",
+        "auto_db_20260902_020000_00000002.sql",
+        "hospital_db_20260903_120000_00000003.sql",
+        "auto_db_20260904_020000_00000004.sql",
+        "hospital_db_20260905_020000_00000005.sql",
+    ];
+    for (i, name) in names.iter().enumerate() {
+        std::fs::write(dir.join(name), b"fake archive").unwrap();
+        if i + 1 < names.len() {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    // A stray non-archive file must survive pruning untouched.
+    std::fs::write(dir.join("prune_notes.txt"), b"keep me").unwrap();
+
+    let removed = backup::prune_backups_in(&dir, 2).expect("prune");
+    assert_eq!(removed, 3, "5 archives − keep 2 = 3 removals");
+
+    let survivors: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        survivors.contains(&"auto_db_20260904_020000_00000004.sql".to_string()),
+        "the 2nd-newest archive must survive (mixed-tag mtime ordering), got: {:?}",
+        survivors
+    );
+    assert!(
+        survivors.contains(&"hospital_db_20260905_020000_00000005.sql".to_string()),
+        "the newest archive must survive, got: {:?}",
+        survivors
+    );
+    assert!(
+        survivors.contains(&"prune_notes.txt".to_string()),
+        "non-.sql files must never be pruned"
+    );
+    assert_eq!(survivors.len(), 3, "exactly the newest 2 archives + the txt file");
+
+    // keep=0 is rejected — retention must always keep at least one backup.
+    assert!(backup::prune_backups_in(&dir, 0).is_err());
+
+    std::fs::remove_dir_all(&dir).ok();
+}

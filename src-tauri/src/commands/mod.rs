@@ -17,3 +17,4 @@ pub mod pharmacy;
 pub mod queue;
 pub mod radiology;
 pub mod reports;
+pub mod system_health;

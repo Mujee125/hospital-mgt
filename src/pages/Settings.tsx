@@ -34,6 +34,8 @@ import {
   RotateCcw,
   Trash2,
   AlertTriangle,
+  HeartPulse,
+  HardDrive,
 } from "lucide-react";
 import type { AppConfig } from "../App";
 import {
@@ -50,6 +52,7 @@ import {
   useCreateBackup,
   useRestoreBackup,
   useDeleteBackup,
+  useSystemHealth,
 } from "@/lib/queries";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
@@ -98,6 +101,20 @@ export function Settings({ config, onSaved }: SettingsProps) {
   );
   const [groupName, setGroupName] = useState(
     config?.doctors_whatsapp_group ?? "",
+  );
+  // Phase 7: auto-backup settings — controlled here so the single
+  // handleSave round-trip persists them with the rest of the config.
+  const [autoBackupEnabled, setAutoBackupEnabled] = useState(
+    config?.auto_backup_enabled ?? false,
+  );
+  const [autoBackupHour, setAutoBackupHour] = useState(
+    config?.auto_backup_hour ?? 2,
+  );
+  const [backupRetention, setBackupRetention] = useState(
+    config?.backup_retention_count ?? 14,
+  );
+  const [usbBackupPath, setUsbBackupPath] = useState(
+    config?.usb_backup_path ?? "",
   );
   const [saving, setSaving] = useState(false);
   const [testPhone, setTestPhone] = useState("");
@@ -166,6 +183,10 @@ export function Settings({ config, onSaved }: SettingsProps) {
         ...(config as AppConfig),
         clinic_name: clinicName.trim(),
         doctors_whatsapp_group: groupName.trim(),
+        auto_backup_enabled: autoBackupEnabled,
+        auto_backup_hour: autoBackupHour,
+        backup_retention_count: backupRetention,
+        usb_backup_path: usbBackupPath.trim(),
       };
       await invoke("save_config", { config: updated });
       onSaved(updated);
@@ -231,6 +252,13 @@ export function Settings({ config, onSaved }: SettingsProps) {
         title="Settings"
         description="Clinic identity, WhatsApp notifications, client PC pairing, and IT information."
       />
+
+      {/* System health dashboard — Phase 7 (SRS §9 A-07 companion).
+          First-responder screen: DB size, scheduler heartbeat, backup age,
+          disk free. Polled every 30 s by useSystemHealth. */}
+      <div className="mb-6">
+        <SystemHealthSection />
+      </div>
 
       {/* License panel — CR-19 (LIC-DOC-01) */}
       <div className="mb-6">
@@ -561,6 +589,23 @@ export function Settings({ config, onSaved }: SettingsProps) {
             </p>
           </FormField>
         </SectionCard>
+      </div>
+
+      {/* ── Automatic backups (Phase 7) ────────────────────────────────── */}
+      {/* Saved with the main Save button (part of AppConfig); the nightly
+          scheduler job reloads the config from disk each tick inside the
+          backup hour, so changes apply WITHOUT an app restart. */}
+      <div className="mt-6">
+        <AutoBackupSection
+          enabled={autoBackupEnabled}
+          setEnabled={setAutoBackupEnabled}
+          hour={autoBackupHour}
+          setHour={setAutoBackupHour}
+          retention={backupRetention}
+          setRetention={setBackupRetention}
+          usbPath={usbBackupPath}
+          setUsbPath={setUsbBackupPath}
+        />
       </div>
 
       {/* ── Backup & Restore (SRS §9 A-07 — Phase 2) ──────────────────── */}
@@ -1395,4 +1440,223 @@ function formatBytes(bytes: number): string {
   // backup doesn't render as "1 MB" (which would round to the same as 1.04).
   const decimals = unitIndex === 0 ? 0 : value < 10 ? 2 : 1;
   return `${value.toFixed(decimals)} ${units[unitIndex]}`;
+}
+
+// ── SystemHealthSection (Phase 7) ─────────────────────────────────────────
+//
+// First-responder dashboard: the four things that fail silently — a wedged
+// scheduler (reminders + nightly backup die quietly), a stale backup, a
+// filling disk, and DB growth. Polled every 30 s; each metric renders its
+// own healthy/warning state rather than one aggregate so an operator can
+// see exactly which subsystem needs attention.
+
+function SystemHealthSection() {
+  const { has } = useAuth();
+  const { data: health, isLoading, error } = useSystemHealth();
+
+  if (!has(PERMISSIONS.SettingsManage)) return null;
+
+  const diskFreePct = health?.disk_free_bytes != null && health.disk_total_bytes
+    ? (health.disk_free_bytes / health.disk_total_bytes) * 100
+    : null;
+
+  const metrics: {
+    label: string;
+    value: string;
+    sub: string;
+    ok: boolean;
+    icon: typeof HeartPulse;
+  }[] = [];
+
+  if (health) {
+    metrics.push(
+      {
+        label: "Scheduler",
+        value: health.scheduler_healthy ? "Running" : "Not ticking",
+        sub:
+          health.scheduler_last_tick_age_secs != null
+            ? `Last tick ${health.scheduler_last_tick_age_secs}s ago (drives reminders + nightly backup)`
+            : "No tick since app start",
+        ok: health.scheduler_healthy,
+        icon: HeartPulse,
+      },
+      {
+        label: "Last backup",
+        value:
+          health.latest_backup_age_hours == null
+            ? "None"
+            : health.latest_backup_age_hours < 24
+              ? `${health.latest_backup_age_hours}h ago`
+              : `${Math.round(health.latest_backup_age_hours / 24)}d ago`,
+        sub: `${health.backup_count} archive(s)${health.latest_backup_filename ? ` · ${health.latest_backup_filename}` : ""}`,
+        ok: health.latest_backup_age_hours != null && health.latest_backup_age_hours <= 30,
+        icon: DatabaseBackup,
+      },
+      {
+        label: "Disk free",
+        value:
+          health.disk_free_bytes != null
+            ? `${formatBytes(health.disk_free_bytes)} free`
+            : "Unknown",
+        sub:
+          health.disk_free_bytes != null && diskFreePct != null
+            ? `${diskFreePct.toFixed(1)}% of ${formatBytes(health.disk_total_bytes ?? 0)} volume`
+            : "Volume hosting %ProgramData%",
+        ok: health.disk_free_bytes == null || (diskFreePct ?? 100) >= 10,
+        icon: HardDrive,
+      },
+      {
+        label: "Database",
+        value: formatBytes(health.db_size_bytes),
+        sub: `${health.db_name} · ${health.postgres_version} · ${health.active_connections} connection(s)`,
+        ok: true,
+        icon: ShieldCheck,
+      },
+    );
+  }
+
+  return (
+    <SectionCard
+      icon={HeartPulse}
+      title="System health"
+      description="Database, scheduler heartbeat, backup age & disk space. Refreshes every 30 seconds."
+      action={
+        <span className="text-[11px] text-muted-foreground font-mono">
+          v{health?.app_version ?? "—"}
+        </span>
+      }
+      bodyClassName="p-6"
+    >
+      {isLoading ? (
+        <LoadingState rows={2} />
+      ) : error ? (
+        <div className="flex items-start gap-3 p-3 rounded-[var(--radius-sm)] bg-destructive/5 border border-destructive/20">
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-destructive" />
+          <p className="text-sm text-muted-foreground">
+            Health snapshot unavailable: {String(error)}
+          </p>
+        </div>
+      ) : !health ? null : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {metrics.map((m) => (
+            <div
+              key={m.label}
+              className={`border rounded-[var(--radius-md)] p-4 space-y-1 ${
+                m.ok ? "border-border" : "border-warning/50 bg-warning/5"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <m.icon className={`h-4 w-4 ${m.ok ? "text-muted-foreground" : "text-warning"}`} />
+                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  {m.label}
+                </span>
+              </div>
+              <div className={`text-sm font-bold ${m.ok ? "text-foreground" : "text-warning-foreground"}`}>
+                {m.value}
+              </div>
+              <div className="text-[11px] text-muted-foreground leading-snug">{m.sub}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
+// ── AutoBackupSection (Phase 7) ───────────────────────────────────────────
+//
+// Settings form for the nightly scheduled backup. Values live in the main
+// Settings save flow (AppConfig) — this component only renders controls.
+// The scheduler re-reads the config from disk every tick inside the backup
+// hour, so a saved change takes effect the same night, no restart needed.
+
+interface AutoBackupSectionProps {
+  enabled: boolean;
+  setEnabled: (v: boolean) => void;
+  hour: number;
+  setHour: (v: number) => void;
+  retention: number;
+  setRetention: (v: number) => void;
+  usbPath: string;
+  setUsbPath: (v: string) => void;
+}
+
+function AutoBackupSection(props: AutoBackupSectionProps) {
+  const hours = Array.from({ length: 24 }, (_, i) => i);
+  const hourLabel = (h: number) =>
+    `${h.toString().padStart(2, "0")}:00 (${h === 0 ? "midnight" : h < 12 ? `${h} AM` : h === 12 ? "noon" : `${h - 12} PM`})`;
+
+  return (
+    <SectionCard
+      icon={DatabaseBackup}
+      title="Automatic backups"
+      description="Nightly full-database archive with verification, retention pruning and optional USB copy (server build)"
+      bodyClassName="p-6 form-stack"
+    >
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={props.enabled}
+          onChange={(e) => props.setEnabled(e.target.checked)}
+          className="h-4 w-4 rounded border-border accent-primary"
+        />
+        <span className="text-sm font-medium">
+          Run a nightly automatic backup
+        </span>
+      </label>
+
+      {props.enabled && (
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <FormField label="Backup time" htmlFor="auto-backup-hour">
+              <select
+                id="auto-backup-hour"
+                value={props.hour}
+                onChange={(e) => props.setHour(Number(e.target.value))}
+                className="w-full text-sm px-3 py-2.5 rounded-[var(--radius)] bg-background border border-border"
+              >
+                {hours.map((h) => (
+                  <option key={h} value={h}>{hourLabel(h)}</option>
+                ))}
+              </select>
+            </FormField>
+            <FormField
+              label="Keep this many recent backups"
+              htmlFor="backup-retention"
+            >
+              <Input
+                id="backup-retention"
+                type="number"
+                min={1}
+                max={365}
+                value={props.retention}
+                onChange={(e) =>
+                  props.setRetention(Math.max(1, parseInt(e.target.value, 10) || 1))
+                }
+              />
+            </FormField>
+          </div>
+
+          <FormField
+            label="USB / secondary copy path (optional)"
+            htmlFor="usb-backup-path"
+          >
+            <Input
+              id="usb-backup-path"
+              placeholder="e.g. E:\\Backups — every new archive is copied here too"
+              value={props.usbPath}
+              onChange={(e) => props.setUsbPath(e.target.value)}
+            />
+          </FormField>
+
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            Every archive is verified readable (pg_restore) before it counts as a
+            success, and the oldest beyond the retention count is deleted. The USB
+            copy is best-effort — an unplugged drive never fails the backup. Changes
+            apply after you click Save (no restart needed).
+          </p>
+        </>
+      )}
+    </SectionCard>
+  );
 }
