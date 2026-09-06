@@ -23,6 +23,7 @@ import {
   Pill,
   ScanLine,
   Droplet,
+  HeartPulse,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS, ROLE_LABELS, type NavItem } from "@/lib/rbac";
@@ -79,6 +80,12 @@ const menuItems: NavItem[] = [
     to: "/ipd",
     label: "In-Patient",
     icon: BedDouble,
+    requiredPermission: PERMISSIONS.IpdView,
+  },
+  {
+    to: "/nursing",
+    label: "Nursing",
+    icon: HeartPulse,
     requiredPermission: PERMISSIONS.IpdView,
   },
   {

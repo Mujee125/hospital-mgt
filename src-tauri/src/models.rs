@@ -533,6 +533,17 @@ pub struct LabOrder {
     pub patient_name: Option<String>,
     #[serde(default)]
     pub doctor_name: Option<String>,
+    // Phase 6.2 workflow fields (sample tracking + approval).
+    #[serde(default)]
+    pub sample_barcode: Option<String>,
+    #[serde(default)]
+    pub sampled_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub sampled_by_user_id: Option<i32>,
+    #[serde(default)]
+    pub approved_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub approved_by_user_id: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
@@ -558,6 +569,13 @@ pub struct LabOrderTest {
     pub test_code: Option<String>,
     #[serde(default)]
     pub normal_range: Option<String>,
+    // Phase 6.2 workflow fields (approval status + critical protocol).
+    #[serde(default)]
+    pub approval_status: Option<String>,
+    #[serde(default)]
+    pub critical_acknowledged_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub critical_acknowledged_by_user_id: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

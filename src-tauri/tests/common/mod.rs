@@ -203,7 +203,6 @@ pub fn mock_app(pool: PgPool, session: Option<Session>) -> tauri::App<tauri::tes
 /// process (ON CONFLICT reuses the row) — fixture users persist for the
 /// lifetime of the shared test DB.
 pub async fn seed_user(pool: &PgPool, username: &str, password: &str, roles: &[&str]) -> i32 {
-    let hash = hospital_mgmt_lib::auth::hash_password(password).expect("hash fixture password");
     // Reuse an existing fixture row when present; Argon2 hashing only runs
     // for genuinely new users (m=19456 hashing dominates test runtime).
     if let Ok(row) = sqlx::query_as::<_, (i32,)>("SELECT id FROM users WHERE username = $1")

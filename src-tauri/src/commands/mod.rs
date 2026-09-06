@@ -11,6 +11,7 @@ pub mod encounters;
 pub mod inventory;
 pub mod ipd;
 pub mod lab;
+pub mod nursing;
 pub mod patients;
 pub mod pharmacy;
 pub mod queue;

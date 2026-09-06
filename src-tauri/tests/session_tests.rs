@@ -344,7 +344,11 @@ async fn wp2_i11_high_risk_command_inventory() {
         ("src/commands/backup.rs", 3), // Phase 2: backup/restore/delete upgraded
         ("src/commands/encounters.rs", 1),
         ("src/commands/ipd.rs", 2),
-        ("src/commands/lab.rs", 3),
+        // Phase 6.2 (2026-09-06): lab.rs 3 → 5 — collect_lab_sample and
+        // approve_lab_result are new high-risk clinical writes.
+        ("src/commands/lab.rs", 5),
+        // Phase 6.1 (2026-09-06): nursing.rs — vitals/note/MAR writes.
+        ("src/commands/nursing.rs", 3),
         ("src/commands/patients.rs", 6),
         ("src/commands/pharmacy.rs", 2),
         ("src/commands/radiology.rs", 7),
@@ -366,7 +370,9 @@ async fn wp2_i11_high_risk_command_inventory() {
         );
         total += n;
     }
-    assert_eq!(total, 37, "total high-risk guard sites must match the decision log + Phase 2 backup upgrades");
+    // 37 original sites + 2 Phase 6.2 lab workflow commands + 3 Phase 6.1
+    // nursing commands = 42.
+    assert_eq!(total, 42, "total high-risk guard sites must match the decision log + Phase 2 backup + Phase 6 nursing/lab workflows");
 }
 
 // ── G.2.3 Negative tests (WP2-N01 … N03) ──────────────────────────────────────

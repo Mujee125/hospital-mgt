@@ -31,6 +31,7 @@ export const PERMISSIONS = {
   LabOrder: "lab.order",
   LabResultManage: "lab.result.manage",
   LabCatalogManage: "lab.catalog.manage",
+  LabApprove: "lab.approve",
   RadiologyView: "radiology.view",
   RadiologyCreate: "radiology.create",
   RadiologyUpdate: "radiology.update",

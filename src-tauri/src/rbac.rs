@@ -59,6 +59,12 @@ pub enum Permission {
     LabOrder,
     LabResultManage,
     LabCatalogManage,
+    /// Approve/release lab results (Phase 6.2 result-approval workflow).
+    /// Held by lab in-charge (lab_technician role in v1 single-tech
+    /// deployments), doctors, and super admin. Distinct from
+    /// LabResultManage (tech-level result entry) so a tech cannot
+    /// self-approve their own entries.
+    LabApprove,
     // Radiology
     RadiologyView,
     RadiologyCreate,
@@ -133,6 +139,7 @@ impl Permission {
             Permission::LabOrder => "lab.order",
             Permission::LabResultManage => "lab.result.manage",
             Permission::LabCatalogManage => "lab.catalog.manage",
+            Permission::LabApprove => "lab.approve",
             Permission::RadiologyView => "radiology.view",
             Permission::RadiologyCreate => "radiology.create",
             Permission::RadiologyUpdate => "radiology.update",
@@ -194,6 +201,7 @@ impl Permission {
             Permission::LabOrder,
             Permission::LabResultManage,
             Permission::LabCatalogManage,
+            Permission::LabApprove,
             Permission::RadiologyView,
             Permission::RadiologyCreate,
             Permission::RadiologyUpdate,
@@ -251,6 +259,7 @@ pub fn permissions_for_role(role: &str) -> Vec<Permission> {
             DashboardView, PatientsView, PatientsCreate, PatientsUpdate,
             AppointmentsView, AppointmentsUpdate, QueueView,
             DoctorsView, IpdView, IpdManage, LabView, LabOrder, LabResultManage,
+            LabApprove,
             RadiologyView, RadiologyCreate, RadiologyUpdate,
             BloodBankView, BloodBankCrossmatch, BloodBankIssue, BloodBankTransfuse,
             BillingView, InventoryView, PatientConsentManage, AuditView, ReportsView,
@@ -275,7 +284,7 @@ pub fn permissions_for_role(role: &str) -> Vec<Permission> {
         ],
         ROLE_LAB_TECH => vec![
             DashboardView, PatientsView, LabView, LabOrder, LabResultManage,
-            LabCatalogManage, InventoryView,
+            LabCatalogManage, LabApprove, InventoryView,
             BloodBankView, BloodBankDonorManage, BloodBankCrossmatch,
             MessagingView, MessagingSend,
         ],

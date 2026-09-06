@@ -15,6 +15,7 @@ import { Setup } from "@/pages/Setup";
 import { Login } from "@/pages/Login";
 import { Queue } from "@/pages/Queue";
 import { IPD } from "@/pages/IPD";
+import { Nursing } from "@/pages/Nursing";
 import { Laboratory } from "@/pages/Laboratory";
 import { Billing } from "@/pages/Billing";
 import { Inventory } from "@/pages/Inventory";
@@ -432,6 +433,16 @@ function RoutedPages({ config, setConfig }: { config: AppConfig | null; setConfi
         <Route path="/doctors" element={<PageTransition><Doctors /></PageTransition>} />
         <Route path="/queue" element={<PageTransition><Queue /></PageTransition>} />
         <Route path="/ipd" element={<PageTransition><IPD /></PageTransition>} />
+        <Route
+          path="/nursing"
+          element={
+            <PageTransition>
+              <RequirePermission perm={PERMISSIONS.IpdView}>
+                <Nursing />
+              </RequirePermission>
+            </PageTransition>
+          }
+        />
         <Route path="/laboratory" element={<PageTransition><Laboratory /></PageTransition>} />
         <Route
           path="/radiology"

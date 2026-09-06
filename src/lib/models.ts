@@ -209,6 +209,52 @@ export interface IpdAdmission {
   bed_number: string | null;
 }
 
+// ── Nursing Station (SRS §2.7 — Phase 6.1) ─────────────────────────────────
+//
+// TS shapes for the nursing tables created in `src-tauri/src/db.rs`
+// (vitals, nurse_notes, medication_administrations). Match the Rust structs
+// in `src-tauri/src/commands/nursing.rs` field-for-field.
+//
+// `temperature_c` mirrors the Rust `rust_decimal::Decimal`, which serializes
+// as a JSON string by default — same convention as Bill money fields
+// (format via parseFloat/formatMoney at display time, never arithmetic).
+
+export interface VitalReading {
+  id: number;
+  admission_id: number;
+  temperature_c: string | null;
+  systolic_bp: number | null;
+  diastolic_bp: number | null;
+  pulse_bpm: number | null;
+  resp_rate: number | null;
+  spo2_pct: number | null;
+  pain_score: number | null;
+  recorded_by_user_id: number | null;
+  recorded_at: string;
+  notes: string | null;
+}
+
+export interface NurseNote {
+  id: number;
+  admission_id: number;
+  author_user_id: number | null;
+  note_type: string;
+  content: string;
+  created_at: string;
+}
+
+export interface MedicationAdministration {
+  id: number;
+  admission_id: number;
+  prescription_item_id: number;
+  patient_id: number;
+  status: string;
+  administered_by_user_id: number | null;
+  administered_at: string;
+  notes: string | null;
+  medication_name: string | null;
+}
+
 // ── Laboratory ───────────────────────────────────────────────────────────
 export interface LabTestCatalog {
   id: number;
@@ -235,6 +281,12 @@ export interface LabOrder {
   created_at: string;
   patient_name: string | null;
   doctor_name: string | null;
+  // Phase 6.2 workflow fields (sample tracking + approval).
+  sample_barcode: string | null;
+  sampled_at: string | null;
+  sampled_by_user_id: number | null;
+  approved_at: string | null;
+  approved_by_user_id: number | null;
 }
 
 export interface LabOrderTest {
@@ -250,6 +302,10 @@ export interface LabOrderTest {
   test_name: string | null;
   test_code: string | null;
   normal_range: string | null;
+  // Phase 6.2 workflow fields (approval status + critical protocol).
+  approval_status: string | null;
+  critical_acknowledged_at: string | null;
+  critical_acknowledged_by_user_id: number | null;
 }
 
 // ── Billing ──────────────────────────────────────────────────────────────

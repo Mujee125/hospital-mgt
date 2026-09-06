@@ -57,6 +57,8 @@ pub async fn create_lab_test(
 const SELECT_ORDERS: &str = r#"
     SELECT lo.id, lo.patient_id, lo.encounter_id, lo.ordered_by_doctor_id,
            lo.ordered_by_user_id, lo.status, lo.ordered_at, lo.created_at,
+           lo.sample_barcode, lo.sampled_at, lo.sampled_by_user_id,
+           lo.approved_at, lo.approved_by_user_id,
            p.first_name || ' ' || p.last_name AS patient_name,
            d.first_name || ' ' || d.last_name AS doctor_name
     FROM lab_orders lo
@@ -138,6 +140,7 @@ pub async fn get_lab_order_tests(
         r#"SELECT lot.id, lot.lab_order_id, lot.test_catalog_id, lot.result_value,
                   lot.result_unit, lot.result_abnormal_flag, lot.result_notes,
                   lot.completed_at, lot.completed_by_user_id,
+                  lot.approval_status, lot.critical_acknowledged_at, lot.critical_acknowledged_by_user_id,
                   tc.name AS test_name, tc.code AS test_code, tc.normal_range
            FROM lab_order_tests lot
            JOIN lab_test_catalog tc ON tc.id = lot.test_catalog_id
@@ -158,11 +161,16 @@ pub async fn update_lab_result(
 ) -> Result<(), String> {
     let s = rbac::require_strong(&session, pool.inner(), Permission::LabResultManage).await?;
 
-    // Update the single test row and stamp completion.
-    sqlx::query(
+    // Phase 6.2: result entry now goes through the approval workflow —
+    // approval_status 'entered' (awaiting in-charge approval). Overwriting
+    // an already-APPROVED result is a correction: it demotes the row back
+    // to 'entered' with an 'amended' marker preserved in notes by the
+    // approver, never silently (see approve_lab_result for the release path).
+    let updated = sqlx::query(
         r#"UPDATE lab_order_tests SET
               result_value=$1, result_unit=$2, result_abnormal_flag=$3,
-              result_notes=$4, completed_at=NOW(), completed_by_user_id=$5
+              result_notes=$4, completed_at=NOW(), completed_by_user_id=$5,
+              approval_status = CASE WHEN approval_status = 'approved' THEN 'amended' ELSE 'entered' END
            WHERE id=$6"#,
     )
     .bind(&result.result_value)
@@ -174,23 +182,186 @@ pub async fn update_lab_result(
     .execute(pool.inner())
     .await
     .map_err(|e| format!("Update lab result: {}", e))?;
+    if updated.rows_affected() == 0 {
+        return Err("Lab result row not found.".to_string());
+    }
 
-    // If every test in the order is now completed, mark the order completed.
+    // Order status: any completed test moves the order to 'resulted'
+    // (awaiting approval). Full approval to 'approved' happens in
+    // approve_lab_result once EVERY test is approved.
     sqlx::query(
-        r#"UPDATE lab_orders SET status = 'completed'
+        r#"UPDATE lab_orders SET status = 'resulted'
            WHERE id = (SELECT lab_order_id FROM lab_order_tests WHERE id = $1)
-             AND NOT EXISTS (
-               SELECT 1 FROM lab_order_tests
-               WHERE lab_order_id = (SELECT lab_order_id FROM lab_order_tests WHERE id = $1)
-                 AND completed_at IS NULL
-             )"#,
+             AND status IN ('ordered', 'sampled')"#,
     )
     .bind(result.id)
     .execute(pool.inner())
     .await
-    .ok();
+    .map_err(|e| format!("Update lab order status: {}", e))?;
+
+    // Critical-value protocol step 1: a critical flag cannot be "approved"
+    // until acknowledged (chk_lot_critical_release enforces at release),
+    // and the alert is surfaced in-app immediately via the result row the
+    // worklist polls. Audited with the flag so the escalation is traceable.
+    if result.result_abnormal_flag.as_deref() == Some("critical") {
+        let order: Option<(i32,)> = sqlx::query_as(
+            "SELECT lab_order_id FROM lab_order_tests WHERE id = $1",
+        )
+        .bind(result.id)
+        .fetch_optional(pool.inner())
+        .await
+        .map_err(|e| format!("Lookup lab order: {}", e))?;
+        audit::for_session(
+            pool.inner(), &s, "lab_critical_value_entered", "lab_order_tests",
+            Some(&result.id.to_string()),
+            Some(serde_json::json!({
+                "lab_order_id": order.map(|o| o.0),
+                "flag": "critical",
+            })),
+        ).await;
+    }
 
     audit::for_session(pool.inner(), &s, "lab_result_update", "lab_order_tests",
         Some(&result.id.to_string()), None).await;
+    Ok(())
+}
+
+/// Collect (or recollect) the sample for a lab order. Stamps the order
+/// 'sampled' + the collecting user + a printable barcode
+/// ("<order_id>-<first_test_row_id>" — unique per order, stable).
+/// Phase 6.2 (SRS §2.4 sample collection tracking).
+/// RBAC: LabResultManage (tech-level action). Audited.
+#[tauri::command]
+pub async fn collect_lab_sample(
+    pool: tauri::State<'_, PgPool>,
+    session: tauri::State<'_, SessionState>,
+    lab_order_id: i32,
+) -> Result<String, String> {
+    collect_lab_sample_core(pool.inner(), &session, lab_order_id).await
+}
+
+/// Sample-collection logic core (AERP Part G extraction pattern): guard +
+/// state-rule UPDATE + audit, callable without a Tauri AppHandle for
+/// command-level workflow tests (lab_tests.rs).
+pub async fn collect_lab_sample_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    lab_order_id: i32,
+) -> Result<String, String> {
+    let s = rbac::require_strong(session_state, pool, Permission::LabResultManage).await?;
+
+    // Only an order still awaiting sampling can be collected; a recollect
+    // after a lost/damaged sample is expressed by resetting to 'ordered'
+    // (audited) and collecting again, so this guard is a hard state rule.
+    let row: Option<(String,)> = sqlx::query_as(
+        r#"UPDATE lab_orders SET
+              status = 'sampled', sampled_at = NOW(), sampled_by_user_id = $1,
+              sample_barcode = $2 || '-' || (
+                SELECT MIN(id)::TEXT FROM lab_order_tests WHERE lab_order_id = $3
+              )
+           WHERE id = $3 AND status = 'ordered'
+           RETURNING sample_barcode"#,
+    )
+    .bind(s.user_id)
+    .bind(lab_order_id.to_string())
+    .bind(lab_order_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let barcode: String = row
+        .ok_or_else(|| "No lab order awaiting sample collection (status must be 'ordered').".to_string())?
+        .0;
+
+    audit::for_session(pool, &s, "lab_sample_collected", "lab_orders",
+        Some(&lab_order_id.to_string()),
+        Some(serde_json::json!({"barcode": barcode}))).await;
+    Ok(barcode)
+}
+
+/// Approve (release) a lab result row. Requires LabApprove — held by the
+/// lab in-charge, doctors, and super admin, but NOT by plain
+/// LabResultManage holders, so a tech cannot self-approve their own
+/// entries. If the result is flagged critical, `critical_acknowledged`
+/// must be true — the approver confirms the critical-value call was made
+/// (phone call to the ordering doctor per protocol) before release.
+/// Phase 6.2 (SRS §2.4 result approval + critical alerting).
+/// RBAC: LabApprove. Audited.
+#[tauri::command]
+pub async fn approve_lab_result(
+    pool: tauri::State<'_, PgPool>,
+    session: tauri::State<'_, SessionState>,
+    lab_order_test_id: i32,
+    critical_acknowledged: bool,
+) -> Result<(), String> {
+    approve_lab_result_core(pool.inner(), &session, lab_order_test_id, critical_acknowledged).await
+}
+
+/// Result-approval logic core (AERP Part G extraction pattern) — see
+/// `collect_lab_sample_core` for the rationale.
+pub async fn approve_lab_result_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    lab_order_test_id: i32,
+    critical_acknowledged: bool,
+) -> Result<(), String> {
+    let s = rbac::require_strong(session_state, pool, Permission::LabApprove).await?;
+
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT approval_status, result_abnormal_flag FROM lab_order_tests WHERE id = $1",
+    )
+    .bind(lab_order_test_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let (status, flag) = row
+        .ok_or_else(|| "Lab result row not found.".to_string())?;
+
+    if status != "entered" && status != "amended" {
+        return Err(format!("This result is not awaiting approval (status: {}). Only entered results can be approved.", status));
+    }
+    if flag.as_deref() == Some("critical") && !critical_acknowledged {
+        return Err("This result is flagged CRITICAL. You must acknowledge that the ordering doctor has been contacted before releasing it.".to_string());
+    }
+
+    // Stamp release (and the critical acknowledgment when applicable).
+    sqlx::query(
+        r#"UPDATE lab_order_tests SET
+              approval_status = 'approved',
+              critical_acknowledged_at = CASE
+                  WHEN result_abnormal_flag = 'critical' AND critical_acknowledged_at IS NULL
+                  THEN NOW() ELSE critical_acknowledged_at END,
+              critical_acknowledged_by_user_id = CASE
+                  WHEN result_abnormal_flag = 'critical' AND critical_acknowledged_by_user_id IS NULL
+                  THEN $1 ELSE critical_acknowledged_by_user_id END
+           WHERE id = $2"#,
+    )
+    .bind(s.user_id)
+    .bind(lab_order_test_id)
+    .execute(pool)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    // Order is fully approved once EVERY test row is approved.
+    sqlx::query(
+        r#"UPDATE lab_orders SET status = 'approved', approved_at = NOW(), approved_by_user_id = $1
+           WHERE id = (SELECT lab_order_id FROM lab_order_tests WHERE id = $2)
+             AND NOT EXISTS (
+               SELECT 1 FROM lab_order_tests
+               WHERE lab_order_id = (SELECT lab_order_id FROM lab_order_tests WHERE id = $2)
+                 AND (approval_status IS NULL OR approval_status NOT IN ('approved','amended'))
+             )"#,
+    )
+    .bind(s.user_id)
+    .bind(lab_order_test_id)
+    .execute(pool)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    audit::for_session(pool, &s, "lab_result_approved", "lab_order_tests",
+        Some(&lab_order_test_id.to_string()),
+        Some(serde_json::json!({
+            "critical": flag.as_deref() == Some("critical"),
+            "acknowledged": critical_acknowledged,
+        }))).await;
     Ok(())
 }

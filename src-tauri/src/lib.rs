@@ -1186,6 +1186,13 @@ pub fn run() {
             commands::ipd::get_admissions,
             commands::ipd::admit_patient,
             commands::ipd::discharge_patient,
+            // Nursing Station (SRS §2.7 — Phase 6.1)
+            commands::nursing::record_vitals,
+            commands::nursing::get_vitals_trend,
+            commands::nursing::create_nurse_note,
+            commands::nursing::get_nurse_notes,
+            commands::nursing::record_medication_administration,
+            commands::nursing::get_medication_administrations,
             // Laboratory
             commands::lab::get_lab_catalog,
             commands::lab::create_lab_test,
@@ -1193,6 +1200,9 @@ pub fn run() {
             commands::lab::create_lab_order,
             commands::lab::get_lab_order_tests,
             commands::lab::update_lab_result,
+            // Phase 6.2 lab workflow: sample collection + result approval.
+            commands::lab::collect_lab_sample,
+            commands::lab::approve_lab_result,
             // Radiology (Phase 2-D, SRS FR-0140–FR-0142) — imaging orders,
             // radiologist reports, and report verification workflow. RBAC
             // uses the seven dedicated `Radiology*` permission variants

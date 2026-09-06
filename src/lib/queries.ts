@@ -26,6 +26,9 @@ import type {
   Ward,
   Bed,
   IpdAdmission,
+  VitalReading,
+  NurseNote,
+  MedicationAdministration,
   LabTestCatalog,
   LabOrder,
   LabOrderTest,
@@ -825,6 +828,94 @@ export function useDischargePatient() {
   });
 }
 
+// ── Nursing Station (SRS §2.7 — Phase 6.1) ────────────────────────────────
+//
+// Wires the 6 nursing commands added in `src-tauri/src/commands/nursing.rs`:
+//   record_vitals / get_vitals_trend
+//   create_nurse_note / get_nurse_notes
+//   record_medication_administration / get_medication_administrations
+//
+// Writes invalidate the broad ["nursing"] prefix (trend, notes, MAR of the
+// selected admission refresh together) plus ["ipd"] because vitals/notes
+// only exist for admitted patients and the ward list shares that data.
+
+export function useVitalsTrend(admissionId: number | null) {
+  return useQuery({
+    queryKey: ["nursing", "vitals", admissionId ?? -1],
+    queryFn: () => invoke<VitalReading[]>("get_vitals_trend", { admissionId }),
+    enabled: admissionId != null,
+  });
+}
+
+export function useRecordVitals() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: {
+      admission_id: number;
+      temperature_c?: number | null;
+      systolic_bp?: number | null;
+      diastolic_bp?: number | null;
+      pulse_bpm?: number | null;
+      resp_rate?: number | null;
+      spo2_pct?: number | null;
+      pain_score?: number | null;
+      notes?: string | null;
+    }) => invoke<number>("record_vitals", { request: req }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["nursing"] });
+      toast.success("Vitals recorded.");
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+export function useNurseNotes(admissionId: number | null) {
+  return useQuery({
+    queryKey: ["nursing", "notes", admissionId ?? -1],
+    queryFn: () => invoke<NurseNote[]>("get_nurse_notes", { admissionId }),
+    enabled: admissionId != null,
+  });
+}
+
+export function useCreateNurseNote() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: { admission_id: number; note_type?: string; content: string }) =>
+      invoke<number>("create_nurse_note", { request: req }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["nursing"] });
+      toast.success("Note saved.");
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+export function useMedicationAdministrations(admissionId: number | null) {
+  return useQuery({
+    queryKey: ["nursing", "mar", admissionId ?? -1],
+    queryFn: () =>
+      invoke<MedicationAdministration[]>("get_medication_administrations", { admissionId }),
+    enabled: admissionId != null,
+  });
+}
+
+export function useRecordMedicationAdministration() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: {
+      admission_id: number;
+      prescription_item_id: number;
+      status: string;
+      notes?: string | null;
+    }) => invoke<number>("record_medication_administration", { request: req }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["nursing"] });
+      toast.success("Medication administration recorded.");
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
 // ── Laboratory ───────────────────────────────────────────────────────────
 
 export function useLabCatalog() {
@@ -878,9 +969,44 @@ export function useUpdateLabResult() {
       result_abnormal_flag?: string | null;
       result_notes?: string | null;
     }) => invoke("update_lab_result", { result: req }),
+    onSuccess: (_void, req) => {
+      qc.invalidateQueries({ queryKey: ["lab"] });
+      if (req.result_abnormal_flag === "critical") {
+        toast.error("CRITICAL VALUE recorded — notify the ordering doctor immediately.", { duration: 10000 });
+      } else {
+        toast.success("Result saved — awaiting approval.");
+      }
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+// ── Lab workflow (SRS §2.4 — Phase 6.2): sample collection + approval ─────
+
+export function useCollectLabSample() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (labOrderId: number) =>
+      invoke<string>("collect_lab_sample", { labOrderId }),
+    onSuccess: (barcode) => {
+      qc.invalidateQueries({ queryKey: ["lab"] });
+      toast.success(`Sample collected — barcode ${barcode}.`);
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+export function useApproveLabResult() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: { labOrderTestId: number; criticalAcknowledged: boolean }) =>
+      invoke<void>("approve_lab_result", {
+        labOrderTestId: req.labOrderTestId,
+        criticalAcknowledged: req.criticalAcknowledged,
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["lab"] });
-      toast.success("Result saved.");
+      toast.success("Result approved and released.");
     },
     onError: (err) => toast.error(String(err)),
   });

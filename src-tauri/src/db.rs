@@ -663,6 +663,55 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
         )
     "#).execute(pool).await.map_err(|e| format!("lab_order_tests: {}", e))?;
 
+    // ── 5b. Lab workflow completion (SRS §2.4 — Phase 6.2, 2026-09-06) ──
+    //
+    // Sample collection tracking: barcode = "<order_id>-<test_row_id>" —
+    // printable, unique, and stable without a separate barcode registry.
+    // Approval workflow: tech enters results (status 'resulted'), lab
+    // in-charge approves (status 'approved'). Critical-value protocol:
+    // a critical result must be acknowledged by the approver (the SRS
+    // "critical result alerting" — the approver confirms the doctor was
+    // phoned before release). All statements are additive + idempotent.
+    sqlx::query("ALTER TABLE lab_orders ADD COLUMN IF NOT EXISTS sample_barcode VARCHAR(40)")
+        .execute(pool).await.map_err(|e| format!("lab_orders.sample_barcode: {}", e))?;
+    sqlx::query("ALTER TABLE lab_orders ADD COLUMN IF NOT EXISTS sampled_at TIMESTAMPTZ")
+        .execute(pool).await.map_err(|e| format!("lab_orders.sampled_at: {}", e))?;
+    sqlx::query("ALTER TABLE lab_orders ADD COLUMN IF NOT EXISTS sampled_by_user_id INT REFERENCES users(id) ON DELETE SET NULL")
+        .execute(pool).await.map_err(|e| format!("lab_orders.sampled_by_user_id: {}", e))?;
+    sqlx::query("ALTER TABLE lab_orders ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ")
+        .execute(pool).await.map_err(|e| format!("lab_orders.approved_at: {}", e))?;
+    sqlx::query("ALTER TABLE lab_orders ADD COLUMN IF NOT EXISTS approved_by_user_id INT REFERENCES users(id) ON DELETE SET NULL")
+        .execute(pool).await.map_err(|e| format!("lab_orders.approved_by_user_id: {}", e))?;
+    // Approval state per test row: NULL = not yet resulted, 'entered' =
+    // tech result waiting approval, 'approved' = released by in-charge,
+    // 'amended' = post-approval correction (audit trail preserved via
+    // the original completed_at + amendment note).
+    sqlx::query("ALTER TABLE lab_order_tests ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20)")
+        .execute(pool).await.map_err(|e| format!("lab_order_tests.approval_status: {}", e))?;
+    sqlx::query("ALTER TABLE lab_order_tests ADD COLUMN IF NOT EXISTS critical_acknowledged_at TIMESTAMPTZ")
+        .execute(pool).await.map_err(|e| format!("lab_order_tests.critical_acknowledged_at: {}", e))?;
+    sqlx::query("ALTER TABLE lab_order_tests ADD COLUMN IF NOT EXISTS critical_acknowledged_by_user_id INT REFERENCES users(id) ON DELETE SET NULL")
+        .execute(pool).await.map_err(|e| format!("lab_order_tests.critical_acknowledged_by_user_id: {}", e))?;
+    // Integrity: approval_status vocabulary + critical-release rule. A
+    // critical result may sit 'entered' (alert raised, awaiting
+    // acknowledgment), but may only be 'approved' (released to clinicians)
+    // AFTER its critical flag has been acknowledged.
+    sqlx::query("ALTER TABLE lab_order_tests DROP CONSTRAINT IF EXISTS chk_lot_approval_status").execute(pool).await.ok();
+    sqlx::query(
+        "ALTER TABLE lab_order_tests ADD CONSTRAINT chk_lot_approval_status \
+         CHECK (approval_status IS NULL OR approval_status IN ('entered','approved','amended'))",
+    ).execute(pool).await.map_err(|e| format!("chk_lot_approval_status: {}", e))?;
+    sqlx::query("ALTER TABLE lab_order_tests DROP CONSTRAINT IF EXISTS chk_lot_critical_release").execute(pool).await.ok();
+    sqlx::query(
+        "ALTER TABLE lab_order_tests ADD CONSTRAINT chk_lot_critical_release \
+         CHECK (approval_status IS DISTINCT FROM 'approved' OR result_abnormal_flag IS DISTINCT FROM 'critical' \
+                OR critical_acknowledged_at IS NOT NULL)",
+    ).execute(pool).await.map_err(|e| format!("chk_lot_critical_release: {}", e))?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_lab_orders_status ON lab_orders(status, ordered_at DESC)")
+        .execute(pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_lot_approval ON lab_order_tests(approval_status)")
+        .execute(pool).await.ok();
+
     // ── 6. Billing & finance ──────────────────────────────────────────────
     sqlx::query(r#"
         CREATE TABLE IF NOT EXISTS bills (
@@ -974,6 +1023,73 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
         ) AS t(brand_name, generic_name, form, strength, category)
         WHERE NOT EXISTS (SELECT 1 FROM medications)
     "#).execute(pool).await.ok();
+
+    // ── 4b. Nursing Station (SRS §2.7 — Phase 6.1, 2026-09-05) ───────────
+    //
+    // Placement note: this block lives AFTER the Pharmacy tables because
+    // medication_administrations references prescription_items. Statement
+    // order is the migration ordering for fresh installs — an earlier
+    // placement (right after ipd_admissions) breaks first launch on a new
+    // database. Caught by nursing_tests.rs fresh-DB provisioning.
+    //
+    // Vitals: one row per reading; the 7-reading trend view is the last 7
+    // rows ordered by recorded_at DESC. Reference ranges per SRS §2.7.
+    sqlx::query(r#"
+        CREATE TABLE IF NOT EXISTS vitals (
+            id                  SERIAL PRIMARY KEY,
+            admission_id        INT          NOT NULL REFERENCES ipd_admissions(id) ON DELETE CASCADE,
+            temperature_c       NUMERIC(4,1)  CHECK (temperature_c IS NULL OR temperature_c BETWEEN 30 AND 45),
+            systolic_bp         INT          CHECK (systolic_bp IS NULL OR systolic_bp BETWEEN 40 AND 300),
+            diastolic_bp        INT          CHECK (diastolic_bp IS NULL OR diastolic_bp BETWEEN 20 AND 200),
+            pulse_bpm           INT          CHECK (pulse_bpm IS NULL OR pulse_bpm BETWEEN 20 AND 250),
+            resp_rate           INT          CHECK (resp_rate IS NULL OR resp_rate BETWEEN 5 AND 80),
+            spo2_pct            INT          CHECK (spo2_pct IS NULL OR spo2_pct BETWEEN 30 AND 100),
+            pain_score          INT          CHECK (pain_score IS NULL OR pain_score BETWEEN 0 AND 10),
+            recorded_by_user_id INT          REFERENCES users(id) ON DELETE SET NULL,
+            recorded_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            notes               TEXT
+        )
+    "#).execute(pool).await.map_err(|e| format!("vitals: {}", e))?;
+
+    // Nurse notes: shift notes / observations per patient per admission.
+    sqlx::query(r#"
+        CREATE TABLE IF NOT EXISTS nurse_notes (
+            id                  SERIAL PRIMARY KEY,
+            admission_id        INT          NOT NULL REFERENCES ipd_admissions(id) ON DELETE CASCADE,
+            author_user_id      INT          REFERENCES users(id) ON DELETE SET NULL,
+            note_type           VARCHAR(20)  NOT NULL DEFAULT 'shift',
+            content             TEXT         NOT NULL,
+            created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        )
+    "#).execute(pool).await.map_err(|e| format!("nurse_notes: {}", e))?;
+
+    // MAR (Medication Administration Record): one row per administration
+    // attempt. Links the prescription item being administered; status follows
+    // the SRS vocabulary administered|held|refused.
+    sqlx::query(r#"
+        CREATE TABLE IF NOT EXISTS medication_administrations (
+            id                       SERIAL PRIMARY KEY,
+            admission_id            INT          NOT NULL REFERENCES ipd_admissions(id) ON DELETE CASCADE,
+            prescription_item_id     INT          NOT NULL REFERENCES prescription_items(id) ON DELETE CASCADE,
+            patient_id              INT          NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
+            status                  VARCHAR(20)  NOT NULL DEFAULT 'administered',
+            administered_by_user_id INT          REFERENCES users(id) ON DELETE SET NULL,
+            administered_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            notes                    TEXT
+        )
+    "#).execute(pool).await.map_err(|e| format!("medication_administrations: {}", e))?;
+
+    // Integrity: MAR status must be a known value.
+    sqlx::query("ALTER TABLE medication_administrations DROP CONSTRAINT IF EXISTS chk_mar_status").execute(pool).await.ok();
+    sqlx::query(
+        "ALTER TABLE medication_administrations ADD CONSTRAINT chk_mar_status \
+         CHECK (status IN ('administered', 'held', 'refused'))",
+    ).execute(pool).await.map_err(|e| format!("chk_mar_status: {}", e))?;
+
+    // Indexes for the ward workflow queries.
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_vitals_admission ON vitals(admission_id, recorded_at DESC)").execute(pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_nurse_notes_admission ON nurse_notes(admission_id, created_at DESC)").execute(pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_mar_admission ON medication_administrations(admission_id, administered_at DESC)").execute(pool).await.ok();
 
     // ── Radiology tables (FR-0140–FR-0142) ──────────────────────────────
     sqlx::query(r#"
