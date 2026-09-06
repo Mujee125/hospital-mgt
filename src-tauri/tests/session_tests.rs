@@ -340,7 +340,9 @@ async fn wp2_i10_login_invalidates_prior_sessions() {
 async fn wp2_i11_high_risk_command_inventory() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let expected: &[(&str, usize)] = &[
-        ("src/commands/billing.rs", 2),
+        // Phase 6.3 (2026-09-06): billing.rs 2 → 8 — refunds, advances,
+        // cancellation, claims are new high-risk financial writes.
+        ("src/commands/billing.rs", 8),
         ("src/commands/backup.rs", 3), // Phase 2: backup/restore/delete upgraded
         ("src/commands/encounters.rs", 1),
         ("src/commands/ipd.rs", 2),
@@ -370,9 +372,9 @@ async fn wp2_i11_high_risk_command_inventory() {
         );
         total += n;
     }
-    // 37 original sites + 2 Phase 6.2 lab workflow commands + 3 Phase 6.1
-    // nursing commands = 42.
-    assert_eq!(total, 42, "total high-risk guard sites must match the decision log + Phase 2 backup + Phase 6 nursing/lab workflows");
+    // 37 original sites + 2 Phase 6.2 lab + 3 Phase 6.1 nursing + 6 Phase
+    // 6.3 billing = 48.
+    assert_eq!(total, 48, "total high-risk guard sites must match the decision log + Phase 2 backup + Phase 6 nursing/lab/billing workflows");
 }
 
 // ── G.2.3 Negative tests (WP2-N01 … N03) ──────────────────────────────────────

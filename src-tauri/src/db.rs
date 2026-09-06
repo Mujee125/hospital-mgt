@@ -758,6 +758,97 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
         )
     "#).execute(pool).await.map_err(|e| format!("payments: {}", e))?;
 
+    // ── 6b. Billing workflow completion (SRS §2.10 — Phase 6.3, 2026-09-06)
+    //
+    // Concurrency-safe sequential invoice numbers: a SEQUENCE replaces the
+    // old COUNT(*)+1 (which could hand the same number to two simultaneous
+    // bills). INV-YYYY-NNNNNN, assigned inside the create transaction. The
+    // backfill converts any legacy date-counted numbers once, idempotently.
+    sqlx::query("CREATE SEQUENCE IF NOT EXISTS bill_number_seq START 1")
+        .execute(pool).await.map_err(|e| format!("bill_number_seq: {}", e))?;
+    sqlx::query(
+        "UPDATE bills SET bill_number = 'INV-' || TO_CHAR(created_at, 'YYYY') || '-' || LPAD(id::TEXT, 6, '0') \
+         WHERE bill_number NOT LIKE 'INV-%'",
+    ).execute(pool).await.ok();
+
+    // Refunds: a refund reduces the effective amount paid on a bill but
+    // NEVER deletes the payment row (financial append-only audit trail).
+    sqlx::query(r#"
+        CREATE TABLE IF NOT EXISTS refunds (
+            id                SERIAL PRIMARY KEY,
+            bill_id           INT          NOT NULL REFERENCES bills(id) ON DELETE RESTRICT,
+            payment_id        INT          REFERENCES payments(id) ON DELETE SET NULL,
+            amount            NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+            reason            TEXT         NOT NULL,
+            refunded_by_user_id INT        REFERENCES users(id) ON DELETE SET NULL,
+            refunded_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        )
+    "#).execute(pool).await.map_err(|e| format!("refunds: {}", e))?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_refunds_bill ON refunds(bill_id, refunded_at DESC)")
+        .execute(pool).await.ok();
+
+    // Patient advances (deposits): money held BEFORE a bill exists (e.g. IPD
+    // admission deposits). Applied to a bill at settlement by the command.
+    sqlx::query(r#"
+        CREATE TABLE IF NOT EXISTS patient_advances (
+            id                SERIAL PRIMARY KEY,
+            patient_id        INT          NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
+            amount            NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+            remaining         NUMERIC(14,2) NOT NULL,
+            status            VARCHAR(20)  NOT NULL DEFAULT 'active' CHECK (status IN ('active','applied','refunded')),
+            method            VARCHAR(20)  NOT NULL DEFAULT 'cash',
+            reference_number  VARCHAR(80),
+            notes            TEXT,
+            received_by_user_id INT        REFERENCES users(id) ON DELETE SET NULL,
+            created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        )
+    "#).execute(pool).await.map_err(|e| format!("patient_advances: {}", e))?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_advances_patient ON patient_advances(patient_id, status)")
+        .execute(pool).await.ok();
+
+    // Insurance / TPA claim tracking per bill.
+    sqlx::query(r#"
+        CREATE TABLE IF NOT EXISTS insurance_claims (
+            id                SERIAL PRIMARY KEY,
+            bill_id           INT          NOT NULL REFERENCES bills(id) ON DELETE RESTRICT,
+            patient_id        INT          NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
+            insurer           VARCHAR(120) NOT NULL,
+            policy_number     VARCHAR(60),
+            claim_amount      NUMERIC(14,2) NOT NULL CHECK (claim_amount >= 0),
+            approved_amount   NUMERIC(14,2),
+            status            VARCHAR(20)  NOT NULL DEFAULT 'draft'
+                              CHECK (status IN ('draft','submitted','approved','partially_approved','rejected','settled')),
+            submitted_at      TIMESTAMPTZ,
+            settled_at        TIMESTAMPTZ,
+            notes            TEXT,
+            created_by_user_id INT         REFERENCES users(id) ON DELETE SET NULL,
+            created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            updated_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            UNIQUE (bill_id, insurer)
+        )
+    "#).execute(pool).await.map_err(|e| format!("insurance_claims: {}", e))?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_claims_status ON insurance_claims(status, created_at DESC)")
+        .execute(pool).await.ok();
+
+    // Credit-note cancellation: a cancelled bill keeps its rows (audit) and
+    // is excluded from revenue. Payment reversal is a separate refund.
+    sqlx::query("ALTER TABLE bills ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ")
+        .execute(pool).await.map_err(|e| format!("bills.cancelled_at: {}", e))?;
+    sqlx::query("ALTER TABLE bills ADD COLUMN IF NOT EXISTS cancelled_by_user_id INT REFERENCES users(id) ON DELETE SET NULL")
+        .execute(pool).await.map_err(|e| format!("bills.cancelled_by_user_id: {}", e))?;
+    sqlx::query("ALTER TABLE bills ADD COLUMN IF NOT EXISTS cancellation_reason TEXT")
+        .execute(pool).await.map_err(|e| format!("bills.cancellation_reason: {}", e))?;
+    sqlx::query("ALTER TABLE bills ADD COLUMN IF NOT EXISTS credit_note_number VARCHAR(40)")
+        .execute(pool).await.map_err(|e| format!("bills.credit_note_number: {}", e))?;
+    // Cancellation status vocabulary: legacy draft/unpaid/paid/partial
+    // remain ('pending' is tolerated — the 10k synthetic seed used it
+    // historically); 'cancelled' marks a credit-noted bill.
+    sqlx::query("ALTER TABLE bills DROP CONSTRAINT IF EXISTS chk_bills_status").execute(pool).await.ok();
+    sqlx::query(
+        "ALTER TABLE bills ADD CONSTRAINT chk_bills_status \
+         CHECK (status IN ('draft','unpaid','partial','paid','pending','cancelled'))",
+    ).execute(pool).await.map_err(|e| format!("chk_bills_status: {}", e))?;
+
     // ── 7. Inventory ──────────────────────────────────────────────────────
     sqlx::query(r#"
         CREATE TABLE IF NOT EXISTS inventory_items (

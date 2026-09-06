@@ -29,6 +29,9 @@ import type {
   VitalReading,
   NurseNote,
   MedicationAdministration,
+  Refund,
+  PatientAdvance,
+  InsuranceClaim,
   LabTestCatalog,
   LabOrder,
   LabOrderTest,
@@ -1055,6 +1058,7 @@ export function useCreateBill() {
       bill_type?: string;
       discount?: number;
       tax?: number;
+      discountApproved?: boolean;
       items: {
         item_type: string;
         description: string;
@@ -1062,11 +1066,149 @@ export function useCreateBill() {
         unit_price: number;
         reference_id?: number | null;
       }[];
-    }) => invoke<number>("create_bill", { bill: req }),
+    }) =>
+      invoke<number>("create_bill", {
+        bill: req,
+        discountApproved: req.discountApproved ?? false,
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["bills"] });
       qc.invalidateQueries({ queryKey: ["dashboard"] });
       toast.success("Invoice created.");
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+// ── Billing workflow (SRS §2.10 — Phase 6.3): refunds, advances,
+// claims, credit-note cancellation.
+
+export function useRefunds(billId: number | null) {
+  return useQuery({
+    queryKey: ["bills", billId, "refunds"],
+    queryFn: () => invoke<Refund[]>("get_refunds", { billId }),
+    enabled: billId != null,
+  });
+}
+
+export function useRecordRefund() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: { bill_id: number; amount: number; reason: string; payment_id?: number | null }) =>
+      invoke<number>("record_refund", { refund: req }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["bills"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
+      toast.success("Refund recorded.");
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+export function usePatientAdvances(patientId?: number | null) {
+  return useQuery({
+    queryKey: ["advances", patientId ?? null],
+    queryFn: () =>
+      invoke<PatientAdvance[]>("get_patient_advances", {
+        patientId: patientId ?? null,
+      }),
+  });
+}
+
+export function useRecordAdvance() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: {
+      patient_id: number;
+      amount: number;
+      method?: string;
+      reference_number?: string | null;
+      notes?: string | null;
+    }) => invoke<number>("record_advance", { advance: req }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["advances"] });
+      toast.success("Advance recorded.");
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+export function useApplyAdvance() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: { advanceId: number; billId: number; amount: number }) =>
+      invoke<void>("apply_advance", {
+        advanceId: req.advanceId,
+        billId: req.billId,
+        amount: req.amount,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["bills"] });
+      qc.invalidateQueries({ queryKey: ["advances"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
+      toast.success("Advance applied to the invoice.");
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+export function useCancelBill() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: { billId: number; reason: string }) =>
+      invoke<string>("cancel_bill", {
+        billId: req.billId,
+        reason: req.reason,
+      }),
+    onSuccess: (creditNote) => {
+      qc.invalidateQueries({ queryKey: ["bills"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
+      toast.success(`Invoice cancelled — credit note ${creditNote}.`);
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+export function useInsuranceClaims(statusFilter?: string | null) {
+  return useQuery({
+    queryKey: ["claims", statusFilter ?? null],
+    queryFn: () =>
+      invoke<InsuranceClaim[]>("get_insurance_claims", {
+        statusFilter: statusFilter ?? null,
+      }),
+  });
+}
+
+export function useCreateInsuranceClaim() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: {
+      bill_id: number;
+      insurer: string;
+      policy_number?: string | null;
+      claim_amount: number;
+      notes?: string | null;
+    }) => invoke<number>("create_insurance_claim", { claim: req }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["claims"] });
+      toast.success("Claim created.");
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+export function useUpdateInsuranceClaimStatus() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: {
+      id: number;
+      status: string;
+      approved_amount?: number | null;
+      notes?: string | null;
+    }) => invoke<void>("update_insurance_claim_status", { update: req }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["claims"] });
+      toast.success("Claim updated.");
     },
     onError: (err) => toast.error(String(err)),
   });

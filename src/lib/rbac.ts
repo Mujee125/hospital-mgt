@@ -51,6 +51,7 @@ export const PERMISSIONS = {
   BillingCreate: "billing.create",
   BillingManage: "billing.manage",
   PaymentsManage: "payments.manage",
+  BillingApprove: "billing.approve",
   InventoryView: "inventory.view",
   InventoryManage: "inventory.manage",
   UsersView: "users.view",

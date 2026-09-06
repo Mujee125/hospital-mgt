@@ -87,6 +87,11 @@ pub enum Permission {
     BillingCreate,
     BillingManage,
     PaymentsManage,
+    /// Approve financial exceptions (Phase 6.3): refunds, bill cancellation
+    /// (credit notes), and above-threshold discounts. Deliberately held ONLY
+    /// by super admin — a billing clerk can create bills and take payments
+    /// but cannot reverse money or discount heavily without a manager.
+    BillingApprove,
     // Inventory
     InventoryView,
     InventoryManage,
@@ -159,6 +164,7 @@ impl Permission {
             Permission::BillingCreate => "billing.create",
             Permission::BillingManage => "billing.manage",
             Permission::PaymentsManage => "payments.manage",
+            Permission::BillingApprove => "billing.approve",
             Permission::InventoryView => "inventory.view",
             Permission::InventoryManage => "inventory.manage",
             Permission::UsersView => "users.view",
@@ -221,6 +227,7 @@ impl Permission {
             Permission::BillingCreate,
             Permission::BillingManage,
             Permission::PaymentsManage,
+            Permission::BillingApprove,
             Permission::InventoryView,
             Permission::InventoryManage,
             Permission::UsersView,

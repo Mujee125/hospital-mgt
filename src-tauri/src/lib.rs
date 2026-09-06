@@ -1263,6 +1263,17 @@ pub fn run() {
             commands::billing::create_bill,
             commands::billing::record_payment,
             commands::billing::get_payments,
+            // Phase 6.3 billing workflow: refunds, advances, claims,
+            // credit-note cancellation.
+            commands::billing::record_refund,
+            commands::billing::get_refunds,
+            commands::billing::record_advance,
+            commands::billing::apply_advance,
+            commands::billing::get_patient_advances,
+            commands::billing::cancel_bill,
+            commands::billing::create_insurance_claim,
+            commands::billing::update_insurance_claim_status,
+            commands::billing::get_insurance_claims,
             // Inventory (CR-21, SRS FR-0180/0181/0185)
             commands::inventory::get_inventory_items,
             commands::inventory::get_inventory_item,

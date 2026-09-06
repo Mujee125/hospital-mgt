@@ -334,6 +334,56 @@ export interface Bill {
   updated_at: string;
   patient_name: string | null;
   amount_paid: number | null;
+  // Phase 6.3 workflow fields.
+  cancelled_at: string | null;
+  cancelled_by_user_id: number | null;
+  cancellation_reason: string | null;
+  credit_note_number: string | null;
+  refund_total: number | null;
+}
+
+// ── Billing workflow (SRS §2.10 — Phase 6.3) ─────────────────────────────
+
+export interface Refund {
+  id: number;
+  bill_id: number;
+  payment_id: number | null;
+  amount: number;
+  reason: string;
+  refunded_by_user_id: number | null;
+  refunded_at: string;
+}
+
+export interface PatientAdvance {
+  id: number;
+  patient_id: number;
+  amount: number;
+  remaining: number;
+  status: string;
+  method: string | null;
+  reference_number: string | null;
+  notes: string | null;
+  received_by_user_id: number | null;
+  created_at: string;
+}
+
+export interface InsuranceClaim {
+  id: number;
+  bill_id: number;
+  patient_id: number;
+  insurer: string;
+  policy_number: string | null;
+  claim_amount: number;
+  approved_amount: number | null;
+  status: string;
+  submitted_at: string | null;
+  settled_at: string | null;
+  notes: string | null;
+  created_by_user_id: number | null;
+  created_at: string;
+  updated_at: string | null;
+  patient_name: string | null;
+  bill_number: string | null;
 }
 
 export interface BillItem {

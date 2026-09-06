@@ -626,6 +626,18 @@ pub struct Bill {
     pub patient_name: Option<String>,
     #[serde(default)]
     pub amount_paid: Option<rust_decimal::Decimal>,
+    // Phase 6.3: credit-note cancellation fields.
+    #[serde(default)]
+    pub cancelled_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub cancelled_by_user_id: Option<i32>,
+    #[serde(default)]
+    pub cancellation_reason: Option<String>,
+    #[serde(default)]
+    pub credit_note_number: Option<String>,
+    // Phase 6.3: gross refund total for the detail panel.
+    #[serde(default)]
+    pub refund_total: Option<rust_decimal::Decimal>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
@@ -689,6 +701,111 @@ pub struct CreatePayment {
     pub payment_method: Option<String>,
     #[serde(default)]
     pub reference_number: Option<String>,
+}
+
+// ── Billing workflow (SRS §2.10 — Phase 6.3) ─────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct Refund {
+    pub id: i32,
+    pub bill_id: i32,
+    #[serde(default)]
+    pub payment_id: Option<i32>,
+    pub amount: rust_decimal::Decimal,
+    pub reason: String,
+    #[serde(default)]
+    pub refunded_by_user_id: Option<i32>,
+    pub refunded_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateRefund {
+    pub bill_id: i32,
+    pub amount: f64,
+    /// Required — an audit-grade reversal always states why.
+    pub reason: String,
+    #[serde(default)]
+    pub payment_id: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct PatientAdvance {
+    pub id: i32,
+    pub patient_id: i32,
+    pub amount: rust_decimal::Decimal,
+    pub remaining: rust_decimal::Decimal,
+    pub status: String,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub reference_number: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub received_by_user_id: Option<i32>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateAdvance {
+    pub patient_id: i32,
+    pub amount: f64,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub reference_number: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct InsuranceClaim {
+    pub id: i32,
+    pub bill_id: i32,
+    pub patient_id: i32,
+    pub insurer: String,
+    #[serde(default)]
+    pub policy_number: Option<String>,
+    pub claim_amount: rust_decimal::Decimal,
+    #[serde(default)]
+    pub approved_amount: Option<rust_decimal::Decimal>,
+    pub status: String,
+    #[serde(default)]
+    pub submitted_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub settled_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub created_by_user_id: Option<i32>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub patient_name: Option<String>,
+    #[serde(default)]
+    pub bill_number: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateInsuranceClaim {
+    pub bill_id: i32,
+    pub insurer: String,
+    #[serde(default)]
+    pub policy_number: Option<String>,
+    pub claim_amount: f64,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateClaimStatus {
+    pub id: i32,
+    pub status: String,
+    #[serde(default)]
+    pub approved_amount: Option<f64>,
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 // ── Inventory (CR-21, SRS FR-0180/0181/0185) ──────────────────────────────
