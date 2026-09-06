@@ -32,6 +32,8 @@ import type {
   Refund,
   PatientAdvance,
   InsuranceClaim,
+  Expense,
+  AccountsSummary,
   LabTestCatalog,
   LabOrder,
   LabOrderTest,
@@ -1222,6 +1224,65 @@ export function useUpdateInsuranceClaimStatus() {
       toast.success("Claim updated.");
     },
     onError: (err) => toast.error(String(err)),
+  });
+}
+
+// ── Accounts — expense ledger (SRS §2.15 — Phase 8) ───────────────────────
+
+export function useExpenses(fromDate: string, toDate: string, includeVoided = false) {
+  return useQuery({
+    queryKey: ["expenses", fromDate, toDate, includeVoided],
+    queryFn: () =>
+      invoke<Expense[]>("get_expenses", {
+        fromDate,
+        toDate,
+        includeVoided,
+      }),
+    enabled: Boolean(fromDate) && Boolean(toDate),
+  });
+}
+
+export function useCreateExpense() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: {
+      category: string;
+      description: string;
+      amount: number;
+      expense_date?: string | null;
+      paid_to?: string | null;
+      payment_method?: string;
+      reference_number?: string | null;
+    }) => invoke<number>("create_expense", { expense: req }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["expenses"] });
+      qc.invalidateQueries({ queryKey: ["reports", "accounts-summary"] });
+      toast.success("Expense recorded.");
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+export function useVoidExpense() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: { id: number; reason: string }) =>
+      invoke<void>("void_expense", { void: req }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["expenses"] });
+      qc.invalidateQueries({ queryKey: ["reports", "accounts-summary"] });
+      toast.success("Expense voided.");
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+export function useAccountsSummary(fromDate: string, toDate: string) {
+  return useQuery({
+    queryKey: ["reports", "accounts-summary", fromDate, toDate],
+    queryFn: () =>
+      invoke<AccountsSummary>("get_accounts_summary", { fromDate, toDate }),
+    enabled: Boolean(fromDate) && Boolean(toDate),
   });
 }
 

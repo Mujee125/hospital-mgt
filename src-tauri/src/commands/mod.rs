@@ -3,6 +3,7 @@
 
 pub mod appointments;
 pub mod backup;
+pub mod accounts;
 pub mod billing;
 pub mod blood_bank;
 pub mod dashboard;

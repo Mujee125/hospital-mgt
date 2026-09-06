@@ -386,6 +386,36 @@ export interface InsuranceClaim {
   bill_number: string | null;
 }
 
+// ── Accounts — expense ledger (SRS §2.15 — Phase 8) ───────────────────────
+
+export interface Expense {
+  id: number;
+  category: string;
+  description: string;
+  amount: number;
+  expense_date: string;
+  paid_to: string | null;
+  payment_method: string;
+  reference_number: string | null;
+  recorded_by_user_id: number | null;
+  created_at: string;
+  voided_at: string | null;
+  voided_by_user_id: number | null;
+  void_reason: string | null;
+  recorded_by_name: string | null;
+}
+
+export interface AccountsSummary {
+  from_date: string;
+  to_date: string;
+  total_revenue: number;
+  total_refunded: number;
+  total_expenses: number;
+  net_position: number;
+  expense_count: number;
+  by_category: { category: string; total: number; count: number }[];
+}
+
 export interface BillItem {
   id: number;
   bill_id: number;

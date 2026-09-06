@@ -13,9 +13,10 @@
  * threshold) are enforced server-side; the UI only surfaces them.
  */
 import { useState } from "react";
-import { Receipt, Plus, Loader2, DollarSign, Trash2, Undo2, Ban, ShieldCheck, Wallet, FileText, Landmark } from "lucide-react";
+import { Receipt, Plus, Loader2, DollarSign, Trash2, Undo2, Ban, ShieldCheck, Wallet, FileText, Landmark, TrendingDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -27,8 +28,9 @@ import {
   useRefunds, useRecordRefund, useCancelBill,
   usePatientAdvances, useRecordAdvance, useApplyAdvance,
   useInsuranceClaims, useCreateInsuranceClaim, useUpdateInsuranceClaimStatus,
-  usePatientsEhr,
+  usePatientsEhr, useExpenses, useCreateExpense, useVoidExpense, useAccountsSummary,
 } from "@/lib/queries";
+import type { Expense } from "@/lib/models";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
 import { formatMoney } from "@/lib/utils";
@@ -49,6 +51,7 @@ export function Billing() {
             <TabsTrigger value="invoices"><Receipt className="h-4 w-4 mr-1.5" /> Invoices</TabsTrigger>
             <TabsTrigger value="advances"><Wallet className="h-4 w-4 mr-1.5" /> Advances</TabsTrigger>
             <TabsTrigger value="claims"><Landmark className="h-4 w-4 mr-1.5" /> Insurance claims</TabsTrigger>
+            <TabsTrigger value="expenses"><TrendingDown className="h-4 w-4 mr-1.5" /> Expenses</TabsTrigger>
           </TabsList>
           <TabsContent value="invoices" className="pt-4">
             <InvoicesTab canApprove={has(PERMISSIONS.BillingApprove)} />
@@ -58,6 +61,9 @@ export function Billing() {
           </TabsContent>
           <TabsContent value="claims" className="pt-4">
             <ClaimsTab />
+          </TabsContent>
+          <TabsContent value="expenses" className="pt-4">
+            <ExpensesTab canManage={has(PERMISSIONS.BillingManage)} canApprove={has(PERMISSIONS.BillingApprove)} />
           </TabsContent>
         </Tabs>
       </div>
@@ -702,6 +708,254 @@ function ClaimsTab() {
             <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
             <Button disabled={!approveAmount || update.isPending} onClick={() => approveId != null && doTransition(approveId, "partially_approved", parseFloat(approveAmount) || 0)}>
               {update.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Approve partially"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </SectionCard>
+  );
+}
+
+// ── Expenses tab (SRS §2.15 — Phase 8 accounts module) ──────────────────────
+//
+// Income-vs-expense summary strip + expense ledger with record/void.
+// Recording needs BillingManage; voiding needs BillingApprove (both
+// enforced server-side; the UI only gates the affordances).
+
+const EXPENSE_CATEGORIES = [
+  "salary", "utilities", "rent", "supplies", "maintenance",
+  "equipment", "transport", "marketing", "other",
+] as const;
+
+function ExpensesTab({ canManage, canApprove }: { canManage: boolean; canApprove: boolean }) {
+  const today = new Date();
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const [fromDate, setFromDate] = useState(fmt(monthStart));
+  const [toDate, setToDate] = useState(fmt(today));
+
+  const { data: summary } = useAccountsSummary(fromDate, toDate);
+  const { data: expenses = [], isLoading } = useExpenses(fromDate, toDate);
+  const create = useCreateExpense();
+  const voidExp = useVoidExpense();
+
+  const [addOpen, setAddOpen] = useState(false);
+  const [form, setForm] = useState({
+    category: "supplies",
+    description: "",
+    amount: "",
+    expense_date: fmt(today),
+    paid_to: "",
+    method: "cash",
+    reference_number: "",
+  });
+  const [voidTarget, setVoidTarget] = useState<Expense | null>(null);
+  const [voidReason, setVoidReason] = useState("");
+
+  const submit = async () => {
+    await create.mutateAsync({
+      category: form.category,
+      description: form.description,
+      amount: parseFloat(form.amount) || 0,
+      expense_date: form.expense_date || null,
+      paid_to: form.paid_to || null,
+      payment_method: form.method,
+      reference_number: form.reference_number || null,
+    });
+    setAddOpen(false);
+    setForm({ category: "supplies", description: "", amount: "", expense_date: fmt(today), paid_to: "", method: "cash", reference_number: "" });
+  };
+
+  const doVoid = async () => {
+    if (!voidTarget) return;
+    await voidExp.mutateAsync({ id: voidTarget.id, reason: voidReason });
+    setVoidTarget(null);
+    setVoidReason("");
+  };
+
+  return (
+    <SectionCard icon={TrendingDown} title="Expenses & financial summary">
+      {isLoading ? (
+        <LoadingState rows={5} />
+      ) : (
+        <div className="p-6 space-y-4">
+          {/* Income-vs-expense summary strip */}
+          {summary && (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="border border-border rounded-[var(--radius-md)] p-3">
+                <div className="text-[10px] uppercase font-semibold tracking-wide text-muted-foreground">Net revenue</div>
+                <div className="text-display-sm font-bold text-success">{formatMoney(summary.total_revenue)}</div>
+                <div className="text-[10px] text-muted-foreground">{fromDate} → {toDate}</div>
+              </div>
+              <div className="border border-border rounded-[var(--radius-md)] p-3">
+                <div className="text-[10px] uppercase font-semibold tracking-wide text-muted-foreground">Total expenses</div>
+                <div className="text-display-sm font-bold text-destructive">{formatMoney(summary.total_expenses)}</div>
+                <div className="text-[10px] text-muted-foreground">{summary.expense_count} entry(ies)</div>
+              </div>
+              <div className="border border-border rounded-[var(--radius-md)] p-3">
+                <div className="text-[10px] uppercase font-semibold tracking-wide text-muted-foreground">Net position</div>
+                <div className={`text-display-sm font-bold ${summary.net_position >= 0 ? "text-success" : "text-destructive"}`}>
+                  {formatMoney(summary.net_position)}
+                </div>
+                <div className="text-[10px] text-muted-foreground">Revenue − expenses</div>
+              </div>
+              <div className="border border-border rounded-[var(--radius-md)] p-3">
+                <div className="text-[10px] uppercase font-semibold tracking-wide text-muted-foreground">Top category</div>
+                <div className="text-sm font-bold text-foreground mt-1.5 truncate">
+                  {summary.by_category[0]?.category ?? "—"}
+                </div>
+                <div className="text-[10px] text-muted-foreground">
+                  {summary.by_category[0] ? formatMoney(summary.by_category[0].total) : "No expenses"}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <PageToolbar>
+            <div className="flex items-center gap-2">
+              <Input type="date" className="w-[150px]" value={fromDate} onChange={(e) => setFromDate(e.target.value)} aria-label="From date" />
+              <span className="text-xs text-muted-foreground">→</span>
+              <Input type="date" className="w-[150px]" value={toDate} onChange={(e) => setToDate(e.target.value)} aria-label="To date" />
+            </div>
+            {canManage && (
+              <Button className="ml-auto" onClick={() => setAddOpen(true)}>
+                <Plus className="h-4 w-4" /> Record expense
+              </Button>
+            )}
+          </PageToolbar>
+
+          {expenses.length === 0 ? (
+            <EmptyState
+              icon={TrendingDown}
+              title="No expenses in this range"
+              description="Salaries, utilities, rent and other operating expenses appear here with the income-vs-expense position."
+            />
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow className="border-border hover:bg-transparent">
+                  <TableHead>Date</TableHead>
+                  <TableHead>Category</TableHead>
+                  <TableHead>Description</TableHead>
+                  <TableHead>Paid to</TableHead>
+                  <TableHead className="text-right">Amount</TableHead>
+                  <TableHead className="text-right">Status</TableHead>
+                  {canApprove && <TableHead className="text-right">Action</TableHead>}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {expenses.map((e) => (
+                  <TableRow key={e.id} className={e.voided_at ? "opacity-60" : ""}>
+                    <TableCell className="font-mono text-xs">{e.expense_date}</TableCell>
+                    <TableCell className="capitalize font-medium">{e.category}</TableCell>
+                    <TableCell className="max-w-[240px] truncate" title={e.description}>{e.description}</TableCell>
+                    <TableCell className="text-muted-foreground">{e.paid_to ?? "—"}</TableCell>
+                    <TableCell className="text-right font-medium">{formatMoney(e.amount)}</TableCell>
+                    <TableCell className="text-right">
+                      {e.voided_at ? (
+                        <Badge variant="outline" className="text-destructive border-destructive/40" title={e.void_reason ?? ""}>
+                          voided
+                        </Badge>
+                      ) : (
+                        <span className="text-[10px] uppercase font-bold text-success">active</span>
+                      )}
+                    </TableCell>
+                    {canApprove && (
+                      <TableCell className="text-right">
+                        {!e.voided_at && (
+                          <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={() => setVoidTarget(e)}>
+                            <Ban className="h-3.5 w-3.5" /> Void
+                          </Button>
+                        )}
+                      </TableCell>
+                    )}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </div>
+      )}
+
+      {/* Record expense dialog */}
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Record expense</DialogTitle>
+            <DialogDescription>An operating-expense entry for the accounts ledger.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Category</Label>
+                <Select value={form.category} onValueChange={(v) => setForm({ ...form, category: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {EXPENSE_CATEGORIES.map((c) => (
+                      <SelectItem key={c} value={c} className="capitalize">{c}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="exp-amount">Amount</Label>
+                <Input id="exp-amount" type="number" min="0" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="exp-desc">Description</Label>
+              <Input id="exp-desc" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="e.g. August electricity bill" />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="exp-date">Date</Label>
+                <Input id="exp-date" type="date" value={form.expense_date} onChange={(e) => setForm({ ...form, expense_date: e.target.value })} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Method</Label>
+                <Select value={form.method} onValueChange={(v) => setForm({ ...form, method: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>{["cash", "card", "bank", "cheque"].map((m) => <SelectItem key={m} value={m} className="capitalize">{m}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="exp-paidto">Paid to (optional)</Label>
+                <Input id="exp-paidto" value={form.paid_to} onChange={(e) => setForm({ ...form, paid_to: e.target.value })} placeholder="e. g. LESCO" />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="exp-ref">Reference (optional)</Label>
+                <Input id="exp-ref" value={form.reference_number} onChange={(e) => setForm({ ...form, reference_number: e.target.value })} />
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
+            <Button disabled={!form.description.trim() || !form.amount || create.isPending} onClick={submit}>
+              {create.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Record expense"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Void confirm */}
+      <Dialog open={voidTarget != null} onOpenChange={(o) => !o && setVoidTarget(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-destructive">Void expense?</DialogTitle>
+            <DialogDescription>
+              The entry stays in the ledger for audit but is excluded from all summaries. This requires the manager permission.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <Label htmlFor="void-reason">Reason (required)</Label>
+            <Input id="void-reason" value={voidReason} onChange={(e) => setVoidReason(e.target.value)} placeholder="e.g. duplicate entry" />
+          </div>
+          <DialogFooter>
+            <DialogClose asChild><Button variant="outline">Keep entry</Button></DialogClose>
+            <Button variant="destructive" disabled={!voidReason.trim() || voidExp.isPending} onClick={doVoid}>
+              {voidExp.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Void expense"}
             </Button>
           </DialogFooter>
         </DialogContent>

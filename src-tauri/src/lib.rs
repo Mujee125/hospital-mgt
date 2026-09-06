@@ -1337,6 +1337,13 @@ pub fn run() {
             // DB size/connections/version, scheduler heartbeat, backup age,
             // disk free.
             commands::system_health::get_system_health,
+            // Accounts — expense ledger + income-vs-expense summary
+            // (SRS §2.15, Phase 8). View=BillingView, record=BillingManage,
+            // void=BillingApprove.
+            commands::accounts::get_expenses,
+            commands::accounts::create_expense,
+            commands::accounts::void_expense,
+            commands::accounts::get_accounts_summary,
             // Messaging
             messaging::send_message,
             messaging::get_messages,

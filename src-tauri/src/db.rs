@@ -849,6 +849,35 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
          CHECK (status IN ('draft','unpaid','partial','paid','pending','cancelled'))",
     ).execute(pool).await.map_err(|e| format!("chk_bills_status: {}", e))?;
 
+    // ── 6c. Accounts — expense ledger (SRS §2.15 — Phase 8, 2026-09-06) ──
+    //
+    // The revenue side of the finance module is the billing tables; this is
+    // the expense side (salaries, utilities, rent, supplies). Soft-delete
+    // only — voided expenses keep their rows (financial audit trail), are
+    // excluded from lists and summaries, and the void requires the manager
+    // permission + a reason, mirroring bill cancellation.
+    sqlx::query(r#"
+        CREATE TABLE IF NOT EXISTS expenses (
+            id                  SERIAL PRIMARY KEY,
+            category            VARCHAR(60)   NOT NULL,
+            description         TEXT          NOT NULL,
+            amount              NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+            expense_date        DATE          NOT NULL DEFAULT CURRENT_DATE,
+            paid_to             VARCHAR(160),
+            payment_method      VARCHAR(20)   NOT NULL DEFAULT 'cash',
+            reference_number    VARCHAR(80),
+            recorded_by_user_id INT           REFERENCES users(id) ON DELETE SET NULL,
+            created_at          TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+            voided_at           TIMESTAMPTZ,
+            voided_by_user_id   INT           REFERENCES users(id) ON DELETE SET NULL,
+            void_reason         TEXT
+        )
+    "#).execute(pool).await.map_err(|e| format!("expenses: {}", e))?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date DESC)")
+        .execute(pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category, expense_date DESC)")
+        .execute(pool).await.ok();
+
     // ── 7. Inventory ──────────────────────────────────────────────────────
     sqlx::query(r#"
         CREATE TABLE IF NOT EXISTS inventory_items (

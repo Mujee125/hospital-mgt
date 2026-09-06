@@ -1590,6 +1590,23 @@ fn format_backup_status_csv(r: BackupStatusReport) -> String {
     csv_join(rows)
 }
 
+fn format_accounts_summary_csv(r: crate::models::AccountsSummary) -> String {
+    let mut rows = vec![csv_row(&["Report".into(), "Accounts Summary".into()])];
+    rows.push(csv_row(&["From".into(), r.from_date.clone()]));
+    rows.push(csv_row(&["To".into(), r.to_date.clone()]));
+    rows.push(csv_row(&["Total collected".into(), fmt_f64(r.total_revenue + r.total_refunded)]));
+    rows.push(csv_row(&["Total refunded".into(), fmt_f64(r.total_refunded)]));
+    rows.push(csv_row(&["Net revenue".into(), fmt_f64(r.total_revenue)]));
+    rows.push(csv_row(&["Total expenses".into(), fmt_f64(r.total_expenses)]));
+    rows.push(csv_row(&["Net position".into(), fmt_f64(r.net_position)]));
+    rows.push(String::new());
+    rows.push(csv_row(&["Category".into(), "Total".into(), "Count".into()]));
+    for c in &r.by_category {
+        rows.push(csv_row(&[c.category.clone(), fmt_f64(c.total), c.count.to_string()]));
+    }
+    csv_join(rows)
+}
+
 // ── Phase 6.4 Tauri commands ────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1817,6 +1834,14 @@ pub async fn export_report_csv(
         "backup_status" => {
             let report = fetch_backup_status().await?;
             Ok(format_backup_status_csv(report))
+        }
+        "accounts_summary" => {
+            // SRS §2.15 (Phase 8) — the summary fetcher lives in the
+            // accounts module; the CSV surface stays unified here.
+            let from_date = range_param(&p, "from_date", "accounts_summary")?;
+            let to_date = range_param(&p, "to_date", "accounts_summary")?;
+            let r = crate::commands::accounts::fetch_accounts_summary(pool, from_date.clone(), to_date.clone()).await?;
+            Ok(format_accounts_summary_csv(r))
         }
         other => Err(format!(
             "export_report_csv: unknown report_type '{other}'. Expected one of: \

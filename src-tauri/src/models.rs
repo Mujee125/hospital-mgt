@@ -808,6 +808,77 @@ pub struct UpdateClaimStatus {
     pub notes: Option<String>,
 }
 
+// ── Accounts — expense ledger (SRS §2.15 — Phase 8) ──────────────────────
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct Expense {
+    pub id: i32,
+    pub category: String,
+    pub description: String,
+    pub amount: rust_decimal::Decimal,
+    pub expense_date: chrono::NaiveDate,
+    #[serde(default)]
+    pub paid_to: Option<String>,
+    pub payment_method: String,
+    #[serde(default)]
+    pub reference_number: Option<String>,
+    #[serde(default)]
+    pub recorded_by_user_id: Option<i32>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    pub voided_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub voided_by_user_id: Option<i32>,
+    #[serde(default)]
+    pub void_reason: Option<String>,
+    #[serde(default)]
+    pub recorded_by_name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateExpense {
+    pub category: String,
+    pub description: String,
+    pub amount: f64,
+    /// Defaults to today (server-side) when omitted.
+    #[serde(default)]
+    pub expense_date: Option<String>,
+    #[serde(default)]
+    pub paid_to: Option<String>,
+    #[serde(default)]
+    pub payment_method: Option<String>,
+    #[serde(default)]
+    pub reference_number: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VoidExpense {
+    pub id: i32,
+    pub reason: String,
+}
+
+/// Income-vs-expense position over a range (SRS §2.15 financial summary).
+/// Revenue = payments − refunds (billing side, same roll-up as the daily
+/// collection report); expenses = non-voided expense rows.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AccountsSummary {
+    pub from_date: String,
+    pub to_date: String,
+    pub total_revenue: f64,
+    pub total_refunded: f64,
+    pub total_expenses: f64,
+    pub net_position: f64,
+    pub expense_count: i64,
+    pub by_category: Vec<ExpenseCategoryTotal>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExpenseCategoryTotal {
+    pub category: String,
+    pub total: f64,
+    pub count: i64,
+}
+
 // ── Inventory (CR-21, SRS FR-0180/0181/0185) ──────────────────────────────
 //
 // Stock is stored as NUMERIC(14,2) and round-tripped via `rust_decimal`,
