@@ -23,6 +23,7 @@
 | Version | Date | Author | Summary |
 |---|---|---|---|
 | 0.1.0 | 2026-07-02 | Documentation Specialist | Initial SRS baseline covering Phase 1 (implemented) and Phase 2 (planned) modules. |
+| 0.3.0 | 2026-09-06 | Engineering | Phase 5–8 reconciliation: licensing P0/P1/P2 hardening (production key separation, fingerprint fail-closed, kid rotation); status markers updated to IMPLEMENTED for Nurses (§4.9), Pharmacy (§4.10), Radiology (§4.12), Invoicing workflow (§4.14), Blood Bank (§4.17), Reports (§4.20); new §4.24 Accounts (expense ledger + income-vs-expense summary); §10.3 open items closed (269-test suite, automatic backup, system-health dashboard). |
 | 0.2.0 | 2025-07-08 | Documentation Team (B4-A) | Reconciled with Phase 2 Batches 0-3 code changes: NFR-50 implemented (Batch 0); FR-0035 consent commands + WhatsApp consent gate (Batch 1 CR-12); FR-0180/0181/0182/0185 inventory commands + UI (Batch 1 CR-21); FR-0105 internal contradiction resolved via patient soft-delete + clinical FK RESTRICT (Batch 2 CR-11); NFR-15 RBAC on config/messaging/whatsapp (Batches 1, 3); revoke_license command (Batch 3 LIC-DOC-04); COMPANY_PUBLIC_KEY placeholder replaced with real dev keypair (Batch 2 CR-20). |
 
 ### 1.2 Approval matrix
@@ -54,9 +55,9 @@ VitalFlow HMS supports the operational, clinical, administrative, financial, and
 In scope:
 
 - Single-hospital, hardware-bound, Ed25519-signed licensing model.
-- Argon2id authentication, RBAC (8 roles, 35 permissions), audit logging, session management.
-- Clinical modules: Patients/EHR, OPD, IPD, Laboratory, Radiology (Phase 2), Pharmacy (Phase 2), Blood Bank (Phase 2).
-- Administrative modules: Appointments, Queue, Doctors, Nurses (Phase 2), Billing, Invoicing, Payments, Inventory, HR (Phase 2), Payroll (Phase 2), Reports, Admin/Settings.
+- Argon2id authentication, RBAC (8 roles, 56 permissions), audit logging, session management.
+- Clinical modules: Patients/EHR, OPD, IPD, Laboratory, Radiology, Pharmacy, Blood Bank, Nursing Station (vitals, nurse notes, MAR).
+- Administrative modules: Appointments, Queue, Doctors, Billing workflow (invoices/refunds/advances/claims/credit notes), Accounts (expense ledger), Payments, Inventory, Reports (14 report types), Automatic backups + System Health, Admin/Settings. HR and Payroll remain future (§4.18/§4.19).
 - Multi-PC LAN topology with TLS-pinned PostgreSQL connections.
 - Installer-driven PostgreSQL provisioning with zero operator interaction.
 
@@ -243,7 +244,7 @@ Priority legend: **M** = Must (release-blocking), **S** = Should, **C** = Could.
 | FR-0104 | A doctor may be the head of a `department` (`departments.head_doctor_id`). | S | 1 | `db.rs` |
 | FR-0105 | Deleting a doctor shall not cascade-delete appointments; `appointments.doctor_id` FK is `ON DELETE RESTRICT` (changed in Batch 2 CR-11 from CASCADE) — administrators must reassign the doctor's appointments before deletion. `departments.head_doctor_id` remains `ON DELETE SET NULL`. **[Updated v0.2.0 — internal contradiction resolved: the previous revision claimed `appointments.doctor_id ... ON DELETE CASCADE` while simultaneously stating "shall not cascade-delete". Both `appointments.doctor_id` and `appointments.patient_id` are now RESTRICT. Patient deletion is soft-delete via `patients.deleted_at` + `patients.is_active=FALSE`; clinical FKs are RESTRICT for HIPAA §164.530(j) 6-year PHI retention.]** | M | 1 | `db.rs` (FK constraints) |
 
-### 4.9 Nurses (FR-0110–FR-0119) — Phase 2, PLANNED
+### 4.9 Nurses (FR-0110–FR-0119) — IMPLEMENTED (Phase 6.1 Nursing Station: vitals with 7-reading trend, nurse notes, MAR with cross-patient guard)
 
 | ID | Requirement | Priority | Phase | Implementation |
 |---|---|---|---|---|
@@ -252,7 +253,7 @@ Priority legend: **M** = Must (release-blocking), **S** = Should, **C** = Could.
 | FR-0112 | Nurses shall be able to record vitals per encounter (`vitals` table: BP, pulse, temp, SpO2, respiratory rate, recorded_at, recorded_by). | M | 2 | _planned_ |
 | FR-0113 | Nurse management shall require a `nurses.manage` permission (new in Phase 2 RBAC extension). | M | 2 | _planned_ |
 
-### 4.10 Pharmacy (FR-0120–FR-0129) — Phase 2, PLANNED (inventory scaffolding exists in Phase 1)
+### 4.10 Pharmacy (FR-0120–FR-0129) — IMPLEMENTED (catalog, prescriptions with receptionist-prescribing guard, dispense with stock decrement)
 
 | ID | Requirement | Priority | Phase | Implementation |
 |---|---|---|---|---|
@@ -273,7 +274,7 @@ Priority legend: **M** = Must (release-blocking), **S** = Should, **C** = Could.
 | FR-0134 | Lab ordering shall require `lab.order`; result entry shall require `lab.result.manage`; catalog management shall require `lab.catalog.manage`. | M | 1 | `rbac.rs` |
 | FR-0135 | The lab technician role shall not include patient create/update/delete. | M | 1 | `rbac.rs::ROLE_LAB_TECH` |
 
-### 4.12 Radiology (FR-0140–FR-0149) — Phase 2, PLANNED
+### 4.12 Radiology (FR-0140–FR-0149) — IMPLEMENTED (orders, reports, verification workflow)
 
 | ID | Requirement | Priority | Phase | Implementation |
 |---|---|---|---|---|
@@ -294,7 +295,7 @@ Priority legend: **M** = Must (release-blocking), **S** = Should, **C** = Could.
 | FR-0155 | The `bill_number` shall be generated server-side; clients shall not supply it. | M | 1 | `commands/billing.rs` |
 | FR-0156 | Bill items may reference an encounter, lab order, or IPD admission via `reference_id` (loose reference; no FK). | S | 1 | `db.rs` (`bill_items.reference_id`) |
 
-### 4.14 Invoicing (FR-0160–FR-0164) — Phase 2, PLANNED (Phase 1 bills serve as invoices)
+### 4.14 Invoicing (FR-0160–FR-0164) — IMPLEMENTED (Phase 6.3: sequential INV-YYYY-NNNNNN numbers, refunds, advances, insurance/TPA claims, credit-note cancellation, >5% discount approval)
 
 | ID | Requirement | Priority | Phase | Implementation |
 |---|---|---|---|---|
@@ -325,7 +326,7 @@ Priority legend: **M** = Must (release-blocking), **S** = Should, **C** = Could.
 | FR-0184 | The system shall surface near-expiry alerts based on `expiry_date`. | S | 2 | _planned_ |
 | FR-0185 | Inventory adjustments shall be audited. **[Implemented v0.2.0 — Batch 1 CR-21: `adjust_inventory` writes an `audit::for_session` row plus an `inventory_movements` row for every stock change.]** | M | 1 | `commands/inventory.rs::adjust_inventory` (CR-21 v0.2.0) |
 
-### 4.17 Blood Bank (FR-0190–FR-0199) — Phase 2, PLANNED
+### 4.17 Blood Bank (FR-0190–FR-0199) — IMPLEMENTED (donors, donations, units, crossmatch, issue, transfusion, discard, traceability, expiry sweep)
 
 | ID | Requirement | Priority | Phase | Implementation |
 |---|---|---|---|---|
@@ -349,7 +350,7 @@ Priority legend: **M** = Must (release-blocking), **S** = Should, **C** = Could.
 | FR-0211 | Payslips shall be generated per employee per run and printable as PDF. | S | 2 | _planned_ |
 | FR-0212 | Payroll shall integrate with attendance and leave (Phase 2 HR module). | S | 2 | _planned_ |
 
-### 4.20 Reports (FR-0220–FR-0229) — Phase 2, PLANNED (Phase 1 KPIs exist)
+### 4.20 Reports (FR-0220–FR-0229) — IMPLEMENTED (14 reports across 5 tabs, all CSV-exportable: OPD, IPD census, revenue, lab turnaround, doctor performance, diagnosis frequency, daily collection, receivables aging, insurance claims, pharmacy consumption, stock status, drug expiry, user activity, backup status; + accounts summary via §4.24)
 
 | ID | Requirement | Priority | Phase | Implementation |
 |---|---|---|---|---|
@@ -424,6 +425,17 @@ A consolidated list of Tauri IPC commands exposed by the Rust backend, grouped b
 **Known IPC gap (Planned for Batch 5 cleanup):** `clear_config` is implemented in `config.rs` but is NOT registered in `tauri::generate_handler![]`, so it cannot be invoked from the frontend. Either register it or delete the dead function in Batch 5.
 
 ---
+
+### 4.24 Accounts — expense ledger & financial summary (added v0.3.0)
+
+Implements SRS §2.15 (Accounts). The revenue side of the finance module is §4.13/§4.14/§4.15 (billing, invoicing, payments); this section adds the expense side so the owner sees a single income-vs-expense position.
+
+| FR | Requirement | Priority | Phase | Implementation |
+|---|---|---|---|---|
+| FR-0260 | The system shall maintain an expense ledger: category, description, amount (> 0), expense date, paid-to, payment method, reference number, recorded-by. | M | 8 | `commands/accounts.rs` (`create_expense`), `db.rs` (`expenses` table) |
+| FR-0261 | Expense recording shall require the `billing.manage` permission; viewing requires `billing.view`. | M | 8 | RBAC guards in `commands/accounts.rs` |
+| FR-0262 | Expenses shall never be hard-deleted. Voiding requires `billing.approve` plus a reason; voided rows remain in the table with attribution and are excluded from all summaries. | M | 8 | `void_expense` soft delete |
+| FR-0263 | The system shall provide an income-vs-expense summary over a date range: net revenue (payments − refunds), total expenses, net position, and per-category totals. Exportable to CSV. | M | 8 | `get_accounts_summary`, `export_report_csv` type `accounts_summary`, Billing page Expenses tab |
 
 ## 5. External interface requirements
 
@@ -673,9 +685,9 @@ A representative subset; the full mapping is the responsibility of the QA lead d
 | Item | Status | Owner |
 |---|---|---|
 | ~~`COMPANY_PUBLIC_KEY` is all-zeros placeholder~~ | **[Updated v0.2.0]** Resolved — Batch 2 (CR-20) replaced the all-zeros placeholder with a real development Ed25519 keypair generated by the new `keygen/` project. Production deployments MUST still swap the dev keypair for a production keypair before ship; the dev private key (`src-tauri/src/bin/dev_auto_license.rs`) MUST NOT ship to production. | Software company |
-| No `cargo test` suite exists yet | Open — planned for Phase 2 SDLC | Engineering |
-| Phase 2 modules (Nurses, Pharmacy, Radiology, Blood Bank, HR, Payroll, Reports) are not implemented | Planned | Engineering |
-| No automated backup UI | Open — manual `pg_dump` only | Operations |
+| ~~No `cargo test` suite exists yet~~ | **[Updated v0.3.0]** Resolved — 269 Rust tests (129 unit + 140 integration across 14 suites) + 109 frontend tests; all gates (cargo, clippy, tsc, eslint, vitest) green. | Engineering |
+| ~~Phase 2 modules (Nurses, Pharmacy, Radiology, Blood Bank, Reports) are not implemented~~ | **[Updated v0.3.0]** Resolved — all implemented and tested. HR (§4.18) and Payroll (§4.19) remain future per the SRS v1 scope decision; Accounts added as §4.24. | Engineering |
+| ~~No automated backup~~ | **[Updated v0.3.0]** Resolved — nightly scheduled backup with pg_restore archive verification, retention pruning, optional USB copy (scheduler-driven, config in Settings); plus a System Health dashboard (DB size, scheduler heartbeat, backup age, disk free). | Operations |
 | ~~No `npx tsc --noEmit` regression CI~~ | **[Updated v0.2.0]** Resolved — Batch 0 created `tsconfig.json` (strict gate) + `eslint.config.js` + `.prettierrc.json`. `npx tsc --noEmit` and `npx eslint .` pass with zero errors after every batch. A formal CI pipeline that runs the gate on every commit is still Planned Phase 2. | Engineering |
 | `clear_config` dead IPC command | Open — implemented in `config.rs` but not registered in `generate_handler![]` (see §4.23) | Engineering (Batch 5 cleanup) |
 

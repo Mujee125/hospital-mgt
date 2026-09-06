@@ -288,7 +288,18 @@ This three-step pattern (RBAC → SQL → audit) is the spine of every state-cha
 
 ### 4.1 Schema overview
 
-All schema is defined in `db.rs::run_migrations` as idempotent `CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS` statements. The migration is re-run on every boot. The schema is grouped logically; the table list below is exhaustive (Phase 1).
+All schema is defined in `db.rs::run_migrations` as idempotent `CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS` statements. The migration is re-run on every boot. The schema is grouped logically; the table list below was exhaustive at Phase 1 and is the *migration-order* reference — **the always-current source of truth is `db.rs::run_migrations` itself** (statement order matters on fresh installs; see the Phase 6.1 placement-note on the nursing tables).
+
+**[v0.3.0 — Phases 6–8 additions]** Schema added after the Phase 1 list below:
+
+| Table / change | Phase | Purpose |
+|---|---|---|
+| `vitals`, `nurse_notes`, `medication_administrations` | 6.1 | Nursing Station: vitals with clinical CHECK ranges, shift/observation/handover notes, MAR (administered/held/refused) with cross-patient guard. Placed AFTER the Pharmacy tables (FK to `prescription_items`) — statement placement is the fresh-install migration order. |
+| `lab_orders` workflow columns (`sample_barcode`, `sampled_*`, `approved_*`); `lab_order_tests` workflow columns (`approval_status`, `critical_acknowledged_*`) + CHECKs `chk_lot_approval_status`, `chk_lot_critical_release` | 6.2 | Lab workflow: ordered → sampled → resulted → approved; a critical result cannot be released unacknowledged (DB-level backstop behind the command guard). |
+| `refunds`, `patient_advances`, `insurance_claims`; `bills` cancellation columns + `chk_bills_status`; `bill_number_seq` SEQUENCE | 6.3 | Billing workflow: sequential INV-YYYY-NNNNNN invoice numbers, manager-gated refunds with over-refund FOR UPDATE guard, advances with overdraft/cross-patient guards, claims state machine, credit-note cancellation. |
+| `expenses` | 8 | Accounts expense ledger (SRS §2.15): soft-delete voids only; recorded under `billing.manage`, voided under `billing.approve`. |
+| RBAC: `LabApprove`, `BillingApprove` permissions (56 total) | 6.2 / 6.3 | Approval authority split from entry authority — lab techs cannot self-approve results; billing clerks cannot reverse money or discount above 5%. |
+| Scheduler heartbeat (`LAST_TICK_UNIX`), `run_backup_core` + archive verification, `prune_backups_in`, auto-backup config fields | 7 | Nightly backup with `pg_restore -l` verification, retention pruning, optional USB copy; System Health dashboard (`get_system_health`). |
 
 | # | Table | Group | Purpose |
 |---|---|---|---|

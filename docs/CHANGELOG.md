@@ -2,7 +2,47 @@
 
 All notable changes to the VitalFlow Hospital Management System are documented here. Dates are in Asia/Karachi timezone (UTC+5).
 
-This changelog is the canonical entry point for understanding what changed between releases. For full engineering detail, see the per-batch entries in `/home/z/my-project/worklog.md` (project root). For per-document revision detail, see the "Revision history" subsection at the top of each document in `/docs`.
+This changelog is the canonical entry point for understanding what changed between releases. For full engineering detail, see the per-batch entries in `worklog.md` (project root). For per-document revision detail, see the "Revision history" subsection at the top of each document in `/docs`.
+
+---
+
+## v0.3.0 — 2026-09-06 (Phases 5–8: SRS gap closure + finance + operations)
+
+Closes the SRS v1 feature scope: every §-numbered module from the gap analysis is implemented, tested, and audited. Test suite: 269 Rust tests (129 unit + 140 integration across 14 suites) + 109 frontend tests; all gates (cargo, clippy, tsc, eslint, vitest) green.
+
+### Licensing hardening (Phase 5)
+- **P0 — production key separation:** the dev private key (intentionally committed) can no longer sign release-accepted licenses. Release builds embed ONLY the production public key (kid `k-prod-2026-09`); debug builds embed only the dev key (`k-dev`). A key-id (kid) registry in the license verifier enables future rotation without re-issuing customer licenses. Live-verified both directions.
+- **P1 — fingerprint fail-closed:** hardware fingerprint requires ≥2 of 3 usable identifiers (CPU/baseboard/BIOS) with an OEM-filler denylist ("Default string", "To Be Filled By O.E.M.", …) — applied at issuance AND verification.
+- **P2 — kid rotation support; deactivation terminology fixed; maintenance_until documented as informational (perpetual license model unchanged).**
+
+### Nursing Station (Phase 6.1, SRS §2.7)
+- Vitals (7 clinical signs with CHECK-constrained ranges), nurse notes (shift/observation/handover), Medication Administration Record (administered/held/refused) with a cross-patient guard — a prescription belonging to a different patient cannot be recorded against an admission.
+- 7-reading vitals trend; IpdView/IpdManage permission split (receptionists denied).
+- **Fixed a fresh-install crash:** the nursing tables originally migrated before their FK dependency existed (`prescription_items`); caught by the new fresh-DB test provisioning.
+
+### Lab workflow (Phase 6.2, SRS §2.4)
+- Full state machine: ordered → sampled (barcode) → resulted → approved. Result entry no longer auto-releases; a new `LabApprove` permission (held by lab in-charge/doctors/admin) is required to release — a tech cannot self-approve.
+- Critical-value protocol: a critical result raises an in-app alert and cannot be released until the approver confirms the ordering doctor was contacted (command guard + DB CHECK backstop). Amendments go back through re-approval.
+
+### Billing workflow (Phase 6.3, SRS §2.10)
+- Sequential immutable invoice numbers `INV-YYYY-NNNNNN` from a SEQUENCE (replaces a racy COUNT(*)+1).
+- Refunds (manager-only, over-refund blocked with row locking, payments never deleted — append-only finance), patient advances/deposits with overdraft and cross-patient guards, insurance/TPA claim pipeline with an enforced state machine, credit-note cancellation (`CN-YYYY-NNNNNN`), and two-level discount approval (discounts >5% need the manager permission).
+- A new `BillingApprove` permission (super admin) gates refunds, cancellations, and large discounts.
+
+### Reports expansion (Phase 6.4, SRS §4.20)
+- 14 CSV-exportable reports across 5 tabs: OPD, IPD census, revenue, lab turnaround (existing) + doctor performance, diagnosis frequency, daily collection, receivables aging, insurance claims, pharmacy consumption, stock status, drug expiry, user activity (dual-gated with audit view), backup status.
+
+### Accounts (Phase 8, SRS §2.15)
+- Expense ledger with soft-delete voids (financial rows never hard-deleted); recording under `billing.manage`, voiding under `billing.approve`.
+- Income-vs-expense summary (net revenue − expenses, per-category totals) on the Billing page Expenses tab and as CSV report type `accounts_summary`.
+
+### Operations (Phase 7, SRS §9 A-07)
+- Nightly automatic backup: shared pg_dump core (manual + scheduled identical path), every archive verified with `pg_restore -l` before counting as success, retention pruning, optional USB copy, system-attributed audit rows. Config changes apply without restart.
+- System Health dashboard (Settings, admin-only, 30 s polling): DB size/connections/version, scheduler heartbeat, backup age, disk free.
+
+### Internal quality
+- `require_strong` security inventory grew 37 → 48 pinned call sites (nursing/lab/billing workflows are high-risk-guarded); all `*_core` extractions follow the AERP Part G testability pattern.
+- Fresh-install migration ordering is regression-covered by per-suite fresh-DB provisioning.
 
 ---
 
