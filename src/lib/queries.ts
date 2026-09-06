@@ -51,6 +51,16 @@ import type {
   DailyOpdReport,
   IpdCensusReport,
   LabTurnaroundReport,
+  DoctorPerformanceReport,
+  DiagnosisFrequencyReport,
+  PharmacyConsumptionReport,
+  DrugExpiryReport,
+  DailyCollectionReport,
+  ReceivablesAgingReport,
+  InsuranceClaimsReport,
+  StockStatusReport,
+  UserActivityReport,
+  BackupStatusReport,
   BackupInfo,
   Medication,
   CreateMedication,
@@ -1475,6 +1485,53 @@ export function useLabTurnaroundReport(fromDate: string, toDate: string) {
     enabled: Boolean(fromDate) && Boolean(toDate),
   });
 }
+
+// ── Reports — Phase 6.4 expansion hooks (SRS §4.20 gap list) ───────────────
+
+function useRangeReport<T>(command: string, subkey: string, fromDate: string, toDate: string) {
+  return useQuery({
+    queryKey: ["reports", subkey, fromDate, toDate],
+    queryFn: () => invoke<T>(command, { fromDate, toDate }),
+    enabled: Boolean(fromDate) && Boolean(toDate),
+  });
+}
+
+function useAsOfReport<T>(command: string, subkey: string) {
+  return useQuery({
+    queryKey: ["reports", subkey],
+    queryFn: () => invoke<T>(command),
+  });
+}
+
+export const useDoctorPerformanceReport = (fromDate: string, toDate: string) =>
+  useRangeReport<DoctorPerformanceReport>("get_doctor_performance_report", "doctor-performance", fromDate, toDate);
+
+export const useDiagnosisFrequencyReport = (fromDate: string, toDate: string) =>
+  useRangeReport<DiagnosisFrequencyReport>("get_diagnosis_frequency_report", "diagnosis-frequency", fromDate, toDate);
+
+export const usePharmacyConsumptionReport = (fromDate: string, toDate: string) =>
+  useRangeReport<PharmacyConsumptionReport>("get_pharmacy_consumption_report", "pharmacy-consumption", fromDate, toDate);
+
+export const useDailyCollectionReport = (fromDate: string, toDate: string) =>
+  useRangeReport<DailyCollectionReport>("get_daily_collection_report", "daily-collection", fromDate, toDate);
+
+export const useUserActivityReport = (fromDate: string, toDate: string) =>
+  useRangeReport<UserActivityReport>("get_user_activity_report", "user-activity", fromDate, toDate);
+
+export const useDrugExpiryReport = () =>
+  useAsOfReport<DrugExpiryReport>("get_drug_expiry_report", "drug-expiry");
+
+export const useReceivablesAgingReport = () =>
+  useAsOfReport<ReceivablesAgingReport>("get_receivables_aging_report", "receivables-aging");
+
+export const useInsuranceClaimsReport = () =>
+  useAsOfReport<InsuranceClaimsReport>("get_insurance_claims_report", "insurance-claims");
+
+export const useStockStatusReport = () =>
+  useAsOfReport<StockStatusReport>("get_stock_status_report", "stock-status");
+
+export const useBackupStatusReport = () =>
+  useAsOfReport<BackupStatusReport>("get_backup_status_report", "backup-status");
 
 /**
  * Generic CSV export mutation. `reportType` selects the report;

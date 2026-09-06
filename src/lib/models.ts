@@ -670,6 +670,100 @@ export interface LabTurnaroundReport {
   top_tests: TopLabTestRow[];
 }
 
+// ── Reports — Phase 6.4 expansion (SRS §4.20 gap list) ─────────────────────
+//
+// Mirrors the Phase 6.4 fetchers in `src-tauri/src/commands/reports.rs`.
+
+export interface DoctorPerformanceRow {
+  doctor_id: number;
+  doctor_name: string;
+  appointments: number;
+  encounters: number;
+  lab_orders: number;
+  prescriptions: number;
+}
+
+export interface DoctorPerformanceReport {
+  from_date: string;
+  to_date: string;
+  doctors: DoctorPerformanceRow[];
+}
+
+export interface DiagnosisFrequencyReport {
+  from_date: string;
+  to_date: string;
+  total_encounters: number;
+  top_diagnoses: { diagnosis: string; encounter_count: number }[];
+}
+
+export interface PharmacyConsumptionReport {
+  from_date: string;
+  to_date: string;
+  total_dispensed_items: number;
+  top_medications: { medication_name: string; times_dispensed: number; total_quantity: number }[];
+}
+
+export interface DrugExpiryReport {
+  expired_count: number;
+  expiring_90_days: number;
+  expiring_180_days: number;
+  expired_stock_value: number;
+  expiring_90_stock_value: number;
+  items: {
+    name: string;
+    batch_number: string | null;
+    stock_quantity: number;
+    expiry_date: string | null;
+    days_until_expiry: number | null;
+    stock_value: number;
+  }[];
+}
+
+export interface DailyCollectionReport {
+  from_date: string;
+  to_date: string;
+  total_collected: number;
+  total_refunded: number;
+  by_day: { date: string; payments: number; collected: number; refunded: number; net: number }[];
+}
+
+export interface ReceivablesAgingReport {
+  as_of_date: string;
+  total_outstanding: number;
+  total_open_bills: number;
+  buckets: { bucket: string; bill_count: number; outstanding: number }[];
+}
+
+export interface InsuranceClaimsReport {
+  as_of_date: string;
+  total_claims: number;
+  total_claimed: number;
+  total_approved: number;
+  by_status: { status: string; claims: number; claimed_amount: number; approved_amount: number }[];
+}
+
+export interface StockStatusReport {
+  as_of_date: string;
+  active_items: number;
+  total_stock_value: number;
+  low_stock_count: number;
+  low_stock_items: { name: string; stock_quantity: number; reorder_level: number }[];
+}
+
+export interface UserActivityReport {
+  from_date: string;
+  to_date: string;
+  total_actions: number;
+  by_user: { username: string; full_name: string | null; action_count: number; last_action_at: string | null }[];
+}
+
+export interface BackupStatusReport {
+  backup_count: number;
+  latest_backup_age_days: number | null;
+  total_size_bytes: number;
+  files: { filename: string; size_bytes: number; age_days: number }[];
+}
+
 // ── Backup & Restore (SRS §9 A-07 — Phase 2) ───────────────────────────────
 //
 // Returned by `list_backups` and `create_backup`. All four fields are

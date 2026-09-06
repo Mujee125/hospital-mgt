@@ -1305,6 +1305,20 @@ pub fn run() {
             commands::reports::get_revenue_report,
             commands::reports::get_lab_turnaround_report,
             commands::reports::export_report_csv,
+            // Phase 6.4 (SRS §4.20 gap list): doctor performance, diagnosis
+            // frequency, pharmacy consumption, drug expiry, daily collection,
+            // receivables aging, insurance claims, stock status, user
+            // activity (dual-gated + AuditView), backup status.
+            commands::reports::get_doctor_performance_report,
+            commands::reports::get_diagnosis_frequency_report,
+            commands::reports::get_pharmacy_consumption_report,
+            commands::reports::get_drug_expiry_report,
+            commands::reports::get_daily_collection_report,
+            commands::reports::get_receivables_aging_report,
+            commands::reports::get_insurance_claims_report,
+            commands::reports::get_stock_status_report,
+            commands::reports::get_user_activity_report,
+            commands::reports::get_backup_status_report,
             // Backup & Restore (Phase 2, SRS §9 A-07) — server-build only.
             // The commands themselves are #[cfg(feature = "server-build")] in
             // commands/backup.rs; the registrations are gated identically so
