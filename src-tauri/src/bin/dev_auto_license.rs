@@ -64,6 +64,10 @@ fn main() {
     map.insert("software_version_min", serde_json::json!("0.0.0"));
     map.insert("software_version_max", serde_json::json!("999.999.999"));
     map.insert("dev", serde_json::json!(true)); // ← critical: marks as dev-only
+    // P2 rotation: dev licenses carry the dev kid explicitly, so a release
+    // build's key lookup fails structurally (it embeds no "k-dev" key) —
+    // independent of the dev-flag check. Defense in depth.
+    map.insert("key_id", serde_json::json!("k-dev"));
 
     // Canonical bytes = compact JSON of the BTreeMap (sorted keys).
     let canonical = serde_json::to_vec(&map).expect("serialize canonical");

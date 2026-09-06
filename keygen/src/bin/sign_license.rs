@@ -59,6 +59,12 @@ struct LicensePayload {
     /// Leave `false` or omitted for production licenses.
     #[serde(default)]
     dev: bool,
+    /// P2 key rotation: which signing key this license is signed by.
+    /// The app selects the embedded verification key by this kid.
+    /// CURRENT production key: "k-prod-2026-09". Omit or omit-to-sign for
+    /// legacy-format licenses verified against the build's default key.
+    #[serde(default)]
+    key_id: Option<String>,
 }
 
 #[derive(Parser)]
@@ -127,6 +133,12 @@ fn run() -> Result<(), String> {
     map.insert("software_version_min", serde_json::json!(payload.software_version_min));
     map.insert("software_version_max", serde_json::json!(payload.software_version_max));
     map.insert("dev", serde_json::json!(payload.dev));
+    // P2 rotation: key_id participates in the signed bytes ONLY when
+    // present — matches LicenseFile::canonical_bytes(), which excludes it
+    // when None so legacy-format licenses keep verifying.
+    if let Some(kid) = &payload.key_id {
+        map.insert("key_id", serde_json::json!(kid));
+    }
 
     let canonical = serde_json::to_vec(&map)
         .map_err(|e| format!("Canonical serialization failed (infallible for these types): {}", e))?;
@@ -201,6 +213,8 @@ fn run() -> Result<(), String> {
     eprintln!("[sign_license]   version range:        {} .. {}",
               summary.software_version_min, summary.software_version_max);
     eprintln!("[sign_license]   dev:                  {}", summary.dev);
+    eprintln!("[sign_license]   key_id:               {}",
+              summary.key_id.as_deref().unwrap_or("<legacy: omitted>"));
     eprintln!("[sign_license]   signature:            {} base64 chars ({} raw bytes)",
               sig_b64.len(), sig_bytes.len());
     match &args.out {

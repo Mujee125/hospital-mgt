@@ -44,24 +44,66 @@ use crate::rbac::{self, Permission, Session};
 // surfaces a "license expiring — please renew" warning.
 const LICENSE_GRACE_PERIOD_DAYS: i64 = 7;
 
-// ── Embedded software-company public key ──────────────────────────────────────
+// ── Embedded software-company public keys ─────────────────────────────────────
 //
-// This is the ONLY verification key shipped with the application. The matching
-// private key is held offline by the software company and never distributed.
+// P0 key separation (licensing review, 2026-09-05): dev and production
+// signing are now SEPARATE keypairs, selected per build:
 //
-// For dev mode, the keypair below (DEV_PRIVATE_KEY in dev_auto_license.rs +
-// COMPANY_PUBLIC_KEY here) is committed to the repo — it can only sign
-// dev-flagged licenses, which release builds reject. Safe to commit.
+//   DEBUG builds  embed ONLY the dev public key  → dev-signed licenses work
+//                 in `tauri dev`; production-signed licenses are rejected
+//                 ("not trusted by this build").
 //
-// For production: generate a separate keypair with `cargo run --bin gen_keys`
-// in the keygen project, replace COMPANY_PUBLIC_KEY below with the real public
-// key, and destroy the production private key after signing customer licenses.
-pub const COMPANY_PUBLIC_KEY: [u8; 32] = [
-    0x09, 0xbb, 0xa3, 0x04, 0x12, 0x3e, 0x7a, 0x0a,
-    0xa7, 0x81, 0xdc, 0xf1, 0x6f, 0x75, 0x59, 0x1e,
-    0x94, 0xef, 0x9f, 0x9f, 0xdd, 0xcf, 0x40, 0xd5,
-    0xaa, 0x28, 0x58, 0xc6, 0xa0, 0x4d, 0x6e, 0x8c,
-];
+//   RELEASE builds embed ONLY the production public key → only licenses
+//                 signed by the OFFLINE production private key verify.
+//                 Licenses signed with the committed dev private key FAIL
+//                 signature verification — structurally, regardless of the
+//                 `dev` flag (defense in depth on top of the dev-flag check).
+//
+// The production private key lives ONLY in vendor-controlled offline storage
+// (see PRODUCTION_SIGNING_KEY/README outside the repo) and is never
+// committed, bundled, installed, or present on build machines' disks
+// beyond the one-time generation. It is NOT destroyed — re-issuance for
+// hardware replacement/corrections requires it.
+//
+// key_id/kid (P2 rotation support): each license may carry `key_id`; the
+// verifier selects the embedded key by kid. A `None` key_id (legacy format)
+// falls back to the build's default (first) key. Future rotation: add the
+// new key + kid to the table alongside the old one — existing licenses
+// keep verifying against the old key; new ones against the new kid.
+struct EmbeddedKey {
+    kid: &'static str,
+    bytes: [u8; 32],
+}
+
+#[cfg(debug_assertions)]
+const COMPANY_KEYS: &[EmbeddedKey] = &[EmbeddedKey {
+    kid: "k-dev",
+    // Matches DEV_PRIVATE_KEY in dev_auto_license.rs (committed; safe —
+    // release builds do not embed it and reject dev-flagged licenses).
+    bytes: [
+        0x09, 0xbb, 0xa3, 0x04, 0x12, 0x3e, 0x7a, 0x0a,
+        0xa7, 0x81, 0xdc, 0xf1, 0x6f, 0x75, 0x59, 0x1e,
+        0x94, 0xef, 0x9f, 0x9f, 0xdd, 0xcf, 0x40, 0xd5,
+        0xaa, 0x28, 0x58, 0xc6, 0xa0, 0x4d, 0x6e, 0x8c,
+    ],
+}];
+
+#[cfg(not(debug_assertions))]
+const COMPANY_KEYS: &[EmbeddedKey] = &[EmbeddedKey {
+    kid: "k-prod-2026-09",
+    // PRODUCTION key (generated 2026-09-05 by keygen/gen_keys, private
+    // half stored OUTSIDE the repository at PRODUCTION_SIGNING_KEY/ — see
+    // its README for relocation + storage obligations). Its private key has
+    // never been and will never be in this repository. To rotate: add a
+    // second EmbeddedKey entry with a new kid and keep this one until all
+    // customer licenses have been re-issued.
+    bytes: [
+        0x6c, 0xd2, 0x5f, 0xeb, 0xdd, 0xc1, 0x4a, 0x7a,
+        0x53, 0x6b, 0xba, 0x70, 0xe3, 0x56, 0x78, 0x94,
+        0x54, 0xe8, 0x8a, 0x27, 0x32, 0x27, 0x96, 0x11,
+        0x3f, 0xd6, 0x06, 0xb3, 0x92, 0x14, 0xbb, 0xa2,
+    ],
+}];
 
 // ── License file structure ────────────────────────────────────────────────────
 
@@ -80,12 +122,23 @@ pub struct LicenseFile {
     /// Optional ISO-8601 hard expiry. `None` = perpetual (maintenance window still applies).
     pub expiration_date: Option<String>,
     /// ISO-8601 date through which software updates are entitled.
+    /// INFORMATIONAL AT RUNTIME (licensing review 2026-09-05): the app
+    /// never stops working because maintenance has lapsed — entitlement is
+    /// enforced at update distribution, not in the running product.
     pub maintenance_until: String,
     pub software_version_min: String,
     pub software_version_max: String,
     /// True for dev-only licenses. Release builds reject licenses with `dev=true`.
     #[serde(default)]
     pub dev: bool,
+    /// P2 key rotation: which signing key produced this license. `None`
+    /// (or absent in JSON) = legacy-format license, verified against the
+    /// build's default (first) embedded key. New production licenses carry
+    /// the production kid. `#[serde(default)]` keeps pre-rotation licenses
+    /// deserializable, and canonical_bytes EXCLUDES the field when None so
+    /// their existing signatures still verify.
+    #[serde(default)]
+    pub key_id: Option<String>,
     /// Base64 Ed25519 signature over the canonical form of every other field.
     pub signature: String,
 }
@@ -115,11 +168,24 @@ impl LicenseFile {
         map.insert("software_version_min", serde_json::json!(self.software_version_min));
         map.insert("software_version_max", serde_json::json!(self.software_version_max));
         map.insert("dev", serde_json::json!(self.dev));
+        // P2 rotation: key_id participates in the signed bytes ONLY when
+        // present. Excluding it when None keeps PRE-ROTATION licenses'
+        // existing signatures valid (their canonical bytes are unchanged).
+        if let Some(kid) = &self.key_id {
+            map.insert("key_id", serde_json::json!(kid));
+        }
         serde_json::to_vec(&map).expect("canonical serialization is infallible")
     }
 
     /// Verify the embedded Ed25519 signature against the embedded company
-    /// public key. Returns `Ok(())` on success.
+    /// public key selected by the license's `key_id`. Returns `Ok(())` on
+    /// success.
+    ///
+    /// Key selection (P2 rotation): `key_id = Some(kid)` → the embedded key
+    /// with that kid must exist in THIS build's key table (release builds
+    /// embed only production keys; dev builds only the dev key — a dev-key
+    /// license is structurally unverifiable in a release build). `key_id =
+    /// None` (legacy format) → the build's default (first) key.
     pub fn verify_signature(&self) -> Result<(), String> {
         let sig_bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.signature)
@@ -129,7 +195,19 @@ impl LicenseFile {
                 "License signature is wrong length ({} bytes, expected {}).",
                 sig_bytes.len(), SIGNATURE_LENGTH
             ))?;
-        let vk = VerifyingKey::from_bytes(&COMPANY_PUBLIC_KEY)
+
+        let embedded = match &self.key_id {
+            Some(kid) => COMPANY_KEYS
+                .iter()
+                .find(|k| k.kid == kid)
+                .ok_or_else(|| format!(
+                    "This license was signed by signing key '{}' (key_id), which this \
+                     build does not trust. Install a license issued for this product version.",
+                    kid
+                ))?,
+            None => &COMPANY_KEYS[0],
+        };
+        let vk = VerifyingKey::from_bytes(&embedded.bytes)
             .map_err(|e| format!("Embedded company public key is invalid: {}", e))?;
 
         let canonical = self.canonical_bytes();
@@ -141,6 +219,7 @@ impl LicenseFile {
             hex::encode(h.finalize())
         };
         eprintln!("[HMS LICENSE] Canonical bytes SHA-256: {}", canonical_hash);
+        eprintln!("[HMS LICENSE] Key selected: {} (license kid: {:?})", embedded.kid, self.key_id);
         eprintln!("[HMS LICENSE] Canonical bytes (first 200): {}",
             String::from_utf8_lossy(&canonical[..canonical.len().min(200)]));
 
@@ -259,19 +338,33 @@ pub fn verify_license_file(path: &std::path::Path) -> Result<LicenseInfo, String
     let now = Utc::now();
     let mut status = "valid".to_string();
     if let Some(exp) = &license.expiration_date {
-        if let Ok(exp_dt) = DateTime::parse_from_rfc3339(exp) {
-            let exp_utc = exp_dt.with_timezone(&Utc);
-            if now > exp_utc {
-                let grace_end = exp_utc + Duration::days(LICENSE_GRACE_PERIOD_DAYS);
-                if now <= grace_end {
-                    status = "grace".to_string();
-                } else {
-                    status = "expired".to_string();
-                }
+        // Phase 5 review (P5-L2, 2026-09-05): a signed-but-malformed expiry
+        // date previously fell through `if let Ok(...)` as "valid" — i.e. a
+        // bad date meant the license NEVER expired. Fail closed instead:
+        // an unparsable date is a defective license and refuses to run.
+        let exp_dt = DateTime::parse_from_rfc3339(exp).map_err(|_| {
+            "License expiration_date is malformed — the license is defective. \
+             Contact the software company for a replacement."
+                .to_string()
+        })?;
+        let exp_utc = exp_dt.with_timezone(&Utc);
+        if now > exp_utc {
+            let grace_end = exp_utc + Duration::days(LICENSE_GRACE_PERIOD_DAYS);
+            if now <= grace_end {
+                status = "grace".to_string();
+            } else {
+                status = "expired".to_string();
             }
         }
     }
-    if !fingerprint_matches && status == "valid" {
+    // Phase 5 review (P5-L1, P1, 2026-09-05): fingerprint binding is now
+    // ABSOLUTE — it overrides every time-based status. The old code only
+    // downgraded "valid", so a license inside its grace window on the
+    // WRONG machine kept status "grace" and was ACCEPTED: machine
+    // binding, the only anti-theft control, was suspended during grace.
+    // A license that does not match this machine is rejected regardless
+    // of expiry state.
+    if !fingerprint_matches {
         status = "fingerprint_mismatch".to_string();
     }
 
@@ -359,13 +452,20 @@ pub async fn get_hardware_fingerprint() -> Result<String, String> {
     compute_hardware_fingerprint()
 }
 
-/// Returns the embedded public key (hex) — used by the Settings → License
-/// panel to display the key fingerprint the company must match.
+/// Returns the embedded public key(s) (kid + hex fingerprint) — used by the
+/// Settings → License panel so the operator can confirm over the phone which
+/// signing key(s) their build trusts. The FIRST entry is the default.
 #[tauri::command]
 pub async fn get_license_public_key_fingerprint() -> Result<String, String> {
-    let mut hasher = Sha256::new();
-    hasher.update(COMPANY_PUBLIC_KEY);
-    Ok(hex::encode(hasher.finalize()))
+    let parts: Vec<String> = COMPANY_KEYS
+        .iter()
+        .map(|k| {
+            let mut hasher = Sha256::new();
+            hasher.update(k.bytes);
+            format!("{}={}", k.kid, hex::encode(hasher.finalize()))
+        })
+        .collect();
+    Ok(parts.join(", "))
 }
 
 /// Installs a license from raw JSON contents (read by the frontend via a file
@@ -438,13 +538,25 @@ pub async fn install_license(
     verify_license_file(&path)
 }
 
-// ── LIC-DOC-04: license revocation ───────────────────────────────────────────
+// ── LIC-DOC-04: license DEACTIVATION (local removal, NOT revocation) ─────────
 //
-// Revocation is the operational "undo" for a license install: it removes
-// the on-disk license file and writes an audit row recording who revoked
-// it and when. After revocation, the next `verify_license` call will fail
-// with "License file not readable" (because the file is gone), and the
-// app will route to the license-error screen — at which point the
+// TERMINOLOGY (licensing review, 2026-09-05): this command is LOCAL
+// DEACTIVATION — "Remove License from This Machine" — not cryptographic
+// revocation. It removes the on-disk license file on THIS machine only and
+// writes an audit row. The signed license itself remains cryptographically
+// valid; a copied file would still verify on any machine whose fingerprint
+// matches. TRUE revocation is a VENDOR-side process: the company refuses
+// re-issue for that license_id (a vendor-side ledger is sufficient), and
+// if a license_id is ever broadly compromised, rotates the embedded
+// verification key. The command name `revoke_license` is kept for IPC
+// compatibility; any user-facing text must say "Remove License from This
+// Machine".
+//
+// Deactivation is the operational "undo" for a license install: it removes
+// the on-disk license file and writes an audit row recording who removed
+// it and when. After deactivation, the next `verify_license` call will
+// fail with "License file not readable" (because the file is gone), and
+// the app will route to the license-error screen — at which point the
 // operator can either install a new license (e.g. a renewed one) or
 // decommission the machine.
 //
@@ -635,6 +747,7 @@ mod tests {
             software_version_min: "0.0.0".to_string(),
             software_version_max: "999.999.999".to_string(),
             dev: false,
+            key_id: None,
             signature: "placeholder".to_string(),
         };
         let bytes1 = license.canonical_bytes();
@@ -667,6 +780,7 @@ mod tests {
             software_version_min: "x".to_string(),
             software_version_max: "x".to_string(),
             dev: true,
+            key_id: None,
             signature: "x".to_string(),
         };
         let bytes = String::from_utf8(license.canonical_bytes()).unwrap();
@@ -700,5 +814,211 @@ mod tests {
         }"#;
         let license: LicenseFile = serde_json::from_str(json).unwrap();
         assert!(!license.dev, "missing dev field must default to false");
+    }
+
+    // ── Phase 5 license verification tests (2026-09-05) ─────────────────────
+    //
+    // These exercise verify_license_file end-to-end with REAL Ed25519
+    // signatures (the committed DEV keypair — the same key the embedded
+    // COMPANY_PUBLIC_KEY verifies against) and the REAL hardware
+    // fingerprint of this machine, written to temp files.
+
+    /// The committed dev private key (pairs with COMPANY_PUBLIC_KEY; see
+    /// dev_auto_license.rs — debug-only, signs dev:true licenses only).
+    const TEST_SIGNING_KEY: [u8; 32] = [
+        0x42, 0x34, 0xbc, 0x97, 0xec, 0xbb, 0xbc, 0x32,
+        0xa9, 0x86, 0x64, 0xec, 0xe0, 0xf2, 0x02, 0x12,
+        0xf2, 0x07, 0x19, 0x4f, 0x38, 0xf8, 0xa1, 0x6c,
+        0x46, 0xe5, 0xd9, 0x80, 0x38, 0xdb, 0x8c, 0x8d,
+    ];
+
+    fn signed_test_license(expiration: Option<String>, fingerprint: &str) -> (LicenseFile, std::path::PathBuf) {
+        signed_test_license_kid(expiration, fingerprint, None)
+    }
+
+    /// P2 rotation variant: lets tests pin an explicit key_id.
+    fn signed_test_license_kid(
+        expiration: Option<String>,
+        fingerprint: &str,
+        key_id: Option<&str>,
+    ) -> (LicenseFile, std::path::PathBuf) {
+        use ed25519_dalek::{SigningKey, Signer};
+        let mut license = LicenseFile {
+            license_id: "LIC-TEST".to_string(),
+            hospital_id: "H-TEST".to_string(),
+            hospital_name: "Test Hospital".to_string(),
+            deployment_id: "DEP-TEST".to_string(),
+            hardware_fingerprint: fingerprint.to_string(),
+            license_version: "1.0".to_string(),
+            product_edition: "Enterprise".to_string(),
+            enabled_modules: vec!["dashboard".to_string()],
+            issue_date: (Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+            expiration_date: expiration,
+            maintenance_until: "2099-12-31".to_string(),
+            software_version_min: "0.0.0".to_string(),
+            software_version_max: "999.999.999".to_string(),
+            dev: false,
+            key_id: key_id.map(|k| k.to_string()),
+            signature: String::new(),
+        };
+        let signing = SigningKey::from_bytes(&TEST_SIGNING_KEY);
+        let sig = signing.sign(&license.canonical_bytes());
+        license.signature = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+
+        let dir = std::env::temp_dir().join(format!("hms_lic_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}.json", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        std::fs::write(&path, serde_json::to_string(&license).unwrap()).unwrap();
+        (license, path)
+    }
+
+    #[test]
+    fn lic_valid_license_accepted() {
+        let fp = compute_hardware_fingerprint().expect("fingerprint");
+        let (_, path) = signed_test_license(Some((Utc::now() + chrono::Duration::days(365)).to_rfc3339()), &fp);
+        let info = verify_license_file(&path).expect("valid license must verify");
+        assert_eq!(info.status, "valid");
+        assert!(info.fingerprint_matches);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn lic_grace_window_accepted_with_warning_status() {
+        let fp = compute_hardware_fingerprint().expect("fingerprint");
+        // Expired 3 days ago → within the 7-day grace.
+        let (_, path) = signed_test_license(Some((Utc::now() - chrono::Duration::days(3)).to_rfc3339()), &fp);
+        let info = verify_license_file(&path).expect("grace license must verify");
+        assert_eq!(info.status, "grace", "3 days past expiry must be grace");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn lic_past_grace_rejected_as_expired() {
+        let fp = compute_hardware_fingerprint().expect("fingerprint");
+        // Expired 8 days ago → past the 7-day grace.
+        let (_, path) = signed_test_license(Some((Utc::now() - chrono::Duration::days(8)).to_rfc3339()), &fp);
+        let info = verify_license_file(&path).expect("must still parse");
+        assert_eq!(info.status, "expired");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// P5-L1 regression (P1): a license inside its grace window but on the
+    /// WRONG machine must be REJECTED as fingerprint_mismatch — the old
+    /// code only overrode status "valid", so grace suspended machine
+    /// binding entirely (stolen license accepted on any machine).
+    #[test]
+    fn lic_grace_window_does_not_suspend_fingerprint_binding() {
+        let (_, path) = signed_test_license(
+            Some((Utc::now() - chrono::Duration::days(3)).to_rfc3339()),
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        let info = verify_license_file(&path).expect("must parse");
+        assert_eq!(
+            info.status, "fingerprint_mismatch",
+            "fingerprint binding must be absolute — grace must NOT suspend it"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// P5-L2 regression: a signed license with a malformed expiration_date
+    /// previously passed as "valid" (fail-open). Must now fail closed.
+    #[test]
+    fn lic_malformed_expiration_fails_closed() {
+        let fp = compute_hardware_fingerprint().expect("fingerprint");
+        let (_, path) = signed_test_license(Some("not-a-date".to_string()), &fp);
+        let r = verify_license_file(&path);
+        assert!(r.is_err(), "malformed expiration must fail closed, got: {:?}", r.ok().map(|i| i.status));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn lic_tampered_signature_rejected() {
+        let fp = compute_hardware_fingerprint().expect("fingerprint");
+        let (mut license, path) = signed_test_license(
+            Some((Utc::now() + chrono::Duration::days(365)).to_rfc3339()),
+            &fp,
+        );
+        // Flip one byte of the base64 signature → verification must fail.
+        license.signature = format!("X{}", &license.signature[1..]);
+        std::fs::write(&path, serde_json::to_string(&license).unwrap()).unwrap();
+        let r = verify_license_file(&path);
+        assert!(r.is_err(), "tampered signature must be rejected");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// P2 rotation: a license whose key_id is NOT in this build's key table
+    /// must be rejected at key selection, before crypto verification.
+    #[test]
+    fn lic_unknown_key_id_rejected() {
+        let fp = compute_hardware_fingerprint().expect("fingerprint");
+        let (_, path) = signed_test_license_kid(
+            Some((Utc::now() + chrono::Duration::days(365)).to_rfc3339()),
+            &fp,
+            Some("k-attacker"),
+        );
+        let r = verify_license_file(&path);
+        assert!(r.is_err());
+        let msg = r.unwrap_err();
+        assert!(
+            msg.contains("k-attacker") && msg.contains("does not trust"),
+            "unknown kid must fail key selection with a clear error, got: {}",
+            msg
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// P2 rotation: key_id participates in the signed bytes — changing it
+    /// after signing must break the signature.
+    #[test]
+    fn lic_key_id_is_signed() {
+        let fp = compute_hardware_fingerprint().expect("fingerprint");
+        let (mut license, path) = signed_test_license_kid(
+            Some((Utc::now() + chrono::Duration::days(365)).to_rfc3339()),
+            &fp,
+            Some("k-dev"),
+        );
+        // Tamper with the signed kid AFTER signing → signature must fail.
+        license.key_id = Some("k-other".to_string());
+        std::fs::write(&path, serde_json::to_string(&license).unwrap()).unwrap();
+        let r = verify_license_file(&path);
+        assert!(r.is_err(), "post-signing kid change must fail verification");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// P2 rotation: key_id = None produces legacy-format canonical bytes
+    /// (no key_id field) — this pins the backward-compatibility contract:
+    /// pre-rotation licenses' signatures remain valid because their
+    /// canonical byte string is unchanged.
+    #[test]
+    fn lic_legacy_canonical_bytes_exclude_key_id() {
+        let fp = compute_hardware_fingerprint().expect("fingerprint");
+        let (license, _) = signed_test_license(None, &fp);
+        let canonical = String::from_utf8(license.canonical_bytes()).unwrap();
+        assert!(
+            !canonical.contains("\"key_id\""),
+            "None key_id must NOT appear in canonical bytes (legacy compatibility): {}",
+            canonical
+        );
+    }
+
+    #[test]
+    fn lic_forged_signature_rejected() {
+        let fp = compute_hardware_fingerprint().expect("fingerprint");
+        let (mut license, path) = signed_test_license(
+            Some((Utc::now() + chrono::Duration::days(365)).to_rfc3339()),
+            &fp,
+        );
+        // Sign with a DIFFERENT (attacker's) key → must fail verification
+        // against the embedded company key.
+        let mut rng_bytes = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut rng_bytes);
+        let attacker_key = ed25519_dalek::SigningKey::from_bytes(&rng_bytes);
+        use ed25519_dalek::Signer;
+        let sig = attacker_key.sign(&license.canonical_bytes());
+        license.signature = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+        std::fs::write(&path, serde_json::to_string(&license).unwrap()).unwrap();
+        let r = verify_license_file(&path);
+        assert!(r.is_err(), "signature from a non-company key must be rejected");
+        let _ = std::fs::remove_file(&path);
     }
 }

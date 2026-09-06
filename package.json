@@ -18,7 +18,6 @@
     "format:check": "prettier --check .",
     "tauri": "tauri",
     "dev:license": "cargo run --manifest-path src-tauri/Cargo.toml --bin dev_auto_license",
-    "gen:prod-license": "cargo run --manifest-path src-tauri/Cargo.toml --bin gen_production_license",
     "tauri:dev:server": "npm run dev:license && cross-env VITE_HMS_BUILD_MODE=server tauri dev -- --features server-build --config src-tauri/tauri.server.conf.json",
     "tauri:dev:client": "npm run dev:license && cross-env VITE_HMS_BUILD_MODE=client tauri dev -- --features client-build --config src-tauri/tauri.client.conf.json",
     "tauri:dev": "npm run dev:license && tauri dev",
