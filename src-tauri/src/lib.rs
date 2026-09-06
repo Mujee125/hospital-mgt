@@ -97,11 +97,46 @@ static PAIRING_LISTENER_STARTED: AtomicBool = AtomicBool::new(false);
 // startup, the Arcs gate the loop. This keeps the existing
 // "already-running, skip" optimisation intact (CR-15) while still allowing
 // cooperative shutdown (REL-03).
-#[derive(Clone, Default)]
+//
+// BUGFIX (2026-09-06, found by the Phase 7 System Health dashboard during
+// the release smoke test): the struct derived `Default`, and
+// `Arc<AtomicBool>::default()` is FALSE — so every background task spawned
+// with a running flag of `false` and exited during its warm-up, silently.
+// Reminders, the daily digest, the blood-expiry sweep, and the nightly
+// auto-backup had NEVER executed in any build (production evidence: zero
+// rows in whatsapp_notifications). The flags must START true and only ever
+// flip false on ExitRequested.
+#[derive(Clone)]
 struct ShutdownFlags {
     broadcast: Arc<AtomicBool>,
     pairing: Arc<AtomicBool>,
     scheduler: Arc<AtomicBool>,
+}
+
+impl ShutdownFlags {
+    /// All tasks start RUNNING; the ExitRequested handler flips them false.
+    fn new_running() -> Self {
+        Self {
+            broadcast: Arc::new(AtomicBool::new(true)),
+            pairing: Arc::new(AtomicBool::new(true)),
+            scheduler: Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_flags_tests {
+    use super::ShutdownFlags;
+
+    /// Pins the running-flag invariant: flags start TRUE (tasks run) —
+    /// a Default-derived false here silently kills every background job.
+    #[test]
+    fn flags_start_running() {
+        let f = ShutdownFlags::new_running();
+        assert!(f.broadcast.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(f.pairing.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(f.scheduler.load(std::sync::atomic::Ordering::Relaxed));
+    }
 }
 
 // ── Logging ───────────────────────────────────────────────────────────────────
@@ -1085,7 +1120,8 @@ pub fn run() {
             // (broadcast, pairing listener, scheduler). Managed as Tauri app
             // state so the RunEvent::ExitRequested handler at the end of
             // `run()` can flip them all to false when the app is exiting.
-            app.manage(ShutdownFlags::default());
+            // MUST start true — see the ShutdownFlags bugfix note above.
+            app.manage(ShutdownFlags::new_running());
 
             log_info!(app.handle(), "");
             log_info!(app.handle(), "════════════════════════════════════════");
