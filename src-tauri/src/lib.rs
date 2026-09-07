@@ -1380,6 +1380,10 @@ pub fn run() {
             commands::accounts::create_expense,
             commands::accounts::void_expense,
             commands::accounts::get_accounts_summary,
+            // Phase 9: in-app notification center (titlebar bell).
+            commands::notifications::get_app_notifications,
+            commands::notifications::mark_notification_read,
+            commands::notifications::mark_all_notifications_read,
             // Messaging
             messaging::send_message,
             messaging::get_messages,

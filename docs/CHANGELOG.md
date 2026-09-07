@@ -6,6 +6,22 @@ This changelog is the canonical entry point for understanding what changed betwe
 
 ---
 
+## v0.3.1 — 2026-09-07 (Phase 9: in-app notification center)
+
+Makes the titlebar bell functional end-to-end. Test suite: 273 Rust tests (130 unit + 143 integration across 15 suites) + 109 frontend tests; all gates (cargo, clippy, tsc, eslint, vitest) green.
+
+### Notification center
+- **Schema:** `app_notifications` (kind, severity, title, body, optional `user_id` direct target / `role_target` role broadcast / both-null everyone broadcast, `entity_type`+`entity_id` deep-link payload) + `app_notification_reads` (per-user read state — a broadcast is unread until each recipient marks it, no shared state).
+- **Visibility model:** a notification is visible to a user when it targets them directly, targets a role they hold, or broadcasts to everyone. Mark-read/mark-all are visibility-scoped: a user can only mark notifications they can actually see (no cross-user tampering by id).
+- **Six emitters** wired into real workflow events, all best-effort (a notification failure never fails the clinical action): appointment reminders (both roles + patient), appointment status changes (patients), lab critical values (doctor role, deep-linked to the order), lab result release (ordering doctor), invoices finalized (patient), low-stock alerts (pharmacy role).
+- **Titlebar bell** (all users, read side needs only a session): unread badge with 30 s polling, dropdown feed with kind/severity iconing, per-item and mark-all read actions.
+
+### Bugs the new integration tests caught (both fixed)
+- `mark_read` bound `ANY($2)` against an untyped parameter — Postgres could not infer the array type; fixed with an explicit `::text[]` cast.
+- `mark_read`'s placeholder numbering collided with the shared visibility fragment's contract (`$1`=user_id, `$2`=roles): the notification id had taken `$1` and the user id `$2`, so the visibility filter received the wrong values. Renumbered to `$3` with binds in contract order — this had been silently mis-binding in production since the emitters landed.
+
+---
+
 ## v0.3.0 — 2026-09-06 (Phases 5–8: SRS gap closure + finance + operations)
 
 Closes the SRS v1 feature scope: every §-numbered module from the gap analysis is implemented, tested, and audited. Test suite: 269 Rust tests (129 unit + 140 integration across 14 suites) + 109 frontend tests; all gates (cargo, clippy, tsc, eslint, vitest) green.

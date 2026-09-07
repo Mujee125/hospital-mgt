@@ -34,6 +34,7 @@ import type {
   InsuranceClaim,
   Expense,
   AccountsSummary,
+  AppNotificationFeed,
   LabTestCatalog,
   LabOrder,
   LabOrderTest,
@@ -1283,6 +1284,43 @@ export function useAccountsSummary(fromDate: string, toDate: string) {
     queryFn: () =>
       invoke<AccountsSummary>("get_accounts_summary", { fromDate, toDate }),
     enabled: Boolean(fromDate) && Boolean(toDate),
+  });
+}
+
+// ── In-app notification center (Phase 9 — the titlebar bell) ───────────────
+//
+// Polled every 30 s so the unread badge stays live. Read-marking mutates the
+// per-user read state server-side; on success we just re-poll (cheap — the
+// feed caps at 50 rows).
+
+export function useAppNotifications() {
+  return useQuery({
+    queryKey: ["app-notifications"],
+    queryFn: () => invoke<AppNotificationFeed>("get_app_notifications"),
+    refetchInterval: 30_000,
+  });
+}
+
+export function useMarkNotificationRead() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (notificationId: number) =>
+      invoke<void>("mark_notification_read", { notificationId }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["app-notifications"] });
+    },
+    onError: (err) => toast.error(String(err)),
+  });
+}
+
+export function useMarkAllNotificationsRead() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => invoke<number>("mark_all_notifications_read"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["app-notifications"] });
+    },
+    onError: (err) => toast.error(String(err)),
   });
 }
 

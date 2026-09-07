@@ -793,6 +793,40 @@ pub async fn update_insurance_claim_status_core(
     audit::for_session(pool, &s, "insurance_claim_status", "insurance_claims",
         Some(&update.id.to_string()),
         Some(serde_json::json!({"to": update.status, "from": current_status}))).await;
+
+    // Phase 9: a settled claim is money the billing desk should follow up
+    // on (reconcile the insurer payment into the bill). Best-effort.
+    if update.status == "settled" {
+        let info: Option<(String, i32)> = sqlx::query_as(
+            "SELECT c.insurer, c.bill_id FROM insurance_claims c WHERE c.id = $1",
+        )
+        .bind(update.id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+        if let Some((insurer, bill_id)) = info {
+            let title = format!("Claim settled: {} (bill #{})", insurer, bill_id);
+            let body = format!(
+                "The insurance claim with {} (bill #{}) was settled. Reconcile the insurer payment against the bill.",
+                insurer, bill_id
+            );
+            if let Err(e) = crate::commands::notifications::emit(
+                pool,
+                crate::commands::notifications::NotificationOut {
+                    user_id: None,
+                    role_target: Some("billing_clerk".into()),
+                    kind: "claim_settled".into(),
+                    title,
+                    body,
+                    entity_type: Some("bill".into()),
+                    entity_id: Some(bill_id),
+                },
+            ).await {
+                eprintln!("[HMS Billing] notification emit failed (non-fatal): {}", e);
+            }
+        }
+    }
     Ok(())
 }
 

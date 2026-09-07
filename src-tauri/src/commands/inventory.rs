@@ -231,16 +231,17 @@ pub async fn adjust_inventory(
 
     // Lock the row for the duration of the transaction so concurrent
     // adjustments cannot interleave and produce a wrong balance_after.
-    let current: Option<(Decimal,)> =
-        sqlx::query_as("SELECT stock_quantity FROM inventory_items WHERE id = $1 FOR UPDATE")
+    // (name + reorder_level are fetched alongside for the Phase 9
+    // low-stock notification — one locked read instead of two.)
+    let current: Option<(Decimal, String, Decimal)> =
+        sqlx::query_as("SELECT stock_quantity, name, reorder_level FROM inventory_items WHERE id = $1 FOR UPDATE")
             .bind(item_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| format!("Lock inventory item: {}", e))?;
 
-    let current_balance = current
-        .ok_or_else(|| format!("Inventory item {} not found.", item_id))?
-        .0;
+    let (current_balance, item_name, reorder_level) = current
+        .ok_or_else(|| format!("Inventory item {} not found.", item_id))?;
 
     let change_dec = Decimal::from(quantity_change);
     let new_balance = current_balance + change_dec;
@@ -288,6 +289,31 @@ pub async fn adjust_inventory(
         })),
     )
     .await;
+
+    // Phase 9: low-stock ping after the adjustment that crossed (or
+    // approached) the reorder level. Only fires on the transition or while
+    // below — a restock back above the level is silent. Best-effort.
+    if new_balance <= reorder_level {
+        let title = format!("Low stock: {} ({})", item_name, new_balance);
+        let body = format!(
+            "'{}' is at or below its reorder level (stock {}, reorder {}). Restock soon.",
+            item_name, new_balance, reorder_level
+        );
+        if let Err(e) = crate::commands::notifications::emit(
+            pool.inner(),
+            crate::commands::notifications::NotificationOut {
+                user_id: None,
+                role_target: Some("pharmacist".into()),
+                kind: "stock_low".into(),
+                title,
+                body,
+                entity_type: Some("inventory_item".into()),
+                entity_id: Some(item_id),
+            },
+        ).await {
+            eprintln!("[HMS Inventory] notification emit failed (non-fatal): {}", e);
+        }
+    }
     Ok(())
 }
 

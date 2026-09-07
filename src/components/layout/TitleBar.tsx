@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import logo from "@/assets/logo_transparant.png";
 import {
-  Menu, Search, Bell, RefreshCw, LogOut, KeyRound, ChevronDown,
+  Menu, Search, Bell, RefreshCw, LogOut, KeyRound, ChevronDown, CheckCheck,
   Minus, Square, Copy as RestoreIcon, X,
 } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth";
 import { ROLE_LABELS } from "@/lib/rbac";
+import { useAppNotifications, useMarkNotificationRead, useMarkAllNotificationsRead } from "@/lib/queries";
 
 const TITLEBAR_HEIGHT = 40; // px — Win11-proportioned, slightly taller than
                              // the OS default (32px) to comfortably host
@@ -255,13 +256,7 @@ function AuthenticatedTitleBarContent({
 
         <span className="text-[11px] text-muted-foreground font-medium hidden lg:block tabular-nums px-1">{currentTime}</span>
 
-        <button
-          className="relative p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-          aria-label="Notifications"
-        >
-          <Bell className="h-[15px] w-[15px]" />
-          <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-destructive ring-2 ring-card" />
-        </button>
+        <NotificationCenterBell />
 
         <ThemeToggle />
 
@@ -309,3 +304,108 @@ function AuthenticatedTitleBarContent({
  *   "decorations": false
  * Without this, the OS will still draw its own title bar above this one.
  */
+
+// ── NotificationCenterBell (Phase 9) ────────────────────────────────────────
+//
+// The titlebar bell, made real. Polls the per-user feed every 30 s
+// (useAppNotifications); the red badge appears ONLY when unread_count > 0
+// (with the count), the dropdown lists the 8 most recent notifications,
+// and clicking an item marks it read and deep-links to its entity.
+
+const NOTIFICATION_ROUTES: Record<string, string> = {
+  lab_order: "/laboratory",
+  appointment: "/appointments",
+  bill: "/billing",
+  inventory_item: "/inventory",
+};
+
+function NotificationCenterBell() {
+  const navigate = useNavigate();
+  const { data: feed, isLoading } = useAppNotifications();
+  const markRead = useMarkNotificationRead();
+  const markAll = useMarkAllNotificationsRead();
+
+  const unread = feed?.unread_count ?? 0;
+  const recent = (feed?.notifications ?? []).slice(0, 8);
+
+  const open = (n: { id: number; entity_type: string | null; read: boolean }) => {
+    if (!n.read) markRead.mutate(n.id);
+    const route = n.entity_type ? NOTIFICATION_ROUTES[n.entity_type] : undefined;
+    if (route) navigate(route);
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          className="relative p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          aria-label={`Notifications${unread > 0 ? ` (${unread} unread)` : ""}`}
+        >
+          <Bell className="h-[15px] w-[15px]" />
+          {unread > 0 && (
+            <span className="absolute top-0.5 right-0.5 min-w-[13px] h-[13px] px-[3px] rounded-full bg-destructive ring-2 ring-card text-[8px] font-bold text-destructive-foreground flex items-center justify-center">
+              {unread > 99 ? "99+" : unread}
+            </span>
+          )}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-[340px] rounded-lg p-0">
+        <div className="flex items-center justify-between px-3 py-2 border-b border-border">
+          <DropdownMenuLabel className="p-0 text-sm font-semibold">
+            Notifications
+            {unread > 0 && (
+              <span className="ml-1.5 text-[11px] font-normal text-destructive">
+                {unread} unread
+              </span>
+            )}
+          </DropdownMenuLabel>
+          {unread > 0 && (
+            <button
+              onClick={() => markAll.mutate()}
+              disabled={markAll.isPending}
+              className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+              aria-label="Mark all notifications as read"
+            >
+              <CheckCheck className="h-3 w-3" /> Mark all read
+            </button>
+          )}
+        </div>
+        <div className="max-h-[380px] overflow-y-auto">
+          {isLoading ? (
+            <p className="px-3 py-4 text-xs text-muted-foreground">Loading…</p>
+          ) : recent.length === 0 ? (
+            <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+              No notifications. Clinical alerts, bookings, claims and
+              stock warnings appear here.
+            </p>
+          ) : (
+            recent.map((n) => (
+              <button
+                key={n.id}
+                onClick={() => open(n)}
+                className={`w-full text-left px-3 py-2.5 border-b border-border last:border-0 hover:bg-muted/60 transition-colors ${!n.read ? "bg-primary/[0.04]" : ""}`}
+              >
+                <div className="flex items-start gap-2">
+                  {!n.read && (
+                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-semibold text-foreground leading-snug">
+                      {n.title}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground leading-snug mt-0.5">
+                      {n.body}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground/70 mt-1">
+                      {new Date(n.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}

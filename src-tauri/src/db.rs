@@ -878,6 +878,53 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category, expense_date DESC)")
         .execute(pool).await.ok();
 
+    // ── 6d. In-app notifications (Phase 9, 2026-09-07) ──────────────────
+    //
+    // The notification CENTER: events emitted by command paths (critical lab
+    // values, released results, bookings, claim settlement, stock lows,
+    // backup failures) surface in the titlebar bell for the right audience.
+    // Targeting is either a specific user, a ROLE broadcast (all users
+    // holding that role see it), or everyone (both NULL).
+    //
+    // Read state is a SEPARATE per-user table: a role broadcast is one row
+    // but each user marks it read independently — one doctor reading it
+    // must not clear it for the others.
+    sqlx::query(r#"
+        CREATE TABLE IF NOT EXISTS app_notifications (
+            id          SERIAL PRIMARY KEY,
+            user_id     INT          REFERENCES users(id) ON DELETE CASCADE,
+            role_target VARCHAR(40),
+            kind        VARCHAR(40)  NOT NULL,
+            title       VARCHAR(160) NOT NULL,
+            body        TEXT         NOT NULL,
+            entity_type VARCHAR(40),
+            entity_id   INT,
+            created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            -- Exactly one targeting mode: user OR role OR broadcast-all.
+            CHECK (
+              (user_id IS NOT NULL AND role_target IS NULL)
+              OR (user_id IS NULL AND role_target IS NOT NULL)
+              OR (user_id IS NULL AND role_target IS NULL)
+            )
+        )
+    "#).execute(pool).await.map_err(|e| format!("app_notifications: {}", e))?;
+    sqlx::query(r#"
+        CREATE TABLE IF NOT EXISTS app_notification_reads (
+            notification_id INT NOT NULL REFERENCES app_notifications(id) ON DELETE CASCADE,
+            user_id         INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            read_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (notification_id, user_id)
+        )
+    "#).execute(pool).await.map_err(|e| format!("app_notification_reads: {}", e))?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_app_notif_target_user ON app_notifications(user_id, created_at DESC)")
+        .execute(pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_app_notif_target_role ON app_notifications(role_target, created_at DESC)")
+        .execute(pool).await.ok();
+    // Retention housekeeping (matches the audit-log philosophy — keeps the
+    // center from growing unbounded; 90 days is ample for operational pings).
+    sqlx::query("DELETE FROM app_notifications WHERE created_at < NOW() - INTERVAL '90 days'")
+        .execute(pool).await.ok();
+
     // ── 7. Inventory ──────────────────────────────────────────────────────
     sqlx::query(r#"
         CREATE TABLE IF NOT EXISTS inventory_items (

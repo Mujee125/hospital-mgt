@@ -126,6 +126,29 @@ pub async fn create_appointment(
                 notification_type: "booked".to_string(),
             },
         ).await;
+
+        // Phase 9: in-app notification for the front desk (best-effort —
+        // never fails the booking; the WhatsApp send above is
+        // fire-and-forget for the same reason).
+        let title = format!("New appointment: {} — {} {}", patient_name, date_str, time_str);
+        let body = format!(
+            "{} booked with {} on {} at {}.",
+            patient_name, doctor_name, date_str, time_str
+        );
+        if let Err(e) = crate::commands::notifications::emit(
+            pool.inner(),
+            crate::commands::notifications::NotificationOut {
+                user_id: None,
+                role_target: Some("receptionist".into()),
+                kind: "appointment_booked".into(),
+                title,
+                body,
+                entity_type: Some("appointment".into()),
+                entity_id: Some(appt_id),
+            },
+        ).await {
+            eprintln!("[HMS Appointments] notification emit failed (non-fatal): {}", e);
+        }
     }
 
     audit::for_session(pool.inner(), &s, "appointment_create", "appointments",

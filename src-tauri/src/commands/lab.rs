@@ -159,7 +159,18 @@ pub async fn update_lab_result(
     session: tauri::State<'_, SessionState>,
     result: UpdateLabResult,
 ) -> Result<(), String> {
-    let s = rbac::require_strong(&session, pool.inner(), Permission::LabResultManage).await?;
+    update_lab_result_core(pool.inner(), &session, result).await
+}
+
+/// Result-entry logic core (AERP Part G extraction pattern — Phase 9 moved
+/// the body out from behind tauri::State so the notification emitters can
+/// be integration-tested at command level).
+pub async fn update_lab_result_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    result: UpdateLabResult,
+) -> Result<(), String> {
+    let s = rbac::require_strong(session_state, pool, Permission::LabResultManage).await?;
 
     // Phase 6.2: result entry now goes through the approval workflow —
     // approval_status 'entered' (awaiting in-charge approval). Overwriting
@@ -179,7 +190,7 @@ pub async fn update_lab_result(
     .bind(&result.result_notes)
     .bind(s.user_id)
     .bind(result.id)
-    .execute(pool.inner())
+    .execute(pool)
     .await
     .map_err(|e| format!("Update lab result: {}", e))?;
     if updated.rows_affected() == 0 {
@@ -195,7 +206,7 @@ pub async fn update_lab_result(
              AND status IN ('ordered', 'sampled')"#,
     )
     .bind(result.id)
-    .execute(pool.inner())
+    .execute(pool)
     .await
     .map_err(|e| format!("Update lab order status: {}", e))?;
 
@@ -208,20 +219,63 @@ pub async fn update_lab_result(
             "SELECT lab_order_id FROM lab_order_tests WHERE id = $1",
         )
         .bind(result.id)
-        .fetch_optional(pool.inner())
+        .fetch_optional(pool)
         .await
         .map_err(|e| format!("Lookup lab order: {}", e))?;
         audit::for_session(
-            pool.inner(), &s, "lab_critical_value_entered", "lab_order_tests",
+            pool, &s, "lab_critical_value_entered", "lab_order_tests",
             Some(&result.id.to_string()),
             Some(serde_json::json!({
                 "lab_order_id": order.map(|o| o.0),
                 "flag": "critical",
             })),
         ).await;
+
+        // Phase 9: push to the in-app notification center so every doctor
+        // sees the escalation without opening the lab worklist. Broadcast
+        // to the doctor role (no doctor→user mapping exists) + admins.
+        // Best-effort — never fails the result entry.
+        if let Some(order_id) = order.map(|o| o.0) {
+            let info: Option<(String, String)> = sqlx::query_as(
+                "SELECT COALESCE(p.first_name || ' ' || p.last_name, 'Patient'), \
+                        COALESCE(tc.name, 'test') \
+                 FROM lab_orders lo \
+                 JOIN lab_order_tests lot ON lot.id = $1 \
+                 JOIN lab_test_catalog tc ON tc.id = lot.test_catalog_id \
+                 LEFT JOIN patients p ON p.id = lo.patient_id \
+                 WHERE lo.id = $2",
+            )
+            .bind(result.id)
+            .bind(order_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+            if let Some((patient, test)) = info {
+                let title = format!("CRITICAL lab value: {} — {}", patient, test);
+                let body = format!(
+                    "A CRITICAL result was entered for {} (order #{}). Contact the ordering doctor immediately.",
+                    patient, order_id
+                );
+            if let Err(e) = crate::commands::notifications::emit(
+                pool,
+                crate::commands::notifications::NotificationOut {
+                    user_id: None,
+                    role_target: Some("doctor".into()),
+                    kind: "lab_critical".into(),
+                    title,
+                    body,
+                    entity_type: Some("lab_order".into()),
+                    entity_id: Some(order_id),
+                },
+            ).await {
+                eprintln!("[HMS Lab] notification emit failed (non-fatal): {}", e);
+            }
+            }
+        }
     }
 
-    audit::for_session(pool.inner(), &s, "lab_result_update", "lab_order_tests",
+    audit::for_session(pool, &s, "lab_result_update", "lab_order_tests",
         Some(&result.id.to_string()), None).await;
     Ok(())
 }
@@ -356,6 +410,46 @@ pub async fn approve_lab_result_core(
     .execute(pool)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    // Phase 9: notify the ordering side that the result is released
+    // (best-effort — never fails the approval).
+    {
+        let info: Option<(i32, String, String)> = sqlx::query_as(
+            "SELECT lo.id, COALESCE(p.first_name || ' ' || p.last_name, 'Patient'), \
+                    COALESCE(tc.name, 'test') \
+             FROM lab_order_tests lot \
+             JOIN lab_orders lo ON lo.id = lot.lab_order_id \
+             JOIN lab_test_catalog tc ON tc.id = lot.test_catalog_id \
+             LEFT JOIN patients p ON p.id = lo.patient_id \
+             WHERE lot.id = $1",
+        )
+        .bind(lab_order_test_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+        if let Some((order_id, patient, test)) = info {
+            let title = format!("Lab result released: {} — {}", patient, test);
+            let body = format!(
+                "{}'s {} result on order #{} has been approved and released.",
+                patient, test, order_id
+            );
+            if let Err(e) = crate::commands::notifications::emit(
+                pool,
+                crate::commands::notifications::NotificationOut {
+                    user_id: None,
+                    role_target: Some("doctor".into()),
+                    kind: "lab_released".into(),
+                    title,
+                    body,
+                    entity_type: Some("lab_order".into()),
+                    entity_id: Some(order_id),
+                },
+            ).await {
+                eprintln!("[HMS Lab] notification emit failed (non-fatal): {}", e);
+            }
+        }
+    }
 
     audit::for_session(pool, &s, "lab_result_approved", "lab_order_tests",
         Some(&lab_order_test_id.to_string()),

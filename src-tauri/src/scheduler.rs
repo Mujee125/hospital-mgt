@@ -154,6 +154,27 @@ pub fn start_scheduler(
                         last_auto_backup_day = Some(today_day);
                         if let Err(e) = run_nightly_backup(&pool, &cfg).await {
                             eprintln!("[HMS Scheduler] Auto-backup FAILED: {}", e);
+                            // Phase 9: surface the failure to admins in the
+                            // notification center — a silently failing
+                            // nightly backup is exactly what the health
+                            // dashboard exists to catch, but the bell makes
+                            // it visible without opening Settings.
+                            let _ = crate::commands::notifications::emit(
+                                &pool,
+                                crate::commands::notifications::NotificationOut {
+                                    user_id: None,
+                                    role_target: Some("super_admin".into()),
+                                    kind: "backup_failed".into(),
+                                    title: "Nightly backup FAILED".into(),
+                                    body: format!(
+                                        "The scheduled backup did not complete: {}. Check the Backup page and disk space.",
+                                        e
+                                    ),
+                                    entity_type: None,
+                                    entity_id: None,
+                                },
+                            )
+                            .await;
                         }
                     }
                 }

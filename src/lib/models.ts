@@ -416,6 +416,24 @@ export interface AccountsSummary {
   by_category: { category: string; total: number; count: number }[];
 }
 
+// ── In-app notification center (Phase 9) ───────────────────────────────────
+
+export interface AppNotification {
+  id: number;
+  kind: string;
+  title: string;
+  body: string;
+  entity_type: string | null;
+  entity_id: number | null;
+  created_at: string;
+  read: boolean;
+}
+
+export interface AppNotificationFeed {
+  notifications: AppNotification[];
+  unread_count: number;
+}
+
 export interface BillItem {
   id: number;
   bill_id: number;
