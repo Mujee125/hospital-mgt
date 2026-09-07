@@ -1,4 +1,4 @@
-# Changelog — VitalFlow HMS
+Token issue skipped $4 (Postgres counted 6 params, sqlx bound 5); call-next used bare FOR UPDATE over LEFT JOINs which Postgres rejects. Fixed with $4/$5 renumbering and FOR UPDATE OF q at all 8 lock sites. Adds queue_tests suite (4 tests) covering issue/numbering/uniqueness, priority + atomic call-next, department scoping, and RBAC - the module previously had zero coverage. 277 Rust tests, all gates green."# Changelog — VitalFlow HMS
 
 All notable changes to the VitalFlow Hospital Management System are documented here. Dates are in Asia/Karachi timezone (UTC+5).
 
@@ -8,7 +8,7 @@ This changelog is the canonical entry point for understanding what changed betwe
 
 ## v0.3.1 — 2026-09-07 (Phase 9: in-app notification center)
 
-Makes the titlebar bell functional end-to-end. Test suite: 273 Rust tests (130 unit + 143 integration across 15 suites) + 109 frontend tests; all gates (cargo, clippy, tsc, eslint, vitest) green.
+Makes the titlebar bell functional end-to-end, and fixes the queue module's two latent never-worked bugs. Test suite: 277 Rust tests (130 unit + 147 integration across 16 suites) + 109 frontend tests; all gates (cargo, clippy, tsc, eslint, vitest) green.
 
 ### Notification center
 - **Schema:** `app_notifications` (kind, severity, title, body, optional `user_id` direct target / `role_target` role broadcast / both-null everyone broadcast, `entity_type`+`entity_id` deep-link payload) + `app_notification_reads` (per-user read state — a broadcast is unread until each recipient marks it, no shared state).
@@ -16,7 +16,13 @@ Makes the titlebar bell functional end-to-end. Test suite: 273 Rust tests (130 u
 - **Six emitters** wired into real workflow events, all best-effort (a notification failure never fails the clinical action): appointment reminders (both roles + patient), appointment status changes (patients), lab critical values (doctor role, deep-linked to the order), lab result release (ordering doctor), invoices finalized (patient), low-stock alerts (pharmacy role).
 - **Titlebar bell** (all users, read side needs only a session): unread badge with 30 s polling, dropdown feed with kind/severity iconing, per-item and mark-all read actions.
 
-### Bugs the new integration tests caught (both fixed)
+### Queue module: two latent bugs fixed (found via the new coverage)
+The queue module had shipped with zero test coverage, which hid that both of its write paths had **never worked in production**:
+- **Token issue** — the INSERT's placeholders skipped `$4` (token_number comes from the CTE), numbering params $1..$6 while sqlx bound 5 values: "bind message supplies 5 parameters, but prepared statement requires 6". Every token-issue failed.
+- **Call-next** — bare `FOR UPDATE` over SELECT_QUEUE's LEFT JOINs is invalid in Postgres ("FOR UPDATE cannot be applied to the nullable side of an outer join"), so calling the next token failed unconditionally. Fixed with `FOR UPDATE OF q` (lock only the queue_tokens row) at all 8 lock sites.
+- New `queue_tests` suite (4 tests via `*_core` extractions): issue + sequential per-day numbering + UNIQUE(day, token_number), priority ordering + the atomic complete-current/call-next state machine, department-scoped call-next (must not touch other departments' tokens), and RBAC (doctor = QueueView read-only, nurse = QueueManage).
+
+### Notification bugs the new integration tests caught (both fixed)
 - `mark_read` bound `ANY($2)` against an untyped parameter — Postgres could not infer the array type; fixed with an explicit `::text[]` cast.
 - `mark_read`'s placeholder numbering collided with the shared visibility fragment's contract (`$1`=user_id, `$2`=roles): the notification id had taken `$1` and the user id `$2`, so the visibility filter received the wrong values. Renumbered to `$3` with binds in contract order — this had been silently mis-binding in production since the emitters landed.
 

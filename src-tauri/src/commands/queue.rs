@@ -29,7 +29,16 @@ pub async fn get_queue(
     session: tauri::State<'_, SessionState>,
     status_filter: Option<String>,
 ) -> Result<Vec<QueueToken>, String> {
-    let _ = rbac::require(&session, Permission::QueueView)?;
+    get_queue_core(pool.inner(), &session, status_filter).await
+}
+
+/// Queue feed core (AERP Part G extraction pattern).
+pub async fn get_queue_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    status_filter: Option<String>,
+) -> Result<Vec<QueueToken>, String> {
+    let _ = rbac::require(session_state, Permission::QueueView)?;
     let q = match status_filter.as_deref() {
         Some(s) if !s.is_empty() => format!(
             "{} WHERE q.status = $1 AND q.issued_at::date = CURRENT_DATE
@@ -42,7 +51,7 @@ pub async fn get_queue(
     if let Some(s) = status_filter.filter(|s| !s.is_empty()) {
         query = query.bind(s);
     }
-    query.fetch_all(pool.inner())
+    query.fetch_all(pool)
         .await
         .map_err(|e| format!("Failed to get queue: {}", e))
 }
@@ -53,7 +62,23 @@ pub async fn create_queue_token(
     session: tauri::State<'_, SessionState>,
     token: CreateQueueToken,
 ) -> Result<i32, String> {
-    let s = rbac::require(&session, Permission::QueueManage)?;
+    create_queue_token_core(pool.inner(), &session, token).await
+}
+
+/// Token-issue logic core (AERP Part G extraction pattern).
+///
+/// The INSERT's parameter numbering is load-bearing: token_number comes from
+/// the `next` CTE, not a bind, so the parameters run $1..$5 with no gap. A
+/// placeholder gap makes Postgres count parameters by the highest number
+/// ($6) while sqlx binds by position (5 values) — the exact "bind message
+/// supplies 5 parameters, but prepared statement requires 6" failure that
+/// shipped in Phase 1 because the queue module had no test coverage.
+pub async fn create_queue_token_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    token: CreateQueueToken,
+) -> Result<i32, String> {
+    let s = rbac::require(session_state, Permission::QueueManage)?;
 
     // ── Race-free token number generation ───────────────────────────────────
     //
@@ -79,7 +104,7 @@ pub async fn create_queue_token(
         )
         INSERT INTO queue_tokens
             (patient_id, department_id, doctor_id, token_number, status, priority, created_by_user_id)
-        SELECT $1, $2, $3, next.n, 'waiting', $5, $6 FROM next
+        SELECT $1, $2, $3, next.n, 'waiting', $4, $5 FROM next
         RETURNING id, token_number
         "#,
     )
@@ -94,7 +119,7 @@ pub async fn create_queue_token(
 
     tx.commit().await.map_err(|e| format!("Commit: {}", e))?;
 
-    audit::for_session(pool.inner(), &s, "queue_token_create", "queue",
+    audit::for_session(pool, &s, "queue_token_create", "queue",
         Some(&row.0.to_string()),
         Some(serde_json::json!({"token_number": row.1, "patient_id": token.patient_id}))).await;
     Ok(row.0)
@@ -107,25 +132,38 @@ pub async fn call_next_token(
     department_id: Option<i32>,
     doctor_id: Option<i32>,
 ) -> Result<Option<QueueToken>, String> {
-    let s = rbac::require(&session, Permission::QueueManage)?;
+    call_next_token_core(pool.inner(), &session, department_id, doctor_id).await
+}
+
+/// Call-next logic core (AERP Part G extraction pattern).
+pub async fn call_next_token_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    department_id: Option<i32>,
+    doctor_id: Option<i32>,
+) -> Result<Option<QueueToken>, String> {
+    let s = rbac::require(session_state, Permission::QueueManage)?;
 
     // ── Atomic complete-current + call-next ─────────────────────────────────
     //
     // Both state transitions happen in a single transaction so concurrent
     // `call_next_token` invocations cannot skip a patient or leave two tokens
-    // in-progress at once. `FOR UPDATE` on the selected rows prevents another
-    // caller from reading the same "next" token before we flip it.
+    // in-progress at once. `FOR UPDATE OF q` locks only the queue_tokens row —
+    // a bare `FOR UPDATE` is invalid here because SELECT_QUEUE LEFT JOINs
+    // patients/doctors/departments, and Postgres refuses row locks on the
+    // nullable side of an outer join (a bug the Phase 9 tests caught: the
+    // bare form had made call-next fail unconditionally in production).
     let mut tx = pool.begin().await.map_err(|e| format!("Begin tx: {}", e))?;
 
     // 1) Complete the current in-progress token (if any, same scope).
     let q = match (department_id, doctor_id) {
         (Some(_), Some(_)) => format!(
-            "{} WHERE q.status = 'in-progress' AND q.department_id = $1 AND q.doctor_id = $2 FOR UPDATE", SELECT_QUEUE),
+            "{} WHERE q.status = 'in-progress' AND q.department_id = $1 AND q.doctor_id = $2 FOR UPDATE OF q", SELECT_QUEUE),
         (Some(_), None) => format!(
-            "{} WHERE q.status = 'in-progress' AND q.department_id = $1 FOR UPDATE", SELECT_QUEUE),
+            "{} WHERE q.status = 'in-progress' AND q.department_id = $1 FOR UPDATE OF q", SELECT_QUEUE),
         (None, Some(_)) => format!(
-            "{} WHERE q.status = 'in-progress' AND q.doctor_id = $1 FOR UPDATE", SELECT_QUEUE),
-        _ => format!("{} WHERE q.status = 'in-progress' FOR UPDATE", SELECT_QUEUE),
+            "{} WHERE q.status = 'in-progress' AND q.doctor_id = $1 FOR UPDATE OF q", SELECT_QUEUE),
+        _ => format!("{} WHERE q.status = 'in-progress' FOR UPDATE OF q", SELECT_QUEUE),
     };
     let mut current = sqlx::query_as::<_, QueueToken>(&q);
     if let Some(dep) = department_id { current = current.bind(dep); }
@@ -134,7 +172,7 @@ pub async fn call_next_token(
         sqlx::query("UPDATE queue_tokens SET status='completed', completed_at=NOW() WHERE id=$1")
             .bind(active.id).execute(&mut *tx).await
             .map_err(|e| format!("Complete token: {}", e))?;
-        audit::for_session(pool.inner(), &s, "queue_token_complete", "queue",
+        audit::for_session(pool, &s, "queue_token_complete", "queue",
             Some(&active.id.to_string()), None).await;
     }
 
@@ -142,16 +180,16 @@ pub async fn call_next_token(
     let pick = match (department_id, doctor_id) {
         (Some(_), Some(_)) => format!(
             "{} WHERE q.status='waiting' AND q.issued_at::date=CURRENT_DATE AND q.department_id=$1 AND q.doctor_id=$2
-             ORDER BY q.priority DESC, q.issued_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED", SELECT_QUEUE),
+             ORDER BY q.priority DESC, q.issued_at ASC LIMIT 1 FOR UPDATE OF q SKIP LOCKED", SELECT_QUEUE),
         (Some(_), None) => format!(
             "{} WHERE q.status='waiting' AND q.issued_at::date=CURRENT_DATE AND q.department_id=$1
-             ORDER BY q.priority DESC, q.issued_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED", SELECT_QUEUE),
+             ORDER BY q.priority DESC, q.issued_at ASC LIMIT 1 FOR UPDATE OF q SKIP LOCKED", SELECT_QUEUE),
         (None, Some(_)) => format!(
             "{} WHERE q.status='waiting' AND q.issued_at::date=CURRENT_DATE AND q.doctor_id=$1
-             ORDER BY q.priority DESC, q.issued_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED", SELECT_QUEUE),
+             ORDER BY q.priority DESC, q.issued_at ASC LIMIT 1 FOR UPDATE OF q SKIP LOCKED", SELECT_QUEUE),
         _ => format!(
             "{} WHERE q.status='waiting' AND q.issued_at::date=CURRENT_DATE
-             ORDER BY q.priority DESC, q.issued_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED", SELECT_QUEUE),
+             ORDER BY q.priority DESC, q.issued_at ASC LIMIT 1 FOR UPDATE OF q SKIP LOCKED", SELECT_QUEUE),
     };
     let mut pick_q = sqlx::query_as::<_, QueueToken>(&pick);
     if let Some(dep) = department_id { pick_q = pick_q.bind(dep); }
@@ -162,7 +200,7 @@ pub async fn call_next_token(
         sqlx::query("UPDATE queue_tokens SET status='in-progress', called_at=NOW() WHERE id=$1")
             .bind(t.id).execute(&mut *tx).await
             .map_err(|e| format!("Call token: {}", e))?;
-        audit::for_session(pool.inner(), &s, "queue_token_call", "queue",
+        audit::for_session(pool, &s, "queue_token_call", "queue",
             Some(&t.id.to_string()), None).await;
     }
 
@@ -177,17 +215,27 @@ pub async fn set_token_status(
     id: i32,
     status: String,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::QueueManage)?;
+    set_token_status_core(pool.inner(), &session, id, status).await
+}
+
+/// Status-transition logic core (AERP Part G extraction pattern).
+pub async fn set_token_status_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    id: i32,
+    status: String,
+) -> Result<(), String> {
+    let s = rbac::require(session_state, Permission::QueueManage)?;
     let completed_at: Option<chrono::DateTime<chrono::Utc>> =
         if status == "completed" { Some(chrono::Utc::now()) } else { None };
     sqlx::query("UPDATE queue_tokens SET status=$1, completed_at=$2 WHERE id=$3")
         .bind(&status)
         .bind(completed_at)
         .bind(id)
-        .execute(pool.inner())
+        .execute(pool)
         .await
         .map_err(|e| format!("Update token status: {}", e))?;
-    audit::for_session(pool.inner(), &s, "queue_token_status", "queue",
+    audit::for_session(pool, &s, "queue_token_status", "queue",
         Some(&id.to_string()), Some(serde_json::json!({"status": status}))).await;
     Ok(())
 }
