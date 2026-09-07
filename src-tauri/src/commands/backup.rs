@@ -70,20 +70,43 @@ fn backups_dir() -> Result<PathBuf, String> {
     // created afterwards inherit the restrictive ACEs via (OI)(CI).
     // Pre-existing backup files keep their creation-time ACLs — delete or
     // re-create them after upgrading.
+    //
+    // Verification follow-up (2026-09-07, observed on the real install):
+    // (1) the NSIS installer grants an EXPLICIT `BUILTIN\Users:(OI)(CI)(M)`
+    //     ACE on this dir (so the non-elevated app can write backups) —
+    //     `/inheritance:r` only strips INHERITED ACEs, so that explicit
+    //     grant survived the original hardening. `/remove:g BUILTIN\Users`
+    //     strips it; the app's own user is re-granted Modify below, so
+    //     backup writes keep working.
+    // (2) the status is NOT swallowed anymore: a non-elevated app cannot
+    //     change ACLs (no WRITE_DAC), and a silent no-op left the PHI
+    //     world-readable with no trace. It now logs, so an operator
+    //     running elevated at least once gets the hardened posture.
     #[cfg(target_os = "windows")]
     {
         let mut icacls = std::process::Command::new("icacls");
         icacls.arg(dir.as_os_str())
             .args(["/inheritance:r"])
+            .args(["/remove:g", "BUILTIN\\Users"])
             .args(["/grant:r", "SYSTEM:(OI)(CI)F"])
             .args(["/grant:r", "Administrators:(OI)(CI)F"]);
         if let Some(user) = std::env::var_os("USERNAME") {
             let _ = icacls.arg(format!("{}:(OI)(CI)M", user.to_string_lossy()));
         }
-        let _ = icacls
+        match icacls
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+            .stderr(std::process::Stdio::piped())
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                eprintln!(
+                    "[HMS Backup] ACL hardening failed (run the app elevated once to apply): {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Err(e) => eprintln!("[HMS Backup] ACL hardening could not run: {}", e),
+        }
     }
 
     Ok(dir)
