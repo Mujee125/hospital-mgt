@@ -1384,6 +1384,8 @@ pub fn run() {
             commands::notifications::get_app_notifications,
             commands::notifications::mark_notification_read,
             commands::notifications::mark_all_notifications_read,
+            // Phase 10: RBAC-scoped global search (titlebar).
+            commands::search::global_search,
             // Messaging
             messaging::send_message,
             messaging::get_messages,

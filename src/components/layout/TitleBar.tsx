@@ -1,12 +1,13 @@
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import logo from "@/assets/logo_transparant.png";
 import {
   Menu, Search, Bell, RefreshCw, LogOut, KeyRound, ChevronDown, CheckCheck,
-  Minus, Square, Copy as RestoreIcon, X,
+  Minus, Square, Copy as RestoreIcon, X, User, Stethoscope, CalendarDays,
+  ReceiptText, FlaskConical, Package, Loader2,
 } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import {
@@ -14,8 +15,12 @@ import {
   DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useAuth } from "@/lib/auth";
-import { ROLE_LABELS } from "@/lib/rbac";
-import { useAppNotifications, useMarkNotificationRead, useMarkAllNotificationsRead } from "@/lib/queries";
+import { PERMISSIONS, ROLE_LABELS } from "@/lib/rbac";
+import {
+  useAppNotifications, useMarkNotificationRead, useMarkAllNotificationsRead,
+  useGlobalSearch,
+} from "@/lib/queries";
+import type { GlobalSearchHit } from "@/lib/models";
 
 const TITLEBAR_HEIGHT = 40; // px — Win11-proportioned, slightly taller than
                              // the OS default (32px) to comfortably host
@@ -170,7 +175,6 @@ function AuthenticatedTitleBarContent({
   const navigate = useNavigate();
   const { session, logout } = useAuth();
   const [currentTime, setCurrentTime] = useState("");
-  const [searchOpen, setSearchOpen] = useState(false);
 
   useEffect(() => {
     const update = () => {
@@ -223,36 +227,7 @@ function AuthenticatedTitleBarContent({
       {/* Right: search, clock, notifications, theme, account — identical
           behavior to the old Header.tsx, just re-homed. */}
       <div className="flex items-center gap-1 shrink-0">
-        <div className="relative">
-          <AnimatePresence initial={false}>
-            {searchOpen ? (
-              <motion.div
-                initial={{ width: 0, opacity: 0 }}
-                animate={{ width: 200, opacity: 1 }}
-                exit={{ width: 0, opacity: 0 }}
-                transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-                className="overflow-hidden"
-              >
-                <input
-                  autoFocus
-                  type="text"
-                  placeholder="Search patients, doctors…"
-                  onBlur={() => setSearchOpen(false)}
-                  className="w-full h-7 rounded-md bg-muted border border-border px-2.5 text-xs outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary/40"
-                />
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
-          {!searchOpen && (
-            <button
-              onClick={() => setSearchOpen(true)}
-              className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-              aria-label="Search"
-            >
-              <Search className="h-[15px] w-[15px]" />
-            </button>
-          )}
-        </div>
+        <GlobalSearch />
 
         <span className="text-[11px] text-muted-foreground font-medium hidden lg:block tabular-nums px-1">{currentTime}</span>
 
@@ -324,7 +299,6 @@ function NotificationCenterBell() {
   const { data: feed, isLoading } = useAppNotifications();
   const markRead = useMarkNotificationRead();
   const markAll = useMarkAllNotificationsRead();
-
   const unread = feed?.unread_count ?? 0;
   const recent = (feed?.notifications ?? []).slice(0, 8);
 
@@ -407,5 +381,173 @@ function NotificationCenterBell() {
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+// ── GlobalSearch (Phase 10) ─────────────────────────────────────────────────
+//
+// The titlebar search, made real. One debounced query against the
+// RBAC-scoped global_search command; the server decides which sections the
+// signed-in user may see (a pharmacist gets inventory + patient hits, a
+// billing clerk invoice + patient hits — neither sees the other's). Clicking
+// a hit navigates to the entity's page. The placeholder also names only the
+// sections the user can actually search, so the affordance honestly
+// reflects the server-side scope.
+
+const SEARCH_ROUTES: Record<GlobalSearchHit["entity_type"], string> = {
+  patient: "/patients",
+  doctor: "/doctors",
+  appointment: "/appointments",
+  invoice: "/billing",
+  lab_order: "/laboratory",
+  inventory_item: "/inventory",
+};
+
+const SEARCH_ICONS: Record<GlobalSearchHit["entity_type"], typeof User> = {
+  patient: User,
+  doctor: Stethoscope,
+  appointment: CalendarDays,
+  invoice: ReceiptText,
+  lab_order: FlaskConical,
+  inventory_item: Package,
+};
+
+const SEARCH_TYPE_LABELS: Record<GlobalSearchHit["entity_type"], string> = {
+  patient: "Patient",
+  doctor: "Doctor",
+  appointment: "Appointment",
+  invoice: "Invoice",
+  lab_order: "Lab order",
+  inventory_item: "Inventory item",
+};
+
+function GlobalSearch() {
+  const navigate = useNavigate();
+  const { has } = useAuth();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  // Debounce keystrokes — the query fires 300 ms after typing settles.
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(query), 300);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  // Close on outside click / Escape.
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, []);
+
+  const { data: hits, isFetching } = useGlobalSearch(debounced);
+  const trimmed = debounced.trim();
+
+  // Honest placeholder: name only the sections this user can actually search.
+  const scopes: string[] = [];
+  if (has(PERMISSIONS.PatientsView)) scopes.push("patients");
+  if (has(PERMISSIONS.DoctorsView)) scopes.push("doctors");
+  if (has(PERMISSIONS.BillingView)) scopes.push("invoices");
+  if (has(PERMISSIONS.InventoryView)) scopes.push("stock");
+  const placeholder = scopes.length
+    ? `Search ${scopes.slice(0, 3).join(", ")}${scopes.length > 3 ? "…" : ""}`
+    : "Search";
+
+  const open2 = (hit: GlobalSearchHit) => {
+    setOpen(false);
+    setQuery("");
+    navigate(SEARCH_ROUTES[hit.entity_type]);
+  };
+
+  return (
+    <div ref={boxRef} className="relative">
+      <AnimatePresence initial={false}>
+        {open ? (
+          <motion.div
+            initial={{ width: 0, opacity: 0 }}
+            animate={{ width: 260, opacity: 1 }}
+            exit={{ width: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
+            <input
+              autoFocus
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={placeholder}
+              className="w-full h-7 rounded-md bg-muted border border-border px-2.5 text-xs outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary/40"
+            />
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      {!open && (
+        <button
+          onClick={() => setOpen(true)}
+          className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          aria-label="Search"
+          title={placeholder}
+        >
+          <Search className="h-[15px] w-[15px]" />
+        </button>
+      )}
+
+      <AnimatePresence>
+        {open && trimmed.length >= 2 && (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.15 }}
+            className="absolute right-0 top-9 z-50 w-[320px] rounded-lg border border-border bg-card shadow-lg overflow-hidden"
+          >
+            {isFetching ? (
+              <div className="flex items-center gap-2 px-3 py-4 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Searching…
+              </div>
+            ) : !hits || hits.length === 0 ? (
+              <p className="px-3 py-4 text-xs text-muted-foreground">
+                No matches for “{trimmed}”.
+              </p>
+            ) : (
+              <div className="max-h-[340px] overflow-y-auto">
+                {hits.map((hit) => {
+                  const Icon = SEARCH_ICONS[hit.entity_type];
+                  return (
+                    <button
+                      key={`${hit.entity_type}-${hit.id}`}
+                      onClick={() => open2(hit)}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 text-left border-b border-border last:border-0 hover:bg-muted/60 transition-colors"
+                    >
+                      <Icon className="h-3.5 w-3.5 shrink-0 text-primary" />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-medium text-foreground truncate">{hit.title}</div>
+                        {hit.subtitle && (
+                          <div className="text-[10px] text-muted-foreground truncate">{hit.subtitle}</div>
+                        )}
+                      </div>
+                      <span className="text-[9px] uppercase tracking-wide text-muted-foreground/70 shrink-0">
+                        {SEARCH_TYPE_LABELS[hit.entity_type]}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }

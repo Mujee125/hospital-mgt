@@ -35,6 +35,7 @@ import type {
   Expense,
   AccountsSummary,
   AppNotificationFeed,
+  GlobalSearchHit,
   LabTestCatalog,
   LabOrder,
   LabOrderTest,
@@ -1298,6 +1299,22 @@ export function useAppNotifications() {
     queryKey: ["app-notifications"],
     queryFn: () => invoke<AppNotificationFeed>("get_app_notifications"),
     refetchInterval: 30_000,
+  });
+}
+
+// ── Global search (Phase 10) ──────────────────────────────────────────────
+// The titlebar search. Results are RBAC-scoped server-side (a billing clerk
+// sees invoice + patient hits; a lab tech sees lab orders + inventory —
+// neither sees the other's). Enabled only at ≥2 characters; debounced by
+// the caller so this hook stays a plain query.
+
+export function useGlobalSearch(query: string) {
+  const q = query.trim();
+  return useQuery({
+    queryKey: ["global-search", q],
+    queryFn: () => invoke<GlobalSearchHit[]>("global_search", { query: q }),
+    enabled: q.length >= 2,
+    staleTime: 30_000,
   });
 }
 

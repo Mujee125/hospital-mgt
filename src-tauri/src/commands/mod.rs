@@ -20,3 +20,4 @@ pub mod radiology;
 pub mod reports;
 pub mod system_health;
 pub mod notifications;
+pub mod search;

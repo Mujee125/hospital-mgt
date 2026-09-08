@@ -434,6 +434,17 @@ export interface AppNotificationFeed {
   unread_count: number;
 }
 
+// ── Global search (Phase 10) ────────────────────────────────────────────────
+
+/** One RBAC-scoped hit from the titlebar global search. The server only
+ *  returns sections the signed-in user holds the view permission for. */
+export interface GlobalSearchHit {
+  entity_type: "patient" | "doctor" | "appointment" | "invoice" | "lab_order" | "inventory_item";
+  id: number;
+  title: string;
+  subtitle: string | null;
+}
+
 export interface BillItem {
   id: number;
   bill_id: number;
