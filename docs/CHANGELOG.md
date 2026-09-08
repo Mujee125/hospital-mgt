@@ -8,7 +8,7 @@ This changelog is the canonical entry point for understanding what changed betwe
 
 ## v0.3.1 — 2026-09-07 (Phase 9: in-app notification center)
 
-Makes the titlebar bell and search functional end-to-end, and fixes the queue module's two latent never-worked bugs. Test suite: 281 Rust tests (130 unit + 151 integration across 17 suites) + 109 frontend tests; all gates (cargo, clippy, tsc, eslint, vitest) green.
+Makes the titlebar bell and search functional end-to-end, and fixes the queue module's two latent never-worked bugs. Test suite: 283 Rust tests (130 unit + 153 integration across 17 suites) + 109 frontend tests; all gates (cargo, clippy, tsc, eslint, vitest) green.
 
 ### Notification center
 - **Schema:** `app_notifications` (kind, severity, title, body, optional `user_id` direct target / `role_target` role broadcast / both-null everyone broadcast, `entity_type`+`entity_id` deep-link payload) + `app_notification_reads` (per-user read state — a broadcast is unread until each recipient marks it, no shared state).
@@ -23,10 +23,10 @@ The queue module had shipped with zero test coverage, which hid that both of its
 - New `queue_tests` suite (4 tests via `*_core` extractions): issue + sequential per-day numbering + UNIQUE(day, token_number), priority ordering + the atomic complete-current/call-next state machine, department-scoped call-next (must not touch other departments' tokens), and RBAC (doctor = QueueView read-only, nurse = QueueManage).
 
 ### Global search (Phase 10, titlebar)
-- **One RBAC-scoped command** (`global_search`): a section's hits are returned only when the signed-in user holds that section's view permission — patients (`patients.view`), doctors (`doctors.view`), appointments (`appointments.view`, matched on patient or doctor name), invoices (`billing.view`, by number or patient), lab orders (`lab.view`), inventory (`inventory.view`). Server-enforced, not UI convention.
+- **One RBAC-scoped command** (`global_search`): a section's hits are returned only when the signed-in user holds that section's view permission — **twelve sections covering every module**: patients (`patients.view`), doctors (`doctors.view`), appointments (`appointments.view`, matched on patient or doctor name), invoices (`billing.view`, by number or patient), lab orders (`lab.view`), inventory items (`inventory.view`), **prescriptions and the pharmacy catalog** (`patients.view` / `inventory.view` — the same guards get_prescriptions and get_medications use), radiology orders (`radiology.view`, by number, study type or patient), IPD admissions (`ipd.view`, by patient or diagnosis), blood donors (`bloodbank.view`), and user accounts (`users.view`, by name or username). Server-enforced, not UI convention.
 - **Wildcard-safe matching:** the term is LIKE-escaped (`%`/`_`/`\` neutralized via `ESCAPE '\'`) so crafted wildcards widen nothing; all queries parameter-bound; soft-deleted patients excluded; sections capped at 5 hits each.
 - **Titlebar UI:** debounced (300 ms) dropdown with per-type icons; the placeholder honestly names only the sections the user can actually search (a patient-role login sees a plain "Search" and gets nothing back — they hold no section permission). Click-through navigates to the entity's page.
-- `search_tests` suite (4 tests): exact per-role section scoping (clerk/pharmacist/doctor/lab-tech against the seeded role map), wildcard literalism, soft-delete exclusion, min-length contract.
+- `search_tests` suite (6 tests): exact per-role section scoping (clerk/pharmacist/doctor/lab-tech against the seeded role map), pharmacy section scoping (prescriptions vs medications by distinct guards), a super-admin whole-app sweep asserting all twelve sections surface, wildcard literalism, soft-delete exclusion, min-length contract.
 
 ### Notification bugs the new integration tests caught (both fixed)
 - `mark_read` bound `ANY($2)` against an untyped parameter — Postgres could not infer the array type; fixed with an explicit `::text[]` cast.

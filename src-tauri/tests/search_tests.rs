@@ -35,8 +35,24 @@ fn types_of(hits: &[GlobalSearchHit]) -> HashSet<String> {
     hits.iter().map(|h| h.entity_type.clone()).collect()
 }
 
-/// Seed one hit-able entity of each section, all matching the unique token
-/// `zqx`, so a single search sees every section the ROLE allows.
+/// Seed the zqx fixtures exactly once per test process (the suite's tests
+/// share the per-process DB; unique keys like SKU-ZQX would collide on a
+/// second seed). Same rationale as common's DB_PROVISIONED — the closure
+/// only runs on the first caller's runtime, so the captured pool is never
+/// used from another runtime.
+static ZQX_SEEDED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+async fn seed_zqx_once(pool: &PgPool) {
+    ZQX_SEEDED
+        .get_or_init(|| async {
+            seed_zqx_everywhere(pool).await;
+        })
+        .await;
+}
+
+/// Seed one hit-able entity of each of the TWELVE sections, all matching
+/// the unique token `zqx`, so a single search sees every section the ROLE
+/// allows.
 struct ZqxFixtures {
     _patient_id: i32,
     _doctor_id: i32,
@@ -87,6 +103,89 @@ async fn seed_zqx_everywhere(pool: &PgPool) -> ZqxFixtures {
     .await
     .unwrap();
     let _ = appt_id;
+
+    // Pharmacy catalog + a prescription with one medication line.
+    sqlx::query(
+        "INSERT INTO medications (brand_name, generic_name, strength) \
+         VALUES ('Zqxin', 'zqx-generic', '10mg')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let (rx_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO prescriptions (patient_id, doctor_id, status) VALUES ($1, $2, 'active') RETURNING id",
+    )
+    .bind(patient_id)
+    .bind(doctor_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO prescription_items (prescription_id, medication_name, dose, frequency) \
+         VALUES ($1, 'Zqxin', '1 tablet', 'twice daily')",
+    )
+    .bind(rx_id)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Radiology order.
+    sqlx::query(
+        "INSERT INTO radiology_orders (patient_id, order_number, study_type, priority) \
+         VALUES ($1, 'RAD-ZQX-0001', 'x-ray', 'routine')",
+    )
+    .bind(patient_id)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // IPD admission (needs a ward + bed to satisfy the NOT NULL FKs).
+    let (ward_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO wards (name, code) VALUES ('ZQX Ward', $1) RETURNING id",
+    )
+    .bind(format!("ZQX{}", std::process::id()))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let (bed_id,): (i32,) = sqlx::query_as(
+        "INSERT INTO beds (ward_id, bed_number) VALUES ($1, 'ZQX-01') RETURNING id",
+    )
+    .bind(ward_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO ipd_admissions (patient_id, doctor_id, ward_id, bed_id, admitting_diagnosis) \
+         VALUES ($1, $2, $3, $4, 'zqx fever')",
+    )
+    .bind(patient_id)
+    .bind(doctor_id)
+    .bind(ward_id)
+    .bind(bed_id)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Blood donor.
+    sqlx::query(
+        "INSERT INTO blood_donors (donor_number, first_name, last_name, blood_group, rh_factor) \
+         VALUES ('DON-ZQX-0001', 'Zqx', 'Uniquedonor', 'O', '+')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // A user account (distinctive full name; username is unique per run).
+    let uname = format!("zqx_user_{}", std::process::id());
+    sqlx::query(
+        "INSERT INTO users (username, full_name, password_hash, must_change_password) \
+         VALUES ($1, 'Zqx Uniquuser', 'x', FALSE)",
+    )
+    .bind(&uname)
+    .execute(pool)
+    .await
+    .unwrap();
+
     ZqxFixtures { _patient_id: patient_id, _doctor_id: doctor_id }
 }
 
@@ -96,7 +195,7 @@ async fn seed_zqx_everywhere(pool: &PgPool) -> ZqxFixtures {
 async fn test_sst1_rbac_sections() {
     let pool = test_pool().await;
     let pw = fixture_pw();
-    seed_zqx_everywhere(&pool).await;
+    seed_zqx_once(&pool).await;
 
     // Billing clerk: patients + invoices + appointments. No doctors,
     // inventory, or lab sections (their view permissions are absent).
@@ -154,6 +253,67 @@ async fn test_sst1_rbac_sections() {
     assert!(!t.contains("doctor"), "lab tech must NOT see doctor hits: {:?}", t);
     assert!(!t.contains("appointment"), "lab tech must NOT see appointment hits: {:?}", t);
     assert!(!t.contains("invoice"), "lab tech must NOT see invoice hits: {:?}", t);
+}
+
+// ── SST-5: pharmacy sections (prescriptions / medications) ───────────────────
+//
+// Prescriptions are guarded by patients.view (the same permission
+// get_prescriptions uses); the pharmacy catalog (medications) by
+// inventory.view (the same permission get_medications uses).
+
+#[tokio::test]
+async fn test_sst5_pharmacy_sections() {
+    let pool = test_pool().await;
+    let pw = fixture_pw();
+    seed_zqx_once(&pool).await;
+
+    // Billing clerk holds PatientsView but NOT InventoryView: prescriptions
+    // visible, medications NOT.
+    let clerk = seed_user(&pool, "sst5_clerk", &pw, &["billing_clerk"]).await;
+    seed_session_row(&pool, clerk, "hash_sst5_clerk").await;
+    let clerk_state = state_for(&pool, clerk, "hash_sst5_clerk").await;
+    let hits = global_search_core(&pool, &clerk_state, "zqx".to_string()).await.unwrap();
+    let t = types_of(&hits);
+    assert!(t.contains("prescription"), "clerk: prescription hit expected, got {:?}", t);
+    assert!(!t.contains("medication"), "clerk must NOT see medication hits: {:?}", t);
+
+    // Doctor holds both PatientsView and InventoryView: both pharmacy
+    // sections visible, and the prescription matches BOTH via the patient
+    // name and the medication name on its lines.
+    let doc = seed_user(&pool, "sst5_doc", &pw, &["doctor"]).await;
+    seed_session_row(&pool, doc, "hash_sst5_doc").await;
+    let doc_state = state_for(&pool, doc, "hash_sst5_doc").await;
+    let hits = global_search_core(&pool, &doc_state, "zqx".to_string()).await.unwrap();
+    let t = types_of(&hits);
+    assert!(t.contains("prescription") && t.contains("medication"),
+        "doctor: prescription + medication expected, got {:?}", t);
+}
+
+// ── SST-6: every section of the app, via the one role that holds them all ────
+//
+// Super admin holds every permission — one query must surface all twelve
+// sections, proving the search covers the whole app end to end.
+
+#[tokio::test]
+async fn test_sst6_whole_app_coverage() {
+    let pool = test_pool().await;
+    let pw = fixture_pw();
+    seed_zqx_once(&pool).await;
+
+    let admin = seed_user(&pool, "sst6_admin", &pw, &["super_admin"]).await;
+    seed_session_row(&pool, admin, "hash_sst6_admin").await;
+    let admin_state = state_for(&pool, admin, "hash_sst6_admin").await;
+    let hits = global_search_core(&pool, &admin_state, "zqx".to_string()).await.unwrap();
+    let t = types_of(&hits);
+
+    let expected = [
+        "patient", "doctor", "appointment", "invoice", "lab_order",
+        "inventory_item", "prescription", "medication", "radiology_order",
+        "ipd_admission", "blood_donor", "user",
+    ];
+    for e in expected {
+        assert!(t.contains(e), "super admin must see '{}' hits, got {:?}", e, t);
+    }
 }
 
 // ── SST-2: LIKE wildcards match literally ────────────────────────────────────

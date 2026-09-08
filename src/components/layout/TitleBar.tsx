@@ -7,7 +7,8 @@ import logo from "@/assets/logo_transparant.png";
 import {
   Menu, Search, Bell, RefreshCw, LogOut, KeyRound, ChevronDown, CheckCheck,
   Minus, Square, Copy as RestoreIcon, X, User, Stethoscope, CalendarDays,
-  ReceiptText, FlaskConical, Package, Loader2,
+  ReceiptText, FlaskConical, Package, Loader2, Pill, ScanLine, BedDouble,
+  Droplet, UserCog,
 } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import {
@@ -401,6 +402,12 @@ const SEARCH_ROUTES: Record<GlobalSearchHit["entity_type"], string> = {
   invoice: "/billing",
   lab_order: "/laboratory",
   inventory_item: "/inventory",
+  prescription: "/pharmacy",
+  medication: "/pharmacy",
+  radiology_order: "/radiology",
+  ipd_admission: "/ipd",
+  blood_donor: "/blood-bank",
+  user: "/users",
 };
 
 const SEARCH_ICONS: Record<GlobalSearchHit["entity_type"], typeof User> = {
@@ -410,6 +417,12 @@ const SEARCH_ICONS: Record<GlobalSearchHit["entity_type"], typeof User> = {
   invoice: ReceiptText,
   lab_order: FlaskConical,
   inventory_item: Package,
+  prescription: Pill,
+  medication: Pill,
+  radiology_order: ScanLine,
+  ipd_admission: BedDouble,
+  blood_donor: Droplet,
+  user: UserCog,
 };
 
 const SEARCH_TYPE_LABELS: Record<GlobalSearchHit["entity_type"], string> = {
@@ -419,6 +432,12 @@ const SEARCH_TYPE_LABELS: Record<GlobalSearchHit["entity_type"], string> = {
   invoice: "Invoice",
   lab_order: "Lab order",
   inventory_item: "Inventory item",
+  prescription: "Prescription",
+  medication: "Medication",
+  radiology_order: "Radiology",
+  ipd_admission: "IPD",
+  blood_donor: "Blood donor",
+  user: "User",
 };
 
 function GlobalSearch() {
@@ -456,10 +475,14 @@ function GlobalSearch() {
 
   // Honest placeholder: name only the sections this user can actually search.
   const scopes: string[] = [];
-  if (has(PERMISSIONS.PatientsView)) scopes.push("patients");
+  if (has(PERMISSIONS.PatientsView)) scopes.push("patients, prescriptions");
   if (has(PERMISSIONS.DoctorsView)) scopes.push("doctors");
   if (has(PERMISSIONS.BillingView)) scopes.push("invoices");
-  if (has(PERMISSIONS.InventoryView)) scopes.push("stock");
+  if (has(PERMISSIONS.InventoryView)) scopes.push("pharmacy, stock");
+  if (has(PERMISSIONS.RadiologyView)) scopes.push("radiology");
+  if (has(PERMISSIONS.IpdView)) scopes.push("IPD");
+  if (has(PERMISSIONS.BloodBankView)) scopes.push("donors");
+  if (has(PERMISSIONS.UsersView)) scopes.push("users");
   const placeholder = scopes.length
     ? `Search ${scopes.slice(0, 3).join(", ")}${scopes.length > 3 ? "…" : ""}`
     : "Search";

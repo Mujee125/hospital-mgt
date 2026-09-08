@@ -438,8 +438,13 @@ export interface AppNotificationFeed {
 
 /** One RBAC-scoped hit from the titlebar global search. The server only
  *  returns sections the signed-in user holds the view permission for. */
+export type GlobalSearchEntityType =
+  | "patient" | "doctor" | "appointment" | "invoice" | "lab_order"
+  | "inventory_item" | "prescription" | "medication" | "radiology_order"
+  | "ipd_admission" | "blood_donor" | "user";
+
 export interface GlobalSearchHit {
-  entity_type: "patient" | "doctor" | "appointment" | "invoice" | "lab_order" | "inventory_item";
+  entity_type: GlobalSearchEntityType;
   id: number;
   title: string;
   subtitle: string | null;
