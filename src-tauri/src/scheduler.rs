@@ -36,6 +36,11 @@ pub struct SchedulerHandle {
 // health dashboard must be able to surface that).
 static LAST_TICK_UNIX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// QA-2026-09-08 H4: process-global "scheduler already spawned" sentinel
+/// (mirrors BROADCAST_RUNNING / PAIRING_LISTENER_STARTED in lib.rs). Once
+/// set, further `start_scheduler` calls are rejected — see the CAS below.
+static SCHEDULER_RUNNING: AtomicBool = AtomicBool::new(false);
+
 /// Seconds since the last scheduler tick, or `None` if the scheduler has
 /// never ticked since process start (fresh boot before the warm-up delay).
 pub fn last_tick_age_secs() -> Option<u64> {
@@ -60,7 +65,20 @@ pub fn start_scheduler(
     pool: Arc<PgPool>,
     config: Arc<AppConfig>,
     running: Arc<AtomicBool>,
-) -> SchedulerHandle {
+) -> Option<SchedulerHandle> {
+    // QA-2026-09-08 H4: `initialize_database` runs on every boot AND on
+    // every client re-pair/re-connect retry, and React StrictMode can
+    // double-invoke the boot effect. Two scheduler loops meant two
+    // concurrent reminder sweeps whose NOT-EXISTS dedup raced (both
+    // check-then-insert inside the same 55–65 min window → duplicate
+    // WhatsApp reminders), and two nightly backups. The CAS on
+    // SCHEDULER_RUNNING makes the second start a no-op, matching the
+    // BROADCAST_RUNNING / PAIRING_LISTENER_STARTED sentinels in lib.rs.
+    if SCHEDULER_RUNNING.swap(true, Ordering::Relaxed) {
+        eprintln!("[HMS Scheduler] Already running in this process — refusing duplicate start");
+        return None;
+    }
+
     // REL-03: running flag lets the RunEvent::ExitRequested handler in
     // lib.rs cooperatively stop the scheduler loop. Cloned into the spawned
     // task; the original is returned to the caller for storage in
@@ -103,14 +121,10 @@ pub fn start_scheduler(
 
             // ── Daily digest at 07:30 ────────────────────────────────────
             let today_day = now.day();
-            if now.hour() == 7 && now.minute() >= 30
-                && last_digest_day != Some(today_day)
-            {
+            if now.hour() == 7 && now.minute() >= 30 && last_digest_day != Some(today_day) {
                 last_digest_day = Some(today_day);
                 if !config.doctors_whatsapp_group.is_empty() {
-                    if let Err(e) =
-                        send_daily_digest(&app_handle, &pool, &config).await
-                    {
+                    if let Err(e) = send_daily_digest(&app_handle, &pool, &config).await {
                         eprintln!("[HMS Scheduler] Daily digest error: {}", e);
                     }
                 }
@@ -129,7 +143,10 @@ pub fn start_scheduler(
             // costs one indexed SELECT. Logged count on success for audit.
             match crate::commands::blood_bank::expire_blood_units(&pool).await {
                 Ok(n) if n > 0 => {
-                    eprintln!("[HMS Scheduler] Blood expiry sweep: {} unit(s) transitioned to 'expired'", n);
+                    eprintln!(
+                        "[HMS Scheduler] Blood expiry sweep: {} unit(s) transitioned to 'expired'",
+                        n
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -193,7 +210,7 @@ pub fn start_scheduler(
         }
     });
 
-    SchedulerHandle { running }
+    Some(SchedulerHandle { running })
 }
 
 /// One nightly auto-backup: dump → verify (inside `run_backup_core`) →
@@ -214,7 +231,10 @@ async fn run_nightly_backup(pool: &PgPool, cfg: &AppConfig) -> Result<(), String
     );
 
     // Optional USB/secondary copy — best-effort, never fails the backup.
-    match crate::commands::backup::copy_to_usb(&cfg.usb_backup_path, std::path::Path::new(&info.path)) {
+    match crate::commands::backup::copy_to_usb(
+        &cfg.usb_backup_path,
+        std::path::Path::new(&info.path),
+    ) {
         Ok(true) => eprintln!("[HMS Scheduler] Auto-backup copied to USB path"),
         Ok(false) => {}
         Err(e) => eprintln!("[HMS Scheduler] USB copy skipped: {}", e),
@@ -266,7 +286,8 @@ async fn send_due_reminders(
     pool: &PgPool,
     config: &AppConfig,
 ) -> Result<(), String> {
-    let rows = sqlx::query_as::<_, (i32, String, String, String, String, String)>(r#"
+    let rows = sqlx::query_as::<_, (i32, String, String, String, String, String)>(
+        r#"
         SELECT
             a.id,
             p.first_name || ' ' || p.last_name AS patient_name,
@@ -289,18 +310,15 @@ async fn send_due_reminders(
                 AND wn.notification_type = 'reminder'
                 AND wn.success = TRUE
           )
-    "#)
+    "#,
+    )
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Reminder query failed: {}", e))?;
 
     for (id, patient_name, phone, doctor_name, _date, time) in rows {
-        let msg_text = whatsapp::build_reminder_msg(
-            &config.clinic_name,
-            &patient_name,
-            &doctor_name,
-            &time,
-        );
+        let msg_text =
+            whatsapp::build_reminder_msg(&config.clinic_name, &patient_name, &doctor_name, &time);
 
         let msg = whatsapp::WhatsAppMessage {
             recipient: phone,
@@ -311,7 +329,10 @@ async fn send_due_reminders(
         };
 
         if let Err(e) = whatsapp::send_whatsapp(app_handle, pool, msg).await {
-            eprintln!("[HMS Scheduler] Reminder send failed for appt {}: {}", id, e);
+            eprintln!(
+                "[HMS Scheduler] Reminder send failed for appt {}: {}",
+                id, e
+            );
         }
     }
 
@@ -324,7 +345,8 @@ async fn send_daily_digest(
     pool: &PgPool,
     config: &AppConfig,
 ) -> Result<(), String> {
-    let rows = sqlx::query_as::<_, (String, String, String, String)>(r#"
+    let rows = sqlx::query_as::<_, (String, String, String, String)>(
+        r#"
         SELECT
             TO_CHAR(a.appointment_time, 'HH12:MI AM')  AS appt_time,
             p.first_name || ' ' || p.last_name         AS patient_name,
@@ -336,22 +358,17 @@ async fn send_daily_digest(
         WHERE a.appointment_date = CURRENT_DATE
           AND a.status NOT IN ('cancelled')
         ORDER BY a.appointment_time
-    "#)
+    "#,
+    )
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Digest query failed: {}", e))?;
 
     let today = Local::now().format("%A, %d %B %Y").to_string();
 
-    let appointments: Vec<(String, String, String, String)> = rows
-        .into_iter()
-        .collect();
+    let appointments: Vec<(String, String, String, String)> = rows.into_iter().collect();
 
-    let msg_text = whatsapp::build_daily_digest_msg(
-        &config.clinic_name,
-        &today,
-        &appointments,
-    );
+    let msg_text = whatsapp::build_daily_digest_msg(&config.clinic_name, &today, &appointments);
 
     let msg = whatsapp::WhatsAppMessage {
         recipient: config.doctors_whatsapp_group.clone(),

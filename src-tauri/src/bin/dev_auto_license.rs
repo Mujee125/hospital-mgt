@@ -12,10 +12,10 @@
 //! only sign dev-flagged licenses, which release builds reject at the
 //! cryptographic level. This is safe.
 
+use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use base64::Engine as _;
 
 // ── Dev private key (matches COMPANY_PUBLIC_KEY in license.rs) ───────────────
 //
@@ -25,10 +25,8 @@ use base64::Engine as _;
 //
 // Safe to commit: it can only sign dev licenses, which release builds reject.
 const DEV_PRIVATE_KEY: [u8; 32] = [
-    0x42, 0x34, 0xbc, 0x97, 0xec, 0xbb, 0xbc, 0x32,
-    0xa9, 0x86, 0x64, 0xec, 0xe0, 0xf2, 0x02, 0x12,
-    0xf2, 0x07, 0x19, 0x4f, 0x38, 0xf8, 0xa1, 0x6c,
-    0x46, 0xe5, 0xd9, 0x80, 0x38, 0xdb, 0x8c, 0x8d,
+    0x42, 0x34, 0xbc, 0x97, 0xec, 0xbb, 0xbc, 0x32, 0xa9, 0x86, 0x64, 0xec, 0xe0, 0xf2, 0x02, 0x12,
+    0xf2, 0x07, 0x19, 0x4f, 0x38, 0xf8, 0xa1, 0x6c, 0x46, 0xe5, 0xd9, 0x80, 0x38, 0xdb, 0x8c, 0x8d,
 ];
 
 fn main() {
@@ -39,8 +37,8 @@ fn main() {
     let dev_path = dev_license_path();
 
     // Compute this machine's fingerprint using the shared module.
-    let fingerprint = hospital_mgmt_lib::fingerprint::compute()
-        .expect("failed to compute hardware fingerprint");
+    let fingerprint =
+        hospital_mgmt_lib::fingerprint::compute().expect("failed to compute hardware fingerprint");
     let now = chrono::Utc::now();
 
     // Build the canonical map — MUST match LicenseFile::canonical_bytes() in
@@ -53,20 +51,33 @@ fn main() {
     map.insert("hardware_fingerprint", serde_json::json!(&fingerprint));
     map.insert("license_version", serde_json::json!("1.0"));
     map.insert("product_edition", serde_json::json!("Enterprise"));
-    map.insert("enabled_modules", serde_json::json!([
-        "dashboard", "patients", "appointments", "queue",
-        "ipd", "lab", "billing", "pharmacy", "inventory",
-        "hr", "reports", "settings", "admin"
-    ]));
+    map.insert(
+        "enabled_modules",
+        serde_json::json!([
+            "dashboard",
+            "patients",
+            "appointments",
+            "queue",
+            "ipd",
+            "lab",
+            "billing",
+            "pharmacy",
+            "inventory",
+            "hr",
+            "reports",
+            "settings",
+            "admin"
+        ]),
+    );
     map.insert("issue_date", serde_json::json!(now.to_rfc3339()));
     map.insert("expiration_date", serde_json::Value::Null);
     map.insert("maintenance_until", serde_json::json!("2099-12-31"));
     map.insert("software_version_min", serde_json::json!("0.0.0"));
     map.insert("software_version_max", serde_json::json!("999.999.999"));
     map.insert("dev", serde_json::json!(true)); // ← critical: marks as dev-only
-    // P2 rotation: dev licenses carry the dev kid explicitly, so a release
-    // build's key lookup fails structurally (it embeds no "k-dev" key) —
-    // independent of the dev-flag check. Defense in depth.
+                                                // P2 rotation: dev licenses carry the dev kid explicitly, so a release
+                                                // build's key lookup fails structurally (it embeds no "k-dev" key) —
+                                                // independent of the dev-flag check. Defense in depth.
     map.insert("key_id", serde_json::json!("k-dev"));
 
     // Canonical bytes = compact JSON of the BTreeMap (sorted keys).
@@ -80,8 +91,10 @@ fn main() {
         h.update(&canonical);
         let hash = hex::encode(h.finalize());
         println!("[dev-license] Canonical bytes SHA-256: {}", hash);
-        println!("[dev-license] Canonical bytes (first 200): {}",
-            String::from_utf8_lossy(&canonical[..canonical.len().min(200)]));
+        println!(
+            "[dev-license] Canonical bytes (first 200): {}",
+            String::from_utf8_lossy(&canonical[..canonical.len().min(200)])
+        );
     }
 
     // Sign with the dev private key.
@@ -100,7 +113,10 @@ fn main() {
     let json = serde_json::to_string_pretty(&license).expect("serialize license");
     std::fs::write(&dev_path, &json).expect("write dev license");
 
-    println!("[dev-license] Auto-generated dev license at: {}", dev_path.display());
+    println!(
+        "[dev-license] Auto-generated dev license at: {}",
+        dev_path.display()
+    );
     println!("[dev-license] Fingerprint: {}", fingerprint);
     println!("[dev-license] Dev flag: true (release builds will reject this license)");
 }

@@ -85,7 +85,8 @@ fn backups_dir() -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
         let mut icacls = std::process::Command::new("icacls");
-        icacls.arg(dir.as_os_str())
+        icacls
+            .arg(dir.as_os_str())
             .args(["/inheritance:r"])
             .args(["/remove:g", "BUILTIN\\Users"])
             .args(["/grant:r", "SYSTEM:(OI)(CI)F"])
@@ -317,9 +318,7 @@ pub fn prune_backups_in(dir: &std::path::Path, keep: usize) -> Result<usize, Str
         .map_err(|e| format!("Read backups dir: {}", e))?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| {
-            p.is_file() && p.extension().map(|x| x == "sql").unwrap_or(false)
-        })
+        .filter(|p| p.is_file() && p.extension().map(|x| x == "sql").unwrap_or(false))
         .filter_map(|p| {
             let mtime = fs::metadata(&p).ok()?.modified().ok()?;
             Some((mtime, p))
@@ -381,7 +380,10 @@ pub async fn create_backup(
     // scheduled — so the backups directory can never grow unbounded.
     match prune_backups(retention) {
         Ok(n) if n > 0 => {
-            eprintln!("[HMS Backup] Retention: removed {} archive(s) beyond keep={}", n, retention);
+            eprintln!(
+                "[HMS Backup] Retention: removed {} archive(s) beyond keep={}",
+                n, retention
+            );
         }
         Ok(_) => {}
         Err(e) => eprintln!("[HMS Backup] Retention prune failed (non-fatal): {}", e),
@@ -517,12 +519,17 @@ pub async fn restore_backup(
         let safety_path = dir.join(&safety_name);
         let pg_dump = pg_bin("pg_dump.exe")?;
         let safety = tokio::process::Command::new(&pg_dump)
-            .arg("-h").arg(&cfg.db_host)
-            .arg("-p").arg(cfg.db_port.to_string())
-            .arg("-U").arg(&cfg.db_user)
+            .arg("-h")
+            .arg(&cfg.db_host)
+            .arg("-p")
+            .arg(cfg.db_port.to_string())
+            .arg("-U")
+            .arg(&cfg.db_user)
             .arg("-Fc")
-            .arg("-d").arg(&cfg.db_name)
-            .arg("--file").arg(&safety_path)
+            .arg("-d")
+            .arg(&cfg.db_name)
+            .arg("--file")
+            .arg(&safety_path)
             .env("PGPASSWORD", &cfg.db_password)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -55,11 +55,11 @@ pub fn decrypt(ciphertext: &str) -> Result<String, String> {
 
 #[cfg(target_os = "windows")]
 mod dpapi {
-    use windows::Win32::Security::Cryptography::{
-        CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_LOCAL_MACHINE,
-    };
-    use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Cryptography::{
+        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_LOCAL_MACHINE, CRYPT_INTEGER_BLOB,
+    };
 
     pub fn protect(plaintext: &str) -> Result<Vec<u8>, String> {
         let plaintext_bytes = plaintext.as_bytes();
@@ -91,7 +91,8 @@ mod dpapi {
                 return Err(format!("CryptProtectData failed: {:?}", result));
             }
 
-            let encrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+            let encrypted =
+                std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
 
             // Free the DPAPI-allocated memory. LocalFree takes the handle
             // directly (windows-rs 0.58: Param<HLOCAL>), not Option<&T>.
@@ -113,15 +114,7 @@ mod dpapi {
         };
 
         unsafe {
-            let result = CryptUnprotectData(
-                &input,
-                None,
-                None,
-                None,
-                None,
-                0,
-                &mut output,
-            );
+            let result = CryptUnprotectData(&input, None, None, None, None, 0, &mut output);
 
             if result.is_err() {
                 return Err(format!("CryptUnprotectData failed: {:?}", result));

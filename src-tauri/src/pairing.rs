@@ -29,20 +29,20 @@ use crate::tls_provision;
 // only runs on the server build. Gating them avoids unused-import warnings
 // on client/dev builds.
 #[cfg(feature = "server-build")]
+use crate::tls_provision::TlsMaterial;
+#[cfg(feature = "server-build")]
 use std::net::SocketAddr;
 #[cfg(feature = "server-build")]
 use tokio::net::TcpListener;
 #[cfg(feature = "server-build")]
 use tokio_rustls::TlsAcceptor;
-#[cfg(feature = "server-build")]
-use crate::tls_provision::TlsMaterial;
 
 pub const PAIRING_PORT: u16 = 42011;
 const CODE_TTL_SECS: u64 = 600; // 10 minutes
-// SEC-03: a pairing code is intended for ONE client. Allowing 10 different
-// machines to consume the same code turns a leaked code into 10 leaked
-// credential sets. 3 is the safe ceiling (operator retries + minor typo
-// attempts) without enabling mass credential leakage.
+                                // SEC-03: a pairing code is intended for ONE client. Allowing 10 different
+                                // machines to consume the same code turns a leaked code into 10 leaked
+                                // credential sets. 3 is the safe ceiling (operator retries + minor typo
+                                // attempts) without enabling mass credential leakage.
 const MAX_USES: u32 = 3;
 const MAX_LINE_BYTES: usize = 4096;
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(10);
@@ -67,9 +67,9 @@ const CONNECTION_DEADLINE: Duration = Duration::from_secs(10);
 #[cfg(feature = "server-build")]
 const MAX_FAILED_ATTEMPTS_PER_PEER: u32 = 3;
 #[cfg(feature = "server-build")]
-const FAILED_ATTEMPT_WINDOW_SECS: u64 = 300;   // 5-minute sliding window
+const FAILED_ATTEMPT_WINDOW_SECS: u64 = 300; // 5-minute sliding window
 #[cfg(feature = "server-build")]
-const LOCKOUT_DURATION_SECS: u64 = 900;        // 15-minute lockout
+const LOCKOUT_DURATION_SECS: u64 = 900; // 15-minute lockout
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PairingResponse {
@@ -245,9 +245,8 @@ impl PairingService {
         }
 
         // 3. Code match check (also enforces expiry + uses_remaining).
-        let accepted = state.expires_at > now
-            && state.uses_remaining > 0
-            && state.code == submitted_code;
+        let accepted =
+            state.expires_at > now && state.uses_remaining > 0 && state.code == submitted_code;
 
         if accepted {
             state.uses_remaining -= 1;
@@ -330,14 +329,11 @@ pub fn start_pairing_listener(
                 break;
             }
 
-            let accept_result = tokio::time::timeout(
-                Duration::from_secs(1),
-                listener.accept(),
-            )
-            .await;
+            let accept_result =
+                tokio::time::timeout(Duration::from_secs(1), listener.accept()).await;
 
             let (stream, peer) = match accept_result {
-                Err(_) => continue, // timed out — loop back, re-check running flag
+                Err(_) => continue,     // timed out — loop back, re-check running flag
                 Ok(Err(_)) => continue, // accept() error — non-fatal, try again
                 Ok(Ok((s, p))) => (s, p),
             };
@@ -387,9 +383,11 @@ async fn handle_connection(
     let request = match request {
         Ok(r) => r,
         Err(_) => {
-            let _ =
-                write_json_line(&mut tls_stream, &serde_json::json!({"error": "bad_request"}))
-                    .await;
+            let _ = write_json_line(
+                &mut tls_stream,
+                &serde_json::json!({"error": "bad_request"}),
+            )
+            .await;
             return;
         }
     };
@@ -401,7 +399,10 @@ async fn handle_connection(
     let peer_ip = peer.ip();
     match service.try_consume_with_peer(&request.code, &peer_ip) {
         ConsumeResult::Accepted => {
-            eprintln!("[HMS Pairing] Code accepted from {} — sending credentials", peer);
+            eprintln!(
+                "[HMS Pairing] Code accepted from {} — sending credentials",
+                peer
+            );
         }
         ConsumeResult::Rejected => {
             eprintln!("[HMS Pairing] Invalid/expired code from {}", peer);
@@ -417,11 +418,8 @@ async fn handle_connection(
                 "[HMS Pairing] Peer {} locked out after {} failed attempts — refusing",
                 peer, MAX_FAILED_ATTEMPTS_PER_PEER
             );
-            let _ = write_json_line(
-                &mut tls_stream,
-                &serde_json::json!({"error": "locked_out"}),
-            )
-            .await;
+            let _ =
+                write_json_line(&mut tls_stream, &serde_json::json!({"error": "locked_out"})).await;
             return;
         }
     }
@@ -481,11 +479,13 @@ pub async fn redeem_code(
     // ignores it — we verify by fingerprint, not hostname.
     let server_name = rustls_pki_types_server_name();
 
-    let mut tls_stream =
-        tokio::time::timeout(CONNECTION_DEADLINE, connector.connect(server_name, tcp_stream))
-            .await
-            .map_err(|_| "TLS handshake timed out.".to_string())?
-            .map_err(|e| format!("TLS handshake failed: {}", e))?;
+    let mut tls_stream = tokio::time::timeout(
+        CONNECTION_DEADLINE,
+        connector.connect(server_name, tcp_stream),
+    )
+    .await
+    .map_err(|_| "TLS handshake timed out.".to_string())?
+    .map_err(|e| format!("TLS handshake failed: {}", e))?;
 
     let request = serde_json::json!({ "code": code.trim().to_uppercase() });
     write_json_line(&mut tls_stream, &request)
@@ -508,20 +508,16 @@ pub async fn redeem_code(
 
     if let Some(err) = value.get("error") {
         return Err(match err.as_str() {
-            Some("invalid_or_expired_code") => {
-                "That pairing code is wrong or has expired. \
+            Some("invalid_or_expired_code") => "That pairing code is wrong or has expired. \
                  Ask reception to generate a fresh code."
-                    .to_string()
-            }
+                .to_string(),
             // SEC-03: server-side per-IP lockout. The operator must wait
             // ~15 minutes before retrying (or have reception restart the
             // server to clear in-memory state — codes are short-lived).
-            Some("locked_out") => {
-                "Too many failed pairing attempts from this PC. \
+            Some("locked_out") => "Too many failed pairing attempts from this PC. \
                  Wait 15 minutes and try again, or ask reception to \
                  generate a fresh code."
-                    .to_string()
-            }
+                .to_string(),
             _ => "The server rejected the pairing request.".to_string(),
         });
     }
@@ -610,14 +606,14 @@ pub async fn redeem_pairing_code(
     // the fields we received from the server, so any manually-set clinic_name
     // etc. is preserved.
     let mut cfg = crate::config::AppConfig::load(&app_handle).unwrap_or_default();
-    cfg.mode                       = "client".to_string();
-    cfg.db_host                    = server_ip.clone();
-    cfg.db_port                    = db_port;
-    cfg.db_user                    = db_user.clone();
-    cfg.db_password                = db_password;
-    cfg.db_name                    = db_name.clone();
-    cfg.pinned_server_cert_pem     = server_cert_pem;
-    cfg.pinned_server_fingerprint  = fingerprint.clone();
+    cfg.mode = "client".to_string();
+    cfg.db_host = server_ip.clone();
+    cfg.db_port = db_port;
+    cfg.db_user = db_user.clone();
+    cfg.db_password = db_password;
+    cfg.db_name = db_name.clone();
+    cfg.pinned_server_cert_pem = server_cert_pem;
+    cfg.pinned_server_fingerprint = fingerprint.clone();
     // setup_complete is set to TRUE only after verify_pairing succeeds,
     // so that a partially-completed pairing (credentials saved but DB
     // unreachable) doesn't leave the client in a broken "setup complete"
@@ -674,9 +670,7 @@ pub async fn verify_pairing(
         .ok_or_else(|| "Configuration not found. Please pair again.".to_string())?;
 
     if cfg.db_host.is_empty() || cfg.db_password.is_empty() {
-        return Err(
-            "Credentials not saved correctly. Please pair again.".to_string(),
-        );
+        return Err("Credentials not saved correctly. Please pair again.".to_string());
     }
 
     // Materialize the pinned cert to disk so sqlx/libpq can read it.
@@ -684,7 +678,9 @@ pub async fn verify_pairing(
 
     match &sslrootcert_path {
         Some(p) => eprintln!("[HMS Pairing] verify_pairing: cert at {}", p.display()),
-        None    => eprintln!("[HMS Pairing] verify_pairing: no pinned cert — will use sslmode=require"),
+        None => {
+            eprintln!("[HMS Pairing] verify_pairing: no pinned cert — will use sslmode=require")
+        }
     }
 
     // Attempt a real DB connection. Uses the same code path as normal
@@ -708,7 +704,10 @@ pub async fn verify_pairing(
                 e
             )
         } else {
-            format!("Could not connect to the hospital database:\n{}\n\n{}", e, hint)
+            format!(
+                "Could not connect to the hospital database:\n{}\n\n{}",
+                e, hint
+            )
         }
     })?
     .close()

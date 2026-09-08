@@ -20,7 +20,7 @@ mod common;
 use common::fixture_pw;
 
 use hospital_mgmt_lib::config::AppConfig;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ── Harness ──────────────────────────────────────────────────────────────────
 
@@ -44,16 +44,16 @@ fn test_hms_dir(tag: &str) -> PathBuf {
     hms
 }
 
-fn cfg(hms: &PathBuf) -> PathBuf {
+fn cfg(hms: &Path) -> PathBuf {
     hms.join("config.json")
 }
 
-fn bak(hms: &PathBuf) -> PathBuf {
+fn bak(hms: &Path) -> PathBuf {
     hms.join("config.json.bak")
 }
 
 /// Write a legacy v1 config (plaintext password, no config_version field).
-fn write_v1(hms: &PathBuf, password: &str) {
+fn write_v1(hms: &Path, password: &str) {
     let json = format!(
         r#"{{
             "mode": "server",
@@ -93,9 +93,18 @@ fn wp3_u07_save_encrypts_password_on_disk() {
 
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(cfg(&hms)).unwrap()).unwrap();
-    assert!(json.get("db_password").is_none(), "plaintext must not be on disk");
-    let enc = json.get("db_password_encrypted").expect("VF-VERIF-003: blob MUST be on disk");
-    assert!(enc.as_str().unwrap().len() > 80, "DPAPI blob expected, got {:?}", enc);
+    assert!(
+        json.get("db_password").is_none(),
+        "plaintext must not be on disk"
+    );
+    let enc = json
+        .get("db_password_encrypted")
+        .expect("VF-VERIF-003: blob MUST be on disk");
+    assert!(
+        enc.as_str().unwrap().len() > 80,
+        "DPAPI blob expected, got {:?}",
+        enc
+    );
     assert_eq!(json["config_version"].as_u64().unwrap(), 2);
 }
 
@@ -110,7 +119,11 @@ fn wp3_u08_load_v2_decrypts() {
     c.save_to(&cfg(&hms)).expect("save");
 
     let loaded = AppConfig::load_from(&cfg(&hms)).expect("load");
-    assert_eq!(loaded.db_password, fixture_pw(), "decrypt round-trip failed");
+    assert_eq!(
+        loaded.db_password,
+        fixture_pw(),
+        "decrypt round-trip failed"
+    );
     assert_eq!(loaded.config_version, 2);
 }
 
@@ -135,12 +148,16 @@ fn wp3_u09_load_v1_reads_plaintext_and_marks_v2() {
 
 /// WP3-U10 — full migration cycle: v1 → load → save → reload from v2, with
 /// the .bak preserving the original v1 (WP3-I05).
+/// QA-2026-09-08 C2: the .bak is now written as ENCRYPTED v2, not plaintext
+/// v1 — a DPAPI LOCAL_MACHINE blob is equally recoverable on the same
+/// machine (the recovery value survives) while no longer leaking the
+/// superuser password to every local account via the dir's Users:Modify.
 #[test]
 fn wp3_u10_v1_migrate_then_reload_v2() {
     let hms = test_hms_dir("u10");
     write_v1(&hms, &fixture_pw());
 
-    let mut c = AppConfig::load_from(&cfg(&hms)).expect("load v1");
+    let c = AppConfig::load_from(&cfg(&hms)).expect("load v1");
     c.save_to(&cfg(&hms)).expect("save (migration)");
 
     let json: serde_json::Value =
@@ -149,11 +166,26 @@ fn wp3_u10_v1_migrate_then_reload_v2() {
     assert!(json.get("db_password_encrypted").is_some());
 
     let bak_json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(bak(&hms)).expect(".bak must exist")).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(bak(&hms)).expect(".bak must exist"))
+            .unwrap();
+    // C2 contract: the .bak is a v2 encrypted copy — no plaintext password,
+    // version 2, and the recovery VALUE is preserved (reloadable).
+    assert!(
+        bak_json.get("db_password").is_none(),
+        ".bak must not contain the plaintext password (C2)"
+    );
     assert_eq!(
-        bak_json["db_password"].as_str().unwrap(),
+        bak_json["config_version"].as_u64().unwrap(),
+        2,
+        ".bak is the encrypted v2 shape"
+    );
+    assert!(bak_json.get("db_password_encrypted").is_some());
+
+    let recovered_from_bak = AppConfig::load_from(&bak(&hms)).expect("reload .bak");
+    assert_eq!(
+        recovered_from_bak.db_password,
         fixture_pw(),
-        ".bak preserves the original v1 content"
+        ".bak preserves the last known-good password as a RECOVERY VALUE"
     );
 
     let reloaded = AppConfig::load_from(&cfg(&hms)).expect("reload v2");
@@ -171,8 +203,14 @@ fn wp3_i03_ipc_reply_never_contains_password() {
     c.db_password = fixture_pw();
     c.db_password_encrypted = Some("BLOB".into());
     let json = serde_json::to_value(&c).unwrap();
-    assert!(json.get("db_password").is_none(), "plaintext leaked to IPC shape");
-    assert!(json.get("db_password_encrypted").is_none(), "blob leaked to IPC shape");
+    assert!(
+        json.get("db_password").is_none(),
+        "plaintext leaked to IPC shape"
+    );
+    assert!(
+        json.get("db_password_encrypted").is_none(),
+        "blob leaked to IPC shape"
+    );
 }
 
 /// WP3-I05 — .bak is created ONLY on the v1→v2 transition, and later saves
@@ -189,7 +227,10 @@ fn wp3_i05_bak_created_once_not_clobbered() {
     c.clinic_name = "Renamed Clinic".into();
     c.save_to(&cfg(&hms)).unwrap(); // later save — .bak must NOT be overwritten
     let bak2 = std::fs::read_to_string(bak(&hms)).unwrap();
-    assert_eq!(bak1, bak2, "the original v1 backup must survive later saves");
+    assert_eq!(
+        bak1, bak2,
+        "the original v1 backup must survive later saves"
+    );
 
     // A save that does NOT migrate (no v1 ever existed) never creates a .bak.
     let hms2 = test_hms_dir("i05b");
@@ -277,7 +318,9 @@ fn wp3_p01_stolen_config_yields_nothing() {
     let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let blob = json["db_password_encrypted"].as_str().unwrap();
     use base64::Engine;
-    let decoded = base64::engine::general_purpose::STANDARD.decode(blob).unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(blob)
+        .unwrap();
     let decoded_str = String::from_utf8_lossy(&decoded);
     assert!(
         !decoded_str.contains(&fixture_pw()),
@@ -289,7 +332,8 @@ fn wp3_p01_stolen_config_yields_nothing() {
 /// the binary — secrets.rs contains no key material, only the OS API calls.
 #[test]
 fn wp3_p02_no_embedded_keys_in_source() {
-    let src = std::fs::read_to_string(format!("{}/src/secrets.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let src =
+        std::fs::read_to_string(format!("{}/src/secrets.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
     assert!(!src.contains("PRIVATE KEY"));
     assert!(!src.contains("BEGIN PUBLIC KEY"));
     assert!(src.contains("CryptProtectData"));
@@ -336,7 +380,10 @@ fn wp3_c01_c02_concurrent_save_load_and_migration() {
     assert!(json.get("db_password_encrypted").is_some());
     let bak_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(bak(&hms)).unwrap()).unwrap();
-    assert_eq!(bak_json["db_password"].as_str().unwrap(), fixture_pw());
+    // QA-2026-09-08 C2: the .bak is the encrypted v2 shape — no plaintext.
+    assert!(bak_json.get("db_password").is_none());
+    assert_eq!(bak_json["config_version"].as_u64().unwrap(), 2);
+    assert!(bak_json.get("db_password_encrypted").is_some());
 }
 
 // ── G.3.6 Offline test (WP3-O01) ──────────────────────────────────────────────

@@ -20,30 +20,41 @@
 use sqlx::PgPool;
 
 use crate::audit;
-use crate::models::{
-    CreateRadiologyOrder, CreateRadiologyReport, RadiologyOrder, RadiologyReport,
-};
+use crate::models::{CreateRadiologyOrder, CreateRadiologyReport, RadiologyOrder, RadiologyReport};
 use crate::rbac::{self, Permission, SessionState};
 
 // ── P1-2: Validated enum constants ──────────────────────────────────────────
 
 const VALID_STATUSES: &[&str] = &[
-    "ordered", "scheduled", "in_progress", "completed",
-    "reported", "verified", "cancelled",
+    "ordered",
+    "scheduled",
+    "in_progress",
+    "completed",
+    "reported",
+    "verified",
+    "cancelled",
 ];
 
 const VALID_PRIORITIES: &[&str] = &["routine", "urgent", "emergency", "stat"];
 
 const VALID_STUDY_TYPES: &[&str] = &[
-    "X-Ray", "CT Scan", "MRI", "Ultrasound",
-    "Mammography", "Fluoroscopy", "DEXA", "Other",
+    "X-Ray",
+    "CT Scan",
+    "MRI",
+    "Ultrasound",
+    "Mammography",
+    "Fluoroscopy",
+    "DEXA",
+    "Other",
 ];
 
 fn validate_enum(value: &str, allowed: &[&str], field_name: &str) -> Result<(), String> {
     if !allowed.contains(&value) {
         return Err(format!(
             "Invalid {} '{}'. Allowed values: {}.",
-            field_name, value, allowed.join(", ")
+            field_name,
+            value,
+            allowed.join(", ")
         ));
     }
     Ok(())
@@ -126,20 +137,33 @@ pub async fn get_radiology_orders(
 
     // Build WHERE clause — always exclude soft-deleted records.
     let (where_clause, has_status, has_priority) = match (st, pr) {
-        (Some(_), Some(_)) => ("WHERE ro.deleted_at IS NULL AND ro.status = $1 AND ro.priority = $2", true, true),
-        (Some(_), None) => ("WHERE ro.deleted_at IS NULL AND ro.status = $1", true, false),
-        (None, Some(_)) => ("WHERE ro.deleted_at IS NULL AND ro.priority = $1", false, true),
+        (Some(_), Some(_)) => (
+            "WHERE ro.deleted_at IS NULL AND ro.status = $1 AND ro.priority = $2",
+            true,
+            true,
+        ),
+        (Some(_), None) => (
+            "WHERE ro.deleted_at IS NULL AND ro.status = $1",
+            true,
+            false,
+        ),
+        (None, Some(_)) => (
+            "WHERE ro.deleted_at IS NULL AND ro.priority = $1",
+            false,
+            true,
+        ),
         (None, None) => ("WHERE ro.deleted_at IS NULL", false, false),
     };
 
     // Count query (for pagination metadata).
-    let count_sql = format!(
-        "SELECT COUNT(*) FROM radiology_orders ro {}",
-        where_clause
-    );
+    let count_sql = format!("SELECT COUNT(*) FROM radiology_orders ro {}", where_clause);
     let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-    if has_status { count_q = count_q.bind(st.unwrap()); }
-    if has_priority { count_q = count_q.bind(pr.unwrap()); }
+    if has_status {
+        count_q = count_q.bind(st.unwrap());
+    }
+    if has_priority {
+        count_q = count_q.bind(pr.unwrap());
+    }
     let total: i64 = count_q
         .fetch_one(pool.inner())
         .await
@@ -148,13 +172,30 @@ pub async fn get_radiology_orders(
     // Data query with LIMIT/OFFSET.
     let data_sql = format!(
         "{} {} ORDER BY ro.ordered_at DESC LIMIT ${} OFFSET ${}",
-        SELECT_ORDERS, where_clause,
-        if has_status && has_priority { 3 } else if has_status || has_priority { 2 } else { 1 },
-        if has_status && has_priority { 4 } else if has_status || has_priority { 3 } else { 2 },
+        SELECT_ORDERS,
+        where_clause,
+        if has_status && has_priority {
+            3
+        } else if has_status || has_priority {
+            2
+        } else {
+            1
+        },
+        if has_status && has_priority {
+            4
+        } else if has_status || has_priority {
+            3
+        } else {
+            2
+        },
     );
     let mut data_q = sqlx::query_as::<_, RadiologyOrder>(&data_sql);
-    if has_status { data_q = data_q.bind(st.unwrap()); }
-    if has_priority { data_q = data_q.bind(pr.unwrap()); }
+    if has_status {
+        data_q = data_q.bind(st.unwrap());
+    }
+    if has_priority {
+        data_q = data_q.bind(pr.unwrap());
+    }
     data_q = data_q.bind(ps).bind(offset);
     let orders: Vec<RadiologyOrder> = data_q
         .fetch_all(pool.inner())
@@ -179,7 +220,10 @@ pub async fn get_radiology_order(
     id: i32,
 ) -> Result<RadiologyOrder, String> {
     let _ = rbac::require(&session, Permission::RadiologyView)?;
-    let q = format!("{} WHERE ro.id = $1 AND ro.deleted_at IS NULL", SELECT_ORDERS);
+    let q = format!(
+        "{} WHERE ro.id = $1 AND ro.deleted_at IS NULL",
+        SELECT_ORDERS
+    );
     sqlx::query_as::<_, RadiologyOrder>(&q)
         .bind(id)
         .fetch_one(pool.inner())
@@ -328,7 +372,11 @@ pub async fn update_radiology_order_status(
             "Status '{}' cannot be set via the generic status update command. \
              Use the dedicated {} command instead.",
             new_status,
-            if new_status == "verified" { "verify report" } else { "create report" }
+            if new_status == "verified" {
+                "verify report"
+            } else {
+                "create report"
+            }
         ));
     }
 
@@ -477,13 +525,12 @@ pub async fn get_radiology_report(
     let _ = rbac::require_strong(&session, pool.inner(), Permission::RadiologyView).await?;
 
     // P0-5-FOLLOWUP: Verify the parent order is not soft-deleted.
-    let order_exists: Option<(i32,)> = sqlx::query_as(
-        "SELECT id FROM radiology_orders WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(order_id)
-    .fetch_optional(pool.inner())
-    .await
-    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let order_exists: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM radiology_orders WHERE id = $1 AND deleted_at IS NULL")
+            .bind(order_id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     if order_exists.is_none() {
         return Ok(None);
@@ -766,12 +813,11 @@ pub async fn get_radiology_dashboard(
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     // Reports KPI is separate (different table).
-    let verification_pending: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM radiology_reports WHERE verified_at IS NULL",
-    )
-    .fetch_one(pool.inner())
-    .await
-    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let verification_pending: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM radiology_reports WHERE verified_at IS NULL")
+            .fetch_one(pool.inner())
+            .await
+            .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     Ok(serde_json::json!({
         "studies_today": row.0,
@@ -782,4 +828,3 @@ pub async fn get_radiology_dashboard(
         "verification_pending": verification_pending,
     }))
 }
-

@@ -39,7 +39,12 @@ async fn state_for(pool: &PgPool, user_id: i32, token_hash: &str) -> SessionStat
     Arc::new(Mutex::new(Some(s)))
 }
 
-fn out(role_target: Option<&str>, user_id: Option<i32>, kind: &str, title: &str) -> NotificationOut {
+fn out(
+    role_target: Option<&str>,
+    user_id: Option<i32>,
+    kind: &str,
+    title: &str,
+) -> NotificationOut {
     NotificationOut {
         user_id,
         role_target: role_target.map(String::from),
@@ -73,34 +78,71 @@ async fn test_nc1_nc2_visibility_and_per_user_reads() {
     let nurse_roles = roles("nurse");
 
     // Three targeting modes.
-    emit(&pool, out(Some("doctor"), None, "role_bcast", "Role broadcast")).await.unwrap();
-    emit(&pool, out(None, Some(nurse_id), "direct", "Direct to nurse")).await.unwrap();
-    emit(&pool, out(None, None, "everyone", "Broadcast to all")).await.unwrap();
+    emit(
+        &pool,
+        out(Some("doctor"), None, "role_bcast", "Role broadcast"),
+    )
+    .await
+    .unwrap();
+    emit(
+        &pool,
+        out(None, Some(nurse_id), "direct", "Direct to nurse"),
+    )
+    .await
+    .unwrap();
+    emit(&pool, out(None, None, "everyone", "Broadcast to all"))
+        .await
+        .unwrap();
 
     // Doctor feed: sees the role broadcast + the everyone broadcast, NOT the
     // nurse-direct one. 2 rows, 2 unread.
     let d1 = fetch_feed(&pool, doc1, &doc1_roles).await.unwrap();
     assert_eq!(d1.unread_count, 2, "doctor sees role bcast + everyone only");
     assert!(d1.notifications.iter().any(|n| n.title == "Role broadcast"));
-    assert!(d1.notifications.iter().any(|n| n.title == "Broadcast to all"));
-    assert!(!d1.notifications.iter().any(|n| n.title == "Direct to nurse"));
+    assert!(d1
+        .notifications
+        .iter()
+        .any(|n| n.title == "Broadcast to all"));
+    assert!(!d1
+        .notifications
+        .iter()
+        .any(|n| n.title == "Direct to nurse"));
 
     // Nurse feed: sees the direct + everyone, NOT the doctor broadcast.
     let nf = fetch_feed(&pool, nurse_id, &nurse_roles).await.unwrap();
     assert_eq!(nf.unread_count, 2);
-    assert!(nf.notifications.iter().any(|n| n.title == "Direct to nurse"));
+    assert!(nf
+        .notifications
+        .iter()
+        .any(|n| n.title == "Direct to nurse"));
     assert!(!nf.notifications.iter().any(|n| n.title == "Role broadcast"));
 
     // NC-2: doc1 marks the role broadcast read — doc2 still sees it unread.
-    let bcast = d1.notifications.iter().find(|n| n.title == "Role broadcast").unwrap();
-    mark_read_core(&pool, doc1, &doc1_roles, bcast.id).await.unwrap();
+    let bcast = d1
+        .notifications
+        .iter()
+        .find(|n| n.title == "Role broadcast")
+        .unwrap();
+    mark_read_core(&pool, doc1, &doc1_roles, bcast.id)
+        .await
+        .unwrap();
 
     let d1_after = fetch_feed(&pool, doc1, &doc1_roles).await.unwrap();
     assert_eq!(d1_after.unread_count, 1, "doc1 has everyone-broadcast left");
     let d2_after = fetch_feed(&pool, doc2, &doc2_roles).await.unwrap();
-    assert_eq!(d2_after.unread_count, 2, "doc2's read state is independent — still 2 unread");
-    let d2_bcast = d2_after.notifications.iter().find(|n| n.title == "Role broadcast").unwrap();
-    assert!(!d2_bcast.read, "the role broadcast must stay unread for doc2");
+    assert_eq!(
+        d2_after.unread_count, 2,
+        "doc2's read state is independent — still 2 unread"
+    );
+    let d2_bcast = d2_after
+        .notifications
+        .iter()
+        .find(|n| n.title == "Role broadcast")
+        .unwrap();
+    assert!(
+        !d2_bcast.read,
+        "the role broadcast must stay unread for doc2"
+    );
 
     // mark_all for doc2 clears everything visible to them.
     let n = mark_all_read_core(&pool, doc2, &doc2_roles).await.unwrap();
@@ -119,7 +161,12 @@ async fn test_nc3_cannot_mark_invisible_notification() {
     let pharmacist_id = seed_user(&pool, "nc3_pharm", &pw, &["pharmacist"]).await;
 
     // Targeted at the nurse only.
-    emit(&pool, out(None, Some(nurse_id), "direct", "Nurse-only secret")).await.unwrap();
+    emit(
+        &pool,
+        out(None, Some(nurse_id), "direct", "Nurse-only secret"),
+    )
+    .await
+    .unwrap();
     let (id,): (i32,) = sqlx::query_as(
         "SELECT id FROM app_notifications WHERE title = 'Nurse-only secret' ORDER BY id DESC LIMIT 1",
     )
@@ -129,30 +176,37 @@ async fn test_nc3_cannot_mark_invisible_notification() {
 
     // The pharmacist CANNOT mark it read (not visible to them)…
     let pharm_roles = roles("pharmacist");
-    mark_read_core(&pool, pharmacist_id, &pharm_roles, id).await.unwrap();
-    let (reads,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM app_notification_reads WHERE notification_id = $1",
-    )
-    .bind(id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    mark_read_core(&pool, pharmacist_id, &pharm_roles, id)
+        .await
+        .unwrap();
+    let (reads,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM app_notification_reads WHERE notification_id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(reads, 0, "an invisible notification must not be markable");
 
     // …and the pharmacist's feed does not contain it at all.
-    let pf = fetch_feed(&pool, pharmacist_id, &pharm_roles).await.unwrap();
-    assert!(!pf.notifications.iter().any(|n| n.title == "Nurse-only secret"));
+    let pf = fetch_feed(&pool, pharmacist_id, &pharm_roles)
+        .await
+        .unwrap();
+    assert!(!pf
+        .notifications
+        .iter()
+        .any(|n| n.title == "Nurse-only secret"));
 
     // The nurse CAN mark it read.
     let nurse_roles = roles("nurse");
-    mark_read_core(&pool, nurse_id, &nurse_roles, id).await.unwrap();
-    let (reads,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM app_notification_reads WHERE notification_id = $1",
-    )
-    .bind(id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    mark_read_core(&pool, nurse_id, &nurse_roles, id)
+        .await
+        .unwrap();
+    let (reads,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM app_notification_reads WHERE notification_id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(reads, 1);
 }
 
@@ -168,7 +222,9 @@ async fn test_nc4_lab_emitters_fire_notifications() {
 
     let patient_id = seed_patient_with_phone(&pool, "Lab", "Notif", "+92300nc4a").await;
     let (order_id, tests) = seed_lab_order_rows(&pool, patient_id, 1).await;
-    collect_lab_sample_core(&pool, &tech, tests[0].0).await.unwrap();
+    collect_lab_sample_core(&pool, &tech, tests[0].0)
+        .await
+        .unwrap();
 
     // Enter a CRITICAL result through the REAL core — the emitter inside
     // update_lab_result_core must fire (not a mirrored SQL statement).
@@ -186,38 +242,52 @@ async fn test_nc4_lab_emitters_fire_notifications() {
     .await
     .unwrap();
 
-    let (critical_rows,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM app_notifications WHERE kind = 'lab_critical'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(critical_rows >= 1, "critical entry must emit a doctor-role notification");
+    let (critical_rows,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM app_notifications WHERE kind = 'lab_critical'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        critical_rows >= 1,
+        "critical entry must emit a doctor-role notification"
+    );
     let (role,): (Option<String>,) = sqlx::query_as(
         "SELECT role_target FROM app_notifications WHERE kind = 'lab_critical' ORDER BY id DESC LIMIT 1",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(role.as_deref(), Some("doctor"), "critical notifications target the doctor role");
+    assert_eq!(
+        role.as_deref(),
+        Some("doctor"),
+        "critical notifications target the doctor role"
+    );
     let (entity,): (Option<i32>,) = sqlx::query_as(
         "SELECT entity_id FROM app_notifications WHERE kind = 'lab_critical' ORDER BY id DESC LIMIT 1",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(entity, Some(order_id), "critical notification links back to the lab order");
+    assert_eq!(
+        entity,
+        Some(order_id),
+        "critical notification links back to the lab order"
+    );
 
     // Release it through the REAL approve core → a lab_released
     // notification must appear for the doctor role.
-    approve_lab_result_core(&pool, &tech, tests[0].1, true).await.unwrap();
-    let (released_rows,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM app_notifications WHERE kind = 'lab_released'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(released_rows >= 1, "result release must emit a doctor-role notification");
+    approve_lab_result_core(&pool, &tech, tests[0].1, true)
+        .await
+        .unwrap();
+    let (released_rows,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM app_notifications WHERE kind = 'lab_released'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        released_rows >= 1,
+        "result release must emit a doctor-role notification"
+    );
 }
 
 // ── Local lab fixture (independent of lab_tests.rs) ───────────────────────────
@@ -225,11 +295,7 @@ async fn test_nc4_lab_emitters_fire_notifications() {
 /// Insert a lab order with N tests; returns (order_id, Vec<(order_id, row_id)>)
 /// so the caller has both the order id (for entity linkage asserts) and each
 /// lab_order_tests row id (result entry target).
-async fn seed_lab_order_rows(
-    pool: &PgPool,
-    patient_id: i32,
-    n: i32,
-) -> (i32, Vec<(i32, i32)>) {
+async fn seed_lab_order_rows(pool: &PgPool, patient_id: i32, n: i32) -> (i32, Vec<(i32, i32)>) {
     let order: (i32,) = sqlx::query_as(
         "INSERT INTO lab_orders (patient_id, status) VALUES ($1, 'ordered') RETURNING id",
     )

@@ -80,7 +80,9 @@ fn default_backup_retention_count() -> u32 {
     14
 }
 
-fn default_config_version() -> u32 { 1 }
+fn default_config_version() -> u32 {
+    1
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -155,7 +157,9 @@ impl AppConfig {
             return crate::rbac::ConfigDiskState::Missing;
         }
         match Self::load_from_inner(&path) {
-            Some(c) => crate::rbac::ConfigDiskState::Active { setup_complete: c.setup_complete },
+            Some(c) => crate::rbac::ConfigDiskState::Active {
+                setup_complete: c.setup_complete,
+            },
             None => crate::rbac::ConfigDiskState::Corrupt,
         }
     }
@@ -178,7 +182,10 @@ impl AppConfig {
 
         // Parse as generic JSON to check config_version.
         let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-        let version = json.get("config_version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+        let version = json
+            .get("config_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1) as u32;
 
         // WP3-N04 (AERP Part G): reject config files from a NEWER format
         // version than this binary understands. Silently treating an unknown
@@ -205,7 +212,9 @@ impl AppConfig {
             // V2: decrypt db_password from db_password_encrypted.
             if let Some(enc) = &cfg.db_password_encrypted {
                 match crate::secrets::decrypt(enc) {
-                    Ok(plain) => { cfg.db_password = plain; }
+                    Ok(plain) => {
+                        cfg.db_password = plain;
+                    }
                     Err(e) => {
                         eprintln!("[HMS CONFIG] ERROR: failed to decrypt db_password: {}. Database connection will fail.", e);
                         cfg.db_password = String::new();
@@ -244,8 +253,11 @@ impl AppConfig {
         self.save_to_inner(path)
     }
 
-    fn save_to_inner(&self, path: &Path) -> Result<(), String> {
-        // RCTF-IMPL-001 WP-3: encrypt db_password before writing to disk.
+    /// Serialize this config as a v2 (DPAPI-encrypted) on-disk JSON payload.
+    /// Shared by `save_to_inner` (the live config write) and the v1→v2
+    /// migration backup path (QA-2026-09-08 C2) so the .bak gets the same
+    /// encrypted shape as the live file.
+    fn serialize_v2(&self) -> Result<String, String> {
         let mut save_cfg = self.clone();
         if !save_cfg.db_password.is_empty() {
             let enc = crate::secrets::encrypt(&save_cfg.db_password)
@@ -255,54 +267,86 @@ impl AppConfig {
         }
 
         // VF-VERIF-003: `db_password_encrypted` is `#[serde(skip_serializing)]`
-        // so it never leaks through the `get_config` IPC reply. But `save()`
-        // serializes this same struct for the DISK write, where the field is
-        // required — a v2 file without the blob decrypts to an empty password
-        // on next launch and bricks the DB connection. Re-inject it into the
-        // JSON object after struct serialization, keeping the IPC-safe
-        // skip_serializing property intact.
+        // so it never leaks through the `get_config` IPC reply. But the disk
+        // write needs the field — a v2 file without the blob decrypts to an
+        // empty password on next launch and bricks the DB connection.
+        // Re-inject it into the JSON object after struct serialization.
         let mut json: serde_json::Value =
             serde_json::to_value(&save_cfg).map_err(|e| e.to_string())?;
         if save_cfg.db_password_encrypted.is_some() {
             json["db_password_encrypted"] =
                 serde_json::Value::String(save_cfg.db_password_encrypted.clone().unwrap());
         }
-        let content = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+    }
+
+    fn save_to_inner(&self, path: &Path) -> Result<(), String> {
+        // RCTF-IMPL-001 WP-3 + QA-2026-09-08 C2: the v1→v2 migration backup
+        // and the live write share one serializer so both files on disk are
+        // always the same encrypted v2 shape.
+        let content = self.serialize_v2()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
 
-        // WP3-I05 (AERP Part G): before the FIRST v1→v2 migration overwrites
-        // the on-disk file, preserve the current file as `config.json.bak`.
-        // The v1 file contains the last known-good plaintext password; if the
-        // v2 write later turns out unreadable (corrupt blob, ACL issue, DPAPI
-        // key loss), the operator has a recovery path that does not require
-        // re-provisioning PostgreSQL. Only written when the existing file is
-        // still v1 (a v2 file already exists → this is not a migration) and
-        // no .bak already exists (never clobber the original v1 backup).
-        if save_cfg.config_version == 2 {
+        // WP3-I05 (AERP Part G) + QA-2026-09-08 C2: before the FIRST v1→v2
+        // migration overwrites the on-disk file, preserve the current file
+        // as `config.json.bak`. The v1 file contains the last known-good
+        // plaintext password; if the v2 write later turns out unreadable
+        // (corrupt blob, ACL issue, DPAPI key loss), the operator has a
+        // recovery path that does not require re-provisioning PostgreSQL.
+        // Only written when the existing file is still v1 (a v2 file
+        // already exists → this is not a migration) and no .bak already
+        // exists (never clobber the original v1 backup).
+        //
+        // C2 fix: the preserved .bak is REWRITTEN to v2 (DPAPI-encrypted)
+        // BEFORE the copy — the backup's purpose is "last known-good
+        // password for recovery", and a DPAPI LOCAL_MACHINE blob is exactly
+        // as recoverable on this machine as plaintext (same machine, same
+        // encryption scope) while no longer leaking the superuser password
+        // to every local user via the parent dir's Users:Modify ACE. The
+        // ACL hardening below is now defense-in-depth, not the only barrier.
+        //
+        // Migration condition mirrors the old inline logic: only when this
+        // save actually writes the v2 shape (password present, or already
+        // upgraded in memory by load_from_inner) AND the on-disk file is
+        // still v1 — a v2 disk file means this is not a migration.
+        let writing_v2 = !self.db_password.is_empty() || self.config_version >= 2;
+        if writing_v2 {
             let is_v1_on_disk = fs::read_to_string(path)
                 .ok()
                 .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-                .map(|j| j.get("config_version").and_then(|v| v.as_u64()).unwrap_or(1) < 2)
+                .map(|j| {
+                    j.get("config_version")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1)
+                        < 2
+                })
                 .unwrap_or(false);
             if is_v1_on_disk {
                 let bak = path.with_extension("json.bak");
                 if !bak.exists() {
                     // Best-effort: a failed backup must not block the save —
                     // the atomic write below is the critical path.
-                    let _ = fs::copy(path, &bak);
+                    if let Ok(v2_content) = self.serialize_v2() {
+                        let _ = fs::write(&bak, &v2_content);
+                    } else {
+                        // Encryption failed — fall back to the legacy copy so
+                        // the recovery path still exists, and rely on the ACL
+                        // hardening (it stays load-bearing in this branch).
+                        let _ = fs::copy(path, &bak);
+                    }
 
-                    // The .bak holds the PLAINTEXT v1 password, so it MUST get
-                    // the same ACL hardening as config.json itself. A plain
-                    // fs::copy inherits the parent dir's ACEs (Users:Modify on
-                    // C:\ProgramData\HMS) — leaving the last known-good
-                    // password readable by every local user. Match the
+                    // The .bak may hold the password (DPAPI blob, or v1
+                    // plaintext in the encryption-failure fallback), so it
+                    // MUST NOT keep the parent dir's inherited ACEs
+                    // (Users:Modify on C:\ProgramData\HMS). Match the
                     // config.json ACL policy below (VF-VERIF-004 grants).
                     #[cfg(target_os = "windows")]
                     {
                         let mut icacls = std::process::Command::new("icacls");
-                        icacls.arg(bak.as_os_str())
+                        icacls
+                            .arg(bak.as_os_str())
                             .args(["/inheritance:r"])
                             .args(["/grant:r", "SYSTEM:F"])
                             .args(["/grant:r", "Administrators:F"]);
@@ -350,7 +394,8 @@ impl AppConfig {
         #[cfg(target_os = "windows")]
         {
             let mut icacls = std::process::Command::new("icacls");
-            icacls.arg(tmp.as_os_str())
+            icacls
+                .arg(tmp.as_os_str())
                 .args(["/inheritance:r"])
                 .args(["/grant:r", "SYSTEM:F"])
                 .args(["/grant:r", "Administrators:F"]);
@@ -366,8 +411,11 @@ impl AppConfig {
                 .stderr(std::process::Stdio::null())
                 .status();
             if let Err(e) = status {
-                eprintln!("[HMS CONFIG] Warning: could not ACL-harden the config temp file ({}). \
-                           The renamed config.json may briefly inherit weaker permissions.", e);
+                eprintln!(
+                    "[HMS CONFIG] Warning: could not ACL-harden the config temp file ({}). \
+                           The renamed config.json may briefly inherit weaker permissions.",
+                    e
+                );
             }
         }
 
@@ -458,7 +506,8 @@ pub async fn save_config(
                 "config",
                 None,
                 Some(serde_json::json!({"db_host": config.db_host, "db_port": config.db_port})),
-            ).await;
+            )
+            .await;
         }
         crate::rbac::ConfigMutationGrant::FirstRun => { /* no principal to audit */ }
     }
@@ -480,8 +529,12 @@ pub async fn save_config(
     // Missing and Corrupt both count as "window" (conservative).
     #[cfg(feature = "server-build")]
     {
-        let in_setup_window =
-            !matches!(disk, crate::rbac::ConfigDiskState::Active { setup_complete: true });
+        let in_setup_window = !matches!(
+            disk,
+            crate::rbac::ConfigDiskState::Active {
+                setup_complete: true
+            }
+        );
         if in_setup_window {
             let host = config.db_host.trim().to_string();
             let is_loopback = host == "127.0.0.1" || host == "localhost" || host == "::1";
@@ -489,7 +542,8 @@ pub async fn save_config(
                 return Err(
                     "During first-run setup the database host must be this machine \
                      (127.0.0.1). Remote hosts can be configured later from Settings \
-                     after signing in.".to_string(),
+                     after signing in."
+                        .to_string(),
                 );
             }
         }
@@ -512,7 +566,11 @@ pub async fn save_config(
 pub async fn get_local_ip() -> Result<String, String> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
     socket.connect("8.8.8.8:80").map_err(|e| e.to_string())?;
-    Ok(socket.local_addr().map_err(|e| e.to_string())?.ip().to_string())
+    Ok(socket
+        .local_addr()
+        .map_err(|e| e.to_string())?
+        .ip()
+        .to_string())
 }
 
 #[tauri::command]
@@ -557,19 +615,28 @@ pub async fn repair_server_config(
                 "config",
                 None,
                 None,
-            ).await;
+            )
+            .await;
         }
         crate::rbac::ConfigMutationGrant::FirstRun => { /* no principal to audit */ }
     }
     let mut cfg = AppConfig::load(&app_handle).unwrap_or_default();
-    cfg.mode          = "server".to_string();
-    cfg.db_host       = "127.0.0.1".to_string();
-    cfg.db_password   = db_password.trim().to_string();
+    cfg.mode = "server".to_string();
+    cfg.db_host = "127.0.0.1".to_string();
+    cfg.db_password = db_password.trim().to_string();
     cfg.setup_complete = true;
-    if let Some(u) = db_user    { cfg.db_user     = u; }
-    if let Some(n) = db_name    { cfg.db_name     = n; }
-    if let Some(p) = db_port    { cfg.db_port     = p; }
-    if let Some(c) = clinic_name { cfg.clinic_name = c; }
+    if let Some(u) = db_user {
+        cfg.db_user = u;
+    }
+    if let Some(n) = db_name {
+        cfg.db_name = n;
+    }
+    if let Some(p) = db_port {
+        cfg.db_port = p;
+    }
+    if let Some(c) = clinic_name {
+        cfg.clinic_name = c;
+    }
     cfg.save(&app_handle)
 }
 
@@ -577,7 +644,9 @@ pub async fn repair_server_config(
 /// Useful for the Setup screen to tell the user where to look.
 #[tauri::command]
 pub async fn get_config_path(app_handle: tauri::AppHandle) -> Result<String, String> {
-    Ok(AppConfig::config_path(&app_handle).to_string_lossy().to_string())
+    Ok(AppConfig::config_path(&app_handle)
+        .to_string_lossy()
+        .to_string())
 }
 
 /// Deletes the config file to allow re-setup (used on client builds when reconfiguring).
@@ -607,7 +676,8 @@ pub async fn clear_config(
                 "config",
                 None,
                 None,
-            ).await;
+            )
+            .await;
         }
         crate::rbac::ConfigMutationGrant::FirstRun => { /* no principal to audit */ }
     }

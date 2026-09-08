@@ -11,8 +11,8 @@
 //! for writes) and every write is audit-logged.
 
 use chrono::NaiveDate;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 
 use crate::audit;
@@ -233,15 +233,16 @@ pub async fn adjust_inventory(
     // adjustments cannot interleave and produce a wrong balance_after.
     // (name + reorder_level are fetched alongside for the Phase 9
     // low-stock notification — one locked read instead of two.)
-    let current: Option<(Decimal, String, Decimal)> =
-        sqlx::query_as("SELECT stock_quantity, name, reorder_level FROM inventory_items WHERE id = $1 FOR UPDATE")
-            .bind(item_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| format!("Lock inventory item: {}", e))?;
+    let current: Option<(Decimal, String, Decimal)> = sqlx::query_as(
+        "SELECT stock_quantity, name, reorder_level FROM inventory_items WHERE id = $1 FOR UPDATE",
+    )
+    .bind(item_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("Lock inventory item: {}", e))?;
 
-    let (current_balance, item_name, reorder_level) = current
-        .ok_or_else(|| format!("Inventory item {} not found.", item_id))?;
+    let (current_balance, item_name, reorder_level) =
+        current.ok_or_else(|| format!("Inventory item {} not found.", item_id))?;
 
     let change_dec = Decimal::from(quantity_change);
     let new_balance = current_balance + change_dec;
@@ -310,8 +311,13 @@ pub async fn adjust_inventory(
                 entity_type: Some("inventory_item".into()),
                 entity_id: Some(item_id),
             },
-        ).await {
-            eprintln!("[HMS Inventory] notification emit failed (non-fatal): {}", e);
+        )
+        .await
+        {
+            eprintln!(
+                "[HMS Inventory] notification emit failed (non-fatal): {}",
+                e
+            );
         }
     }
     Ok(())

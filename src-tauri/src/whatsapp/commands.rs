@@ -15,6 +15,16 @@ use crate::rbac::{self, SessionState};
 
 /// Generic WhatsApp send. Accepts a fully-formed `WhatsAppMessage`.
 /// Used by the appointment booking/confirmation/cancellation flows.
+///
+/// QA-2026-09-08 H8 (IPC-10): this entry point previously skipped the
+/// IPC-09 guards that `send_whatsapp_to_patient` enforces — any
+/// `WhatsAppSend` holder could send arbitrary content to an arbitrary
+/// external number (no length cap, no registered-patient check). The
+/// internal flows always send to a patient phone with a clinic-built
+/// template, so the guards are compatible with them. Sends to a
+/// registered patient's phone AND a length-capped body are now required;
+/// group sends and clinic test sends keep using their own checked paths
+/// (is_group / "test" type) and are refused here.
 #[tauri::command]
 pub async fn send_whatsapp_notification(
     app_handle: tauri::AppHandle,
@@ -22,10 +32,22 @@ pub async fn send_whatsapp_notification(
     session_state: tauri::State<'_, SessionState>,
     message: WhatsAppMessage,
 ) -> Result<(), String> {
-    let session = rbac::require_strong(&session_state, pool.inner(), rbac::Permission::WhatsAppSend).await?;
+    let session =
+        rbac::require_strong(&session_state, pool.inner(), rbac::Permission::WhatsAppSend).await?;
+
+    if message.is_group || message.notification_type == "test" {
+        return Err(
+            "Group and test sends must use their dedicated commands (group send / WhatsApp test in Settings).".to_string(),
+        );
+    }
+    send_to_patient_checks(pool.inner(), &message.recipient, &message.message).await?;
+
     let result = automation::send_whatsapp(&app_handle, pool.inner(), message.clone()).await;
     crate::audit::for_session(
-        pool.inner(), &session, "whatsapp_send", "whatsapp",
+        pool.inner(),
+        &session,
+        "whatsapp_send",
+        "whatsapp",
         None,
         Some(serde_json::json!({
             "recipient": message.recipient,
@@ -33,7 +55,8 @@ pub async fn send_whatsapp_notification(
             "is_group": message.is_group,
             "success": result.is_ok()
         })),
-    ).await;
+    )
+    .await;
     result
 }
 
@@ -63,7 +86,8 @@ pub async fn send_whatsapp_to_patient(
     message: String,
     notification_type: Option<String>,
 ) -> Result<(), String> {
-    let session = rbac::require_strong(&session_state, pool.inner(), rbac::Permission::WhatsAppSend).await?;
+    let session =
+        rbac::require_strong(&session_state, pool.inner(), rbac::Permission::WhatsAppSend).await?;
 
     // AERP Part G extraction: the IPC-09 input checks live in
     // `send_to_patient_checks` (pure DB + string logic, no AppHandle)
@@ -78,14 +102,18 @@ pub async fn send_whatsapp_to_patient(
     };
     let result = automation::send_whatsapp(&app_handle, pool.inner(), msg.clone()).await;
     crate::audit::for_session(
-        pool.inner(), &session, "whatsapp_send", "whatsapp",
+        pool.inner(),
+        &session,
+        "whatsapp_send",
+        "whatsapp",
         None,
         Some(serde_json::json!({
             "recipient": msg.recipient,
             "notification_type": msg.notification_type,
             "success": result.is_ok()
         })),
-    ).await;
+    )
+    .await;
     result
 }
 
@@ -149,7 +177,12 @@ pub async fn send_whatsapp_test(
     phone: String,
     clinic_name: Option<String>,
 ) -> Result<String, String> {
-    let _session = rbac::require_strong(&session_state, pool.inner(), rbac::Permission::SettingsManage).await?;
+    let _session = rbac::require_strong(
+        &session_state,
+        pool.inner(),
+        rbac::Permission::SettingsManage,
+    )
+    .await?;
     let clinic = clinic_name.unwrap_or_else(|| "VitalFlow HMS".to_string());
     let msg = WhatsAppMessage {
         recipient: phone,
@@ -172,7 +205,8 @@ pub async fn get_notification_log(
     session_state: tauri::State<'_, SessionState>,
     limit: Option<i64>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let _ = rbac::require_strong(&session_state, pool.inner(), rbac::Permission::WhatsAppView).await?;
+    let _ =
+        rbac::require_strong(&session_state, pool.inner(), rbac::Permission::WhatsAppView).await?;
     log::fetch_notification_log(pool.inner(), limit.unwrap_or(50)).await
 }
 
@@ -190,7 +224,12 @@ pub async fn get_whatsapp_config(
     pool: tauri::State<'_, PgPool>,
     session_state: tauri::State<'_, SessionState>,
 ) -> Result<serde_json::Value, String> {
-    let _ = rbac::require_strong(&session_state, pool.inner(), rbac::Permission::SettingsManage).await?;
+    let _ = rbac::require_strong(
+        &session_state,
+        pool.inner(),
+        rbac::Permission::SettingsManage,
+    )
+    .await?;
     let row = sqlx::query_as::<_, (Option<String>, Option<String>, bool, String)>(
         "SELECT access_token, phone_number_id, enabled, preferred_method \
          FROM whatsapp_config WHERE id = 1",
@@ -208,7 +247,7 @@ pub async fn get_whatsapp_config(
         Some((token, phone_id, enabled, preferred_method)) => {
             let masked_token = token.as_deref().map(|t| {
                 if t.len() > 8 {
-                    format!("••••••••{}", &t[t.len()-4..])
+                    format!("••••••••{}", &t[t.len() - 4..])
                 } else {
                     "••••".to_string()
                 }
@@ -240,7 +279,12 @@ pub async fn set_whatsapp_config(
     // CR-4: require SettingsManage — any logged-in user (including patient role)
     // must NOT be able to replace WhatsApp credentials and redirect PHI-laden
     // notifications to an attacker-controlled endpoint.
-    let session = rbac::require_strong(&session_state, pool.inner(), rbac::Permission::SettingsManage).await?;
+    let session = rbac::require_strong(
+        &session_state,
+        pool.inner(),
+        rbac::Permission::SettingsManage,
+    )
+    .await?;
 
     // Validate preferred_method
     if preferred_method != "api" && preferred_method != "deep_link" {
@@ -287,14 +331,18 @@ pub async fn set_whatsapp_config(
     .map_err(|e| format!("Save WhatsApp config: {}", e))?;
 
     crate::audit::for_session(
-        pool.inner(), &session, "whatsapp_config_update", "whatsapp",
+        pool.inner(),
+        &session,
+        "whatsapp_config_update",
+        "whatsapp",
         None,
         Some(serde_json::json!({
             "enabled": enabled,
             "phone_number_id": phone_number_id,
             "preferred_method": preferred_method
         })),
-    ).await;
+    )
+    .await;
     Ok(())
 }
 
@@ -308,7 +356,12 @@ pub async fn test_whatsapp_api(
 ) -> Result<String, String> {
     // CR-4: require SettingsManage — testing the API sends a real WhatsApp
     // message using stored credentials; restrict to admins.
-    let _ = rbac::require_strong(&session_state, pool.inner(), rbac::Permission::SettingsManage).await?;
+    let _ = rbac::require_strong(
+        &session_state,
+        pool.inner(),
+        rbac::Permission::SettingsManage,
+    )
+    .await?;
     let config = automation::load_whatsapp_config(pool.inner())
         .await
         .filter(|c| !c.access_token.is_empty() && !c.phone_number_id.is_empty())

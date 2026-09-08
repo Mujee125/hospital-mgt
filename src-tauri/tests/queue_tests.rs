@@ -41,23 +41,22 @@ async fn state_for(pool: &PgPool, user_id: i32, token_hash: &str) -> SessionStat
 }
 
 async fn seed_queue_patient(pool: &PgPool, tag: &str) -> i32 {
-    seed_patient_with_phone(pool, "Queue", tag, &format!("+92300qt{}", tag))
-        .await
+    seed_patient_with_phone(pool, "Queue", tag, &format!("+92300qt{}", tag)).await
 }
 
 async fn seed_department(pool: &PgPool, tag: &str) -> i32 {
-    let (id,): (i32,) = sqlx::query_as(
-        "INSERT INTO departments (name, code) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(format!("QT Department {}", tag))
-    .bind(tag)
-    .fetch_one(pool)
-    .await
-    .unwrap();
+    let (id,): (i32,) =
+        sqlx::query_as("INSERT INTO departments (name, code) VALUES ($1, $2) RETURNING id")
+            .bind(format!("QT Department {}", tag))
+            .bind(tag)
+            .fetch_one(pool)
+            .await
+            .unwrap();
     id
 }
 
-async fn token_numbers_today(pool: &PgPool) -> Vec<i32> {    sqlx::query_as::<_, (i32,)>(
+async fn token_numbers_today(pool: &PgPool) -> Vec<i32> {
+    sqlx::query_as::<_, (i32,)>(
         "SELECT token_number FROM queue_tokens \
          WHERE issued_at::date = CURRENT_DATE ORDER BY token_number",
     )
@@ -87,7 +86,12 @@ async fn test_qt1_qt2_issue_sequential_unique() {
     let id1 = create_queue_token_core(
         &pool,
         &nurse,
-        CreateQueueToken { patient_id: p1, department_id: None, doctor_id: None, priority: None },
+        CreateQueueToken {
+            patient_id: p1,
+            department_id: None,
+            doctor_id: None,
+            priority: None,
+        },
     )
     .await
     .expect("token issue must not fail with a parameter-count error");
@@ -103,13 +107,22 @@ async fn test_qt1_qt2_issue_sequential_unique() {
     let id2 = create_queue_token_core(
         &pool,
         &nurse,
-        CreateQueueToken { patient_id: p2, department_id: None, doctor_id: None, priority: None },
+        CreateQueueToken {
+            patient_id: p2,
+            department_id: None,
+            doctor_id: None,
+            priority: None,
+        },
     )
     .await
     .unwrap();
     assert_ne!(id1, id2);
     let nums = token_numbers_today(&pool).await;
-    assert_eq!(nums, vec![1, 2], "tokens must number sequentially from 1 per day");
+    assert_eq!(
+        nums,
+        vec![1, 2],
+        "tokens must number sequentially from 1 per day"
+    );
 
     // The per-day UNIQUE index must hold.
     let (dups,): (i64,) = sqlx::query_as(
@@ -138,7 +151,12 @@ async fn test_qt3_priority_and_atomic_call_next() {
     let standard_id = create_queue_token_core(
         &pool,
         &nurse,
-        CreateQueueToken { patient_id: standard, department_id: None, doctor_id: None, priority: None },
+        CreateQueueToken {
+            patient_id: standard,
+            department_id: None,
+            doctor_id: None,
+            priority: None,
+        },
     )
     .await
     .unwrap();
@@ -167,7 +185,10 @@ async fn test_qt3_priority_and_atomic_call_next() {
     );
 
     // Call next: the PRIORITY token is claimed first, not the earliest one.
-    let next = call_next_token_core(&pool, &nurse, None, None).await.unwrap().unwrap();
+    let next = call_next_token_core(&pool, &nurse, None, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(next.id, urgent_id);
     let (status,): (String,) = sqlx::query_as("SELECT status FROM queue_tokens WHERE id = $1")
         .bind(urgent_id)
@@ -177,7 +198,10 @@ async fn test_qt3_priority_and_atomic_call_next() {
     assert_eq!(status, "in-progress");
 
     // Calling the next token atomically completes the in-progress one.
-    let second = call_next_token_core(&pool, &nurse, None, None).await.unwrap().unwrap();
+    let second = call_next_token_core(&pool, &nurse, None, None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_ne!(second.id, urgent_id);
     let (prev_status, prev_completed): (String, Option<chrono::DateTime<chrono::Utc>>) =
         sqlx::query_as("SELECT status, completed_at FROM queue_tokens WHERE id = $1")
@@ -247,16 +271,26 @@ async fn test_qt4_scoped_call_next() {
         .unwrap()
         .expect("department 2 has a waiting token");
     assert_eq!(next.id, mine_id);
-    let (other_status,): (String,) = sqlx::query_as("SELECT status FROM queue_tokens WHERE id = $1")
-        .bind(other_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(other_status, "waiting", "a scoped call must not touch other departments");
+    let (other_status,): (String,) =
+        sqlx::query_as("SELECT status FROM queue_tokens WHERE id = $1")
+            .bind(other_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        other_status, "waiting",
+        "a scoped call must not touch other departments"
+    );
 
     // An empty scope returns None instead of falling through to the global queue.
-    let empty = call_next_token_core(&pool, &nurse, Some(999), None).await.unwrap();
-    assert!(empty.is_none(), "empty scope must return None, not a global token");}
+    let empty = call_next_token_core(&pool, &nurse, Some(999), None)
+        .await
+        .unwrap();
+    assert!(
+        empty.is_none(),
+        "empty scope must return None, not a global token"
+    );
+}
 
 // ── QT-5: RBAC — QueueManage required; QueueView is read-only ─────────────────
 
@@ -274,12 +308,19 @@ async fn test_qt5_rbac_guards() {
     let p = seed_queue_patient(&pool, "Rbac").await;
 
     // Doctor (QueueView only) can read the feed…
-    get_queue_core(&pool, &doctor, None).await.expect("QueueView must allow reading the feed");
+    get_queue_core(&pool, &doctor, None)
+        .await
+        .expect("QueueView must allow reading the feed");
     // …but NOT issue or call tokens.
     let err = create_queue_token_core(
         &pool,
         &doctor,
-        CreateQueueToken { patient_id: p, department_id: None, doctor_id: None, priority: None },
+        CreateQueueToken {
+            patient_id: p,
+            department_id: None,
+            doctor_id: None,
+            priority: None,
+        },
     )
     .await
     .expect_err("doctors must not hold QueueManage");
@@ -297,7 +338,12 @@ async fn test_qt5_rbac_guards() {
     create_queue_token_core(
         &pool,
         &nurse,
-        CreateQueueToken { patient_id: p, department_id: None, doctor_id: None, priority: None },
+        CreateQueueToken {
+            patient_id: p,
+            department_id: None,
+            doctor_id: None,
+            priority: None,
+        },
     )
     .await
     .expect("nurses hold QueueManage");

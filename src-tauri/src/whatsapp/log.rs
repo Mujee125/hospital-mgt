@@ -5,7 +5,11 @@ use sqlx::PgPool;
 
 use super::WhatsAppMessage;
 
-pub async fn log_notification(pool: &PgPool, msg: &WhatsAppMessage, success: bool) -> Result<(), sqlx::Error> {
+pub async fn log_notification(
+    pool: &PgPool,
+    msg: &WhatsAppMessage,
+    success: bool,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO whatsapp_notifications
@@ -23,8 +27,22 @@ pub async fn log_notification(pool: &PgPool, msg: &WhatsAppMessage, success: boo
     Ok(())
 }
 
-pub async fn fetch_notification_log(pool: &PgPool, limit: i64) -> Result<Vec<serde_json::Value>, String> {
-    let rows = sqlx::query_as::<_, (i32, Option<i32>, String, String, String, chrono::DateTime<chrono::Utc>, bool)>(
+pub async fn fetch_notification_log(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, String> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i32,
+            Option<i32>,
+            String,
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            bool,
+        ),
+    >(
         r#"
         SELECT id, appointment_id, notification_type, recipient, message, sent_at, success
         FROM whatsapp_notifications
@@ -39,16 +57,18 @@ pub async fn fetch_notification_log(pool: &PgPool, limit: i64) -> Result<Vec<ser
 
     Ok(rows
         .into_iter()
-        .map(|(id, appt_id, ntype, recipient, message, sent_at, success)| {
-            serde_json::json!({
-                "id": id,
-                "appointment_id": appt_id,
-                "notification_type": ntype,
-                "recipient": recipient,
-                "message": message,
-                "sent_at": sent_at,
-                "success": success,
-            })
-        })
+        .map(
+            |(id, appt_id, ntype, recipient, message, sent_at, success)| {
+                serde_json::json!({
+                    "id": id,
+                    "appointment_id": appt_id,
+                    "notification_type": ntype,
+                    "recipient": recipient,
+                    "message": message,
+                    "sent_at": sent_at,
+                    "success": success,
+                })
+            },
+        )
         .collect())
 }

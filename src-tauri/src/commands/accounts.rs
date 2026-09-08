@@ -17,14 +17,12 @@
 //! All writes are audited; every write command is *_core-extracted
 //! (AERP Part G) for command-level testing.
 
-use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 
 use crate::audit;
-use crate::models::{
-    AccountsSummary, CreateExpense, Expense, ExpenseCategoryTotal, VoidExpense,
-};
+use crate::models::{AccountsSummary, CreateExpense, Expense, ExpenseCategoryTotal, VoidExpense};
 use crate::rbac::{self, Permission, SessionState};
 
 fn dec(f: f64) -> Decimal {
@@ -51,9 +49,11 @@ pub async fn get_expenses(
 ) -> Result<Vec<Expense>, String> {
     let _ = rbac::require(&session, Permission::BillingView)?;
     // Defaults: current month, active (non-voided) rows.
-    let from = from_date.filter(|s| !s.is_empty())
+    let from = from_date
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{}-01", chrono::Utc::now().format("%Y-%m")));
-    let to = to_date.filter(|s| !s.is_empty())
+    let to = to_date
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
 
     let mut q = String::from(SELECT_EXPENSES);
@@ -112,20 +112,38 @@ pub async fn create_expense_core(
     .bind(expense.description.trim())
     .bind(dec(expense.amount))
     .bind(expense.expense_date.as_deref().filter(|s| !s.is_empty()))
-    .bind(expense.paid_to.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+    .bind(
+        expense
+            .paid_to
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    )
     .bind(expense.payment_method.as_deref().unwrap_or("cash"))
-    .bind(expense.reference_number.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+    .bind(
+        expense
+            .reference_number
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    )
     .bind(s.user_id)
     .fetch_one(pool)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    audit::for_session(pool, &s, "expense_create", "expenses",
+    audit::for_session(
+        pool,
+        &s,
+        "expense_create",
+        "expenses",
         Some(&row.0.to_string()),
         Some(serde_json::json!({
             "category": expense.category.trim(),
             "amount": expense.amount,
-        }))).await;
+        })),
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -164,9 +182,15 @@ pub async fn void_expense_core(
         return Err("Expense not found (or already voided).".to_string());
     }
 
-    audit::for_session(pool, &s, "expense_void", "expenses",
+    audit::for_session(
+        pool,
+        &s,
+        "expense_void",
+        "expenses",
         Some(&void.id.to_string()),
-        Some(serde_json::json!({"reason": void.reason.trim()}))).await;
+        Some(serde_json::json!({"reason": void.reason.trim()})),
+    )
+    .await;
     Ok(())
 }
 
@@ -228,7 +252,11 @@ pub async fn fetch_accounts_summary(
     let total_revenue = total_collected - total_refunded;
     let by_category = cat_rows
         .into_iter()
-        .map(|(category, total, count)| ExpenseCategoryTotal { category, total, count })
+        .map(|(category, total, count)| ExpenseCategoryTotal {
+            category,
+            total,
+            count,
+        })
         .collect();
 
     Ok(AccountsSummary {

@@ -334,19 +334,24 @@ pub async fn seed_defaults(pool: &PgPool) -> Result<(), String> {
             .await
             .map_err(|e| format!("lookup super_admin role: {}", e))?;
 
-        sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(admin_id.0)
-            .bind(role_id.0)
-            .execute(pool)
-            .await
-            .map_err(|e| format!("seed admin role: {}", e))?;
+        sqlx::query(
+            "INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(admin_id.0)
+        .bind(role_id.0)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("seed admin role: {}", e))?;
 
         // Persist the bootstrap credentials so the operator can read them.
         // Best-effort — if this fails the admin can still reset via DB.
         if let Err(e) = write_bootstrap_credentials("admin", &bootstrap_password) {
-            eprintln!("[HMS AUTH] Warning: could not write bootstrap credentials file: {}. \
+            eprintln!(
+                "[HMS AUTH] Warning: could not write bootstrap credentials file: {}. \
                        The admin password was set but NOT saved to disk — use a DB-side \
-                       password reset if needed.", e);
+                       password reset if needed.",
+                e
+            );
         }
 
         // Audit the bootstrap (no session yet, so use record() directly).
@@ -358,7 +363,8 @@ pub async fn seed_defaults(pool: &PgPool) -> Result<(), String> {
             "users",
             Some(&admin_id.0.to_string()),
             Some(serde_json::json!({"username": "admin", "role": ROLE_SUPER_ADMIN})),
-        ).await;
+        )
+        .await;
     }
 
     Ok(())
@@ -366,13 +372,18 @@ pub async fn seed_defaults(pool: &PgPool) -> Result<(), String> {
 
 // ── Session loading helper ────────────────────────────────────────────────────
 
-pub async fn load_session(pool: &PgPool, user_id: i32, token_hash: &str) -> Result<Session, String> {
-    let roles: Vec<(String,)> =
-        sqlx::query_as("SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1")
-            .bind(user_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("load roles: {}", e))?;
+pub async fn load_session(
+    pool: &PgPool,
+    user_id: i32,
+    token_hash: &str,
+) -> Result<Session, String> {
+    let roles: Vec<(String,)> = sqlx::query_as(
+        "SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("load roles: {}", e))?;
 
     let perms: Vec<(String,)> = sqlx::query_as(
         "SELECT DISTINCT p.key FROM user_roles ur
@@ -421,7 +432,14 @@ pub async fn login_core(
     // a `type` alias would obscure which columns are bound below.
     #[allow(clippy::type_complexity)]
     let row: Option<(
-        i32, String, String, String, bool, bool, i32, Option<chrono::DateTime<Utc>>,
+        i32,
+        String,
+        String,
+        String,
+        bool,
+        bool,
+        i32,
+        Option<chrono::DateTime<Utc>>,
     )> = sqlx::query_as(
         "SELECT id, username, full_name, password_hash, is_active, must_change_password,
                 failed_login_count, locked_until
@@ -448,8 +466,17 @@ pub async fn login_core(
                 // ("unknown_user") + the IP (in the `ip` column, captured
                 // separately by audit::record's IP column) so brute-force
                 // detection still works.
-                crate::audit::record(pool, None, None, "login_failed", "auth", None,
-                    Some(serde_json::json!({"reason": "unknown_user"}))).await.ok();
+                crate::audit::record(
+                    pool,
+                    None,
+                    None,
+                    "login_failed",
+                    "auth",
+                    None,
+                    Some(serde_json::json!({"reason": "unknown_user"})),
+                )
+                .await
+                .ok();
                 // SEC-05: do NOT include the attempted username in the WARN
                 // log line either — the on-disk log is now RBAC-gated
                 // (admin-only) AND redacted at read time for `key=value`
@@ -460,16 +487,37 @@ pub async fn login_core(
         };
 
     if !is_active {
-        crate::audit::record(pool, Some(user_id), Some(&username), "login_failed", "auth", None,
-            Some(serde_json::json!({"reason": "inactive"}))).await.ok();
+        crate::audit::record(
+            pool,
+            Some(user_id),
+            Some(&username),
+            "login_failed",
+            "auth",
+            None,
+            Some(serde_json::json!({"reason": "inactive"})),
+        )
+        .await
+        .ok();
         return Err("This account has been deactivated. Contact your administrator.".to_string());
     }
 
     if let Some(until) = locked_until {
         if until > now {
-            crate::audit::record(pool, Some(user_id), Some(&username), "login_failed", "auth", None,
-                Some(serde_json::json!({"reason": "locked", "locked_until": until.to_rfc3339()}))).await.ok();
-            return Err(format!("Account locked. Try again after {}.", until.format("%H:%M")));
+            crate::audit::record(
+                pool,
+                Some(user_id),
+                Some(&username),
+                "login_failed",
+                "auth",
+                None,
+                Some(serde_json::json!({"reason": "locked", "locked_until": until.to_rfc3339()})),
+            )
+            .await
+            .ok();
+            return Err(format!(
+                "Account locked. Try again after {}.",
+                until.format("%H:%M")
+            ));
         }
     }
 
@@ -488,14 +536,29 @@ pub async fn login_core(
             .await
             .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-        crate::audit::record(pool, Some(user_id), Some(&username), "login_failed", "auth", None,
-            Some(serde_json::json!({"reason": "bad_password", "attempts": new_failed}))).await.ok();
+        crate::audit::record(
+            pool,
+            Some(user_id),
+            Some(&username),
+            "login_failed",
+            "auth",
+            None,
+            Some(serde_json::json!({"reason": "bad_password", "attempts": new_failed})),
+        )
+        .await
+        .ok();
 
         if new_failed >= MAX_FAILED_ATTEMPTS {
-            return Err(format!("Too many failed attempts. Account locked for {} minutes.", LOCKOUT_MINUTES));
+            return Err(format!(
+                "Too many failed attempts. Account locked for {} minutes.",
+                LOCKOUT_MINUTES
+            ));
         }
         let remaining = MAX_FAILED_ATTEMPTS - new_failed;
-        return Err(format!("Invalid username or password. {} attempt(s) remaining.", remaining));
+        return Err(format!(
+            "Invalid username or password. {} attempt(s) remaining.",
+            remaining
+        ));
     }
 
     // ── Success ──
@@ -532,7 +595,17 @@ pub async fn login_core(
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     let session = load_session(pool, user_id, &token_hash).await?;
-    crate::audit::record(pool, Some(user_id), Some(&username), "login_success", "auth", None, None).await.ok();
+    crate::audit::record(
+        pool,
+        Some(user_id),
+        Some(&username),
+        "login_success",
+        "auth",
+        None,
+        None,
+    )
+    .await
+    .ok();
 
     // REL-02: recover from mutex poisoning instead of panicking.
     *session_state.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.clone());
@@ -569,11 +642,18 @@ pub async fn login(
             // the same Tauri process can clear their in-memory session.
             // (Cross-PC propagation: Layer 1 `me` polling + Layer 3
             // `require_strong` DB check on high-risk commands.)
-            let _ = app_handle.emit("session_invalidated", serde_json::json!({"user_id": resp.user.id}));
+            let _ = app_handle.emit(
+                "session_invalidated",
+                serde_json::json!({"user_id": resp.user.id}),
+            );
         }
         Err(_) => {
             // SEC-05: never log the attempted username (enumeration oracle).
-            crate::log(&app_handle, "WARN ", "Login failed (reason not logged; see audit_logs)");
+            crate::log(
+                &app_handle,
+                "WARN ",
+                "Login failed (reason not logged; see audit_logs)",
+            );
         }
     }
     result
@@ -595,8 +675,17 @@ pub async fn logout(
             .execute(pool.inner())
             .await
             .ok();
-        crate::audit::record(pool.inner(), Some(s.user_id), Some(&s.username), "logout", "auth", None, None)
-            .await.ok();
+        crate::audit::record(
+            pool.inner(),
+            Some(s.user_id),
+            Some(&s.username),
+            "logout",
+            "auth",
+            None,
+            None,
+        )
+        .await
+        .ok();
     }
     Ok(())
 }
@@ -606,10 +695,7 @@ pub async fn logout(
 /// WP-2 `me` logic core (AERP Part G extraction): session validation +
 /// token_hash DB binding + profile build. The command wrapper passes
 /// State-derefs straight through.
-pub async fn me_core(
-    pool: &PgPool,
-    session_state: &SessionState,
-) -> Result<LoginResponse, String> {
+pub async fn me_core(pool: &PgPool, session_state: &SessionState) -> Result<LoginResponse, String> {
     let session = rbac::require_session(session_state)?;
 
     // Verify the session is still valid server-side (expiry/active).
@@ -691,8 +777,17 @@ pub async fn change_password(
         .await
         .map_err(|e| format!("Update password: {}", e))?;
 
-    crate::audit::record(pool.inner(), Some(session.user_id), Some(&session.username),
-        "password_change", "auth", None, None).await.ok();
+    crate::audit::record(
+        pool.inner(),
+        Some(session.user_id),
+        Some(&session.username),
+        "password_change",
+        "auth",
+        None,
+        None,
+    )
+    .await
+    .ok();
     Ok(())
 }
 
@@ -719,7 +814,8 @@ pub async fn create_user(
     session_state: tauri::State<'_, std::sync::Arc<Mutex<Option<Session>>>>,
     request: CreateUserRequest,
 ) -> Result<i32, String> {
-    let session = rbac::require_strong(&session_state, pool.inner(), Permission::UsersManage).await?;
+    let session =
+        rbac::require_strong(&session_state, pool.inner(), Permission::UsersManage).await?;
 
     if request.username.trim().is_empty() || request.password.len() < 8 {
         return Err("Username required and password must be at least 8 characters.".to_string());
@@ -742,9 +838,17 @@ pub async fn create_user(
 
     sync_user_roles(pool.inner(), id.0, &request.roles).await?;
 
-    crate::audit::record(pool.inner(), Some(session.user_id), Some(&session.username),
-        "user_create", "users", Some(&id.0.to_string()),
-        Some(serde_json::json!({"username": request.username, "roles": request.roles}))).await.ok();
+    crate::audit::record(
+        pool.inner(),
+        Some(session.user_id),
+        Some(&session.username),
+        "user_create",
+        "users",
+        Some(&id.0.to_string()),
+        Some(serde_json::json!({"username": request.username, "roles": request.roles})),
+    )
+    .await
+    .ok();
     Ok(id.0)
 }
 
@@ -759,20 +863,26 @@ pub async fn update_user_core(
 
     if let Some(name) = &request.full_name {
         sqlx::query("UPDATE users SET full_name = $1, updated_at = NOW() WHERE id = $2")
-            .bind(name).bind(request.id)
-            .execute(pool).await
+            .bind(name)
+            .bind(request.id)
+            .execute(pool)
+            .await
             .map_err(|e| format!("Update user: {}", e))?;
     }
     if let Some(email) = &request.email {
         sqlx::query("UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2")
-            .bind(email).bind(request.id)
-            .execute(pool).await
+            .bind(email)
+            .bind(request.id)
+            .execute(pool)
+            .await
             .map_err(|e| format!("Update user: {}", e))?;
     }
     if let Some(active) = request.is_active {
         sqlx::query("UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = $2")
-            .bind(active).bind(request.id)
-            .execute(pool).await
+            .bind(active)
+            .bind(request.id)
+            .execute(pool)
+            .await
             .map_err(|e| format!("Update user: {}", e))?;
     }
     if let Some(roles) = &request.roles {
@@ -793,8 +903,17 @@ pub async fn update_user_core(
             .map_err(|e| format!("Invalidate target sessions: {}", e))?;
     }
 
-    crate::audit::record(pool, Some(session.user_id), Some(&session.username),
-        "user_update", "users", Some(&request.id.to_string()), None).await.ok();
+    crate::audit::record(
+        pool,
+        Some(session.user_id),
+        Some(&session.username),
+        "user_update",
+        "users",
+        Some(&request.id.to_string()),
+        None,
+    )
+    .await
+    .ok();
 
     Ok(())
 }
@@ -813,7 +932,10 @@ pub async fn update_user(
     let target_id = request.id;
     let result = update_user_core(pool.inner(), &session_state, request).await;
     if result.is_ok() && emits {
-        let _ = app_handle.emit("session_invalidated", serde_json::json!({"user_id": target_id}));
+        let _ = app_handle.emit(
+            "session_invalidated",
+            serde_json::json!({"user_id": target_id}),
+        );
     }
     result
 }
@@ -824,7 +946,8 @@ pub async fn delete_user(
     session_state: tauri::State<'_, std::sync::Arc<Mutex<Option<Session>>>>,
     id: i32,
 ) -> Result<(), String> {
-    let session = rbac::require_strong(&session_state, pool.inner(), Permission::UsersManage).await?;
+    let session =
+        rbac::require_strong(&session_state, pool.inner(), Permission::UsersManage).await?;
     if id == session.user_id {
         return Err("You cannot delete your own account.".to_string());
     }
@@ -833,8 +956,17 @@ pub async fn delete_user(
         .execute(pool.inner())
         .await
         .map_err(|e| format!("Delete user: {}", e))?;
-    crate::audit::record(pool.inner(), Some(session.user_id), Some(&session.username),
-        "user_delete", "users", Some(&id.to_string()), None).await.ok();
+    crate::audit::record(
+        pool.inner(),
+        Some(session.user_id),
+        Some(&session.username),
+        "user_delete",
+        "users",
+        Some(&id.to_string()),
+        None,
+    )
+    .await
+    .ok();
     Ok(())
 }
 
@@ -856,10 +988,22 @@ pub async fn reset_user_password_core(
         .execute(pool).await
         .map_err(|e| format!("Reset password: {}", e))?;
     // Invalidate sessions for the target user.
-    sqlx::query("DELETE FROM sessions WHERE user_id = $1").bind(id)
-        .execute(pool).await.ok();
-    crate::audit::record(pool, Some(session.user_id), Some(&session.username),
-        "password_reset", "users", Some(&id.to_string()), None).await.ok();
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .ok();
+    crate::audit::record(
+        pool,
+        Some(session.user_id),
+        Some(&session.username),
+        "password_reset",
+        "users",
+        Some(&id.to_string()),
+        None,
+    )
+    .await
+    .ok();
     Ok(())
 }
 

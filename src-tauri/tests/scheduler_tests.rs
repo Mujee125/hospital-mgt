@@ -82,7 +82,10 @@ async fn test_sch003_transfused_not_expired() {
     .unwrap();
 
     let status = get_unit_status(&pool, unit_id).await;
-    assert_eq!(status, "transfused", "Terminal 'transfused' must not be touched");
+    assert_eq!(
+        status, "transfused",
+        "Terminal 'transfused' must not be touched"
+    );
 }
 
 /// SCH-004: Discarded (terminal) unit is NOT touched by scheduler.
@@ -108,7 +111,10 @@ async fn test_sch004_discarded_not_expired() {
     .unwrap();
 
     let status = get_unit_status(&pool, unit_id).await;
-    assert_eq!(status, "discarded", "Terminal 'discarded' must not be touched");
+    assert_eq!(
+        status, "discarded",
+        "Terminal 'discarded' must not be touched"
+    );
 }
 
 /// SCH-005: No-op execution — no expired units → 0 rows affected.
@@ -156,7 +162,10 @@ async fn test_sch006_multiple_expiries() {
     .await
     .unwrap();
 
-    assert!(result.rows_affected() >= 3, "All 3 expired units must be transitioned");
+    assert!(
+        result.rows_affected() >= 3,
+        "All 3 expired units must be transitioned"
+    );
 
     for unit_id in &unit_ids {
         let status = get_unit_status(&pool, *unit_id).await;
@@ -193,7 +202,11 @@ async fn test_sch007_idempotency() {
     .await
     .unwrap();
 
-    assert_eq!(result.rows_affected(), 0, "Second run must be a no-op (unit already expired)");
+    assert_eq!(
+        result.rows_affected(),
+        0,
+        "Second run must be a no-op (unit already expired)"
+    );
     let status = get_unit_status(&pool, unit_id).await;
     assert_eq!(status, "expired");
 }
@@ -227,7 +240,10 @@ async fn test_sch008_expiry_boundary_inclusive() {
     .unwrap();
 
     let status = get_unit_status(&pool, unit_id).await;
-    assert_eq!(status, "expired", "Unit expiring at ~NOW() must be expired (boundary inclusive)");
+    assert_eq!(
+        status, "expired",
+        "Unit expiring at ~NOW() must be expired (boundary inclusive)"
+    );
 }
 
 /// SCH-009: Future-dated unit is NOT expired.

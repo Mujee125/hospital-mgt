@@ -129,7 +129,11 @@ async fn wp1_i09_super_admin_all_guards() {
     seed_session_row(&pool, uid, "hash_admin_i09").await;
     let state = session_state_for(&pool, uid, "hash_admin_i09").await;
 
-    for perm in [Permission::WhatsAppSend, Permission::WhatsAppView, Permission::SettingsManage] {
+    for perm in [
+        Permission::WhatsAppSend,
+        Permission::WhatsAppView,
+        Permission::SettingsManage,
+    ] {
         rbac::require_strong(&state, &pool, perm)
             .await
             .unwrap_or_else(|e| panic!("super_admin must pass {:?}: {}", perm, e));
@@ -155,14 +159,38 @@ async fn wp1_i10_seed_inserts_whatsapp_permissions() {
 async fn wp1_i11_seed_grants_match_code() {
     let pool = setup().await;
     for (role, expected) in [
-        ("super_admin", hospital_mgmt_lib::rbac::permissions_for_role("super_admin")),
-        ("doctor", hospital_mgmt_lib::rbac::permissions_for_role("doctor")),
-        ("nurse", hospital_mgmt_lib::rbac::permissions_for_role("nurse")),
-        ("receptionist", hospital_mgmt_lib::rbac::permissions_for_role("receptionist")),
-        ("lab_technician", hospital_mgmt_lib::rbac::permissions_for_role("lab_technician")),
-        ("pharmacist", hospital_mgmt_lib::rbac::permissions_for_role("pharmacist")),
-        ("billing_clerk", hospital_mgmt_lib::rbac::permissions_for_role("billing_clerk")),
-        ("patient", hospital_mgmt_lib::rbac::permissions_for_role("patient")),
+        (
+            "super_admin",
+            hospital_mgmt_lib::rbac::permissions_for_role("super_admin"),
+        ),
+        (
+            "doctor",
+            hospital_mgmt_lib::rbac::permissions_for_role("doctor"),
+        ),
+        (
+            "nurse",
+            hospital_mgmt_lib::rbac::permissions_for_role("nurse"),
+        ),
+        (
+            "receptionist",
+            hospital_mgmt_lib::rbac::permissions_for_role("receptionist"),
+        ),
+        (
+            "lab_technician",
+            hospital_mgmt_lib::rbac::permissions_for_role("lab_technician"),
+        ),
+        (
+            "pharmacist",
+            hospital_mgmt_lib::rbac::permissions_for_role("pharmacist"),
+        ),
+        (
+            "billing_clerk",
+            hospital_mgmt_lib::rbac::permissions_for_role("billing_clerk"),
+        ),
+        (
+            "patient",
+            hospital_mgmt_lib::rbac::permissions_for_role("patient"),
+        ),
     ] {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT p.key FROM role_permissions rp \
@@ -174,8 +202,7 @@ async fn wp1_i11_seed_grants_match_code() {
         .fetch_all(&pool)
         .await
         .unwrap();
-        let db_keys: std::collections::HashSet<String> =
-            rows.into_iter().map(|r| r.0).collect();
+        let db_keys: std::collections::HashSet<String> = rows.into_iter().map(|r| r.0).collect();
         let code_keys: std::collections::HashSet<String> =
             expected.iter().map(|p| p.as_str().to_string()).collect();
         assert_eq!(
@@ -213,7 +240,7 @@ async fn wp1_i12_seed_idempotent() {
 /// "you are not signed in" (the pre-login posture).
 #[tokio::test]
 async fn wp1_n01_unauthenticated_denied() {
-    let pool = setup().await;
+    let _pool = setup().await;
     let state = empty_state().await;
     let r = rbac::require(&state, Permission::WhatsAppSend).unwrap_err();
     assert!(r.contains("not signed in"), "got: {}", r);
@@ -255,7 +282,9 @@ async fn wp1_n02_rogue_permission_string_inert() {
     sqlx::query("DELETE FROM role_permissions rp USING permissions p WHERE rp.permission_id = p.id AND p.key = 'whatsapp.send.evil'")
         .execute(&pool).await.unwrap();
     sqlx::query("DELETE FROM permissions WHERE key = 'whatsapp.send.evil'")
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 /// WP1-N03 — stale permissions: granting whatsapp.send to the patient role
@@ -312,7 +341,9 @@ async fn wp1_n04_consent_gate_still_applies() {
 
     // No consent row → refuse.
     let r = hospital_mgmt_lib::whatsapp::automation::check_patient_consent(
-        &pool, "+923001112233", None,
+        &pool,
+        "+923001112233",
+        None,
     )
     .await
     .unwrap_err();
@@ -328,7 +359,9 @@ async fn wp1_n04_consent_gate_still_applies() {
     set_consent(&pool, patient_id, false).await;
     assert!(
         hospital_mgmt_lib::whatsapp::automation::check_patient_consent(
-            &pool, "+923001112233", None
+            &pool,
+            "+923001112233",
+            None
         )
         .await
         .is_err()
@@ -380,7 +413,11 @@ async fn wp1_p02_param_fuzz_ipc09_checks() {
 
     // Fuzz 2: valid-format phone that belongs to NO registered patient.
     let r = checks(&pool, "+923001234560", "hello").await.unwrap_err();
-    assert!(r.contains("does not belong to a registered patient"), "got: {}", r);
+    assert!(
+        r.contains("does not belong to a registered patient"),
+        "got: {}",
+        r
+    );
 
     // Fuzz 3: too-short number — normalize_phone rejects <8 digits with its
     // own error before the patient lookup (still a clean refusal, no panic).
@@ -410,7 +447,11 @@ async fn wp1_p02_param_fuzz_ipc09_checks() {
         .await
         .unwrap();
     let r = checks(&pool, "+923009998877", "hi").await.unwrap_err();
-    assert!(r.contains("does not belong to a registered patient"), "got: {}", r);
+    assert!(
+        r.contains("does not belong to a registered patient"),
+        "got: {}",
+        r
+    );
 }
 
 /// WP1-P03 — direct DB permission injection cannot grant a USER what their
@@ -488,7 +529,9 @@ async fn wp1_c01_concurrent_patient_denials() {
         let p = pool.clone();
         let s = state.clone();
         handles.push(tokio::spawn(async move {
-            rbac::require_strong(&s, &p, Permission::WhatsAppSend).await.is_err()
+            rbac::require_strong(&s, &p, Permission::WhatsAppSend)
+                .await
+                .is_err()
         }));
     }
     let mut denied = 0usize;
@@ -560,7 +603,11 @@ async fn wp1_l01_client_session_denied_server_side() {
     seed_session_row(&pool, uid, "hash_l01").await;
     // A "client PC" state — a session loaded over the network.
     let state = session_state_for(&pool, uid, "hash_l01").await;
-    assert!(rbac::require_strong(&state, &pool, Permission::WhatsAppSend).await.is_err());
+    assert!(
+        rbac::require_strong(&state, &pool, Permission::WhatsAppSend)
+            .await
+            .is_err()
+    );
 }
 
 /// WP1-L02 — role sync post-seed: after seed_defaults, a FRESHLY loaded

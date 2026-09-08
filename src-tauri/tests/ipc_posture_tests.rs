@@ -39,8 +39,8 @@ const ALLOWLIST: &[&str] = &[
     // pairing: first-run client setup, pre-login by definition
     "generate_pairing_code",
     "get_pairing_status",
-    "redeem_pairing_code",   // gated itself via require_config_mutation
-    "verify_pairing",        // gated itself via require_config_mutation
+    "redeem_pairing_code", // gated itself via require_config_mutation
+    "verify_pairing",      // gated itself via require_config_mutation
     // boot diagnostics the Setup screens call pre-login
     "get_local_ip",
     "test_server_connection",
@@ -108,7 +108,11 @@ fn scan_all_commands() -> Vec<(String, String)> {
                             j += 1;
                             continue;
                         }
-                        if l.starts_with("fn ") || l.starts_with("pub fn ") || l.starts_with("pub async fn ") || l.starts_with("async fn ") {
+                        if l.starts_with("fn ")
+                            || l.starts_with("pub fn ")
+                            || l.starts_with("pub async fn ")
+                            || l.starts_with("async fn ")
+                        {
                             let after_fn = l
                                 .trim_start_matches("pub")
                                 .trim_start()
@@ -132,7 +136,7 @@ fn scan_all_commands() -> Vec<(String, String)> {
                     let body: String = lines[j..(j + 2000).min(lines.len())]
                         .iter()
                         .take_while(|l| !l.trim().starts_with("#[tauri::command]"))
-                        .map(|l| *l)
+                        .copied()
                         .collect::<Vec<&str>>()
                         .join("\n");
                     out.push((format!("{}:{}", rel, fn_name), body));

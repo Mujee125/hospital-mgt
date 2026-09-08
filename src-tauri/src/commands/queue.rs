@@ -42,16 +42,21 @@ pub async fn get_queue_core(
     let q = match status_filter.as_deref() {
         Some(s) if !s.is_empty() => format!(
             "{} WHERE q.status = $1 AND q.issued_at::date = CURRENT_DATE
-             ORDER BY q.priority DESC, q.issued_at ASC", SELECT_QUEUE),
+             ORDER BY q.priority DESC, q.issued_at ASC",
+            SELECT_QUEUE
+        ),
         _ => format!(
             "{} WHERE q.issued_at::date = CURRENT_DATE
-             ORDER BY q.priority DESC, q.issued_at ASC", SELECT_QUEUE),
+             ORDER BY q.priority DESC, q.issued_at ASC",
+            SELECT_QUEUE
+        ),
     };
     let mut query = sqlx::query_as::<_, QueueToken>(&q);
     if let Some(s) = status_filter.filter(|s| !s.is_empty()) {
         query = query.bind(s);
     }
-    query.fetch_all(pool)
+    query
+        .fetch_all(pool)
         .await
         .map_err(|e| format!("Failed to get queue: {}", e))
 }
@@ -119,9 +124,15 @@ pub async fn create_queue_token_core(
 
     tx.commit().await.map_err(|e| format!("Commit: {}", e))?;
 
-    audit::for_session(pool, &s, "queue_token_create", "queue",
+    audit::for_session(
+        pool,
+        &s,
+        "queue_token_create",
+        "queue",
         Some(&row.0.to_string()),
-        Some(serde_json::json!({"token_number": row.1, "patient_id": token.patient_id}))).await;
+        Some(serde_json::json!({"token_number": row.1, "patient_id": token.patient_id})),
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -166,14 +177,31 @@ pub async fn call_next_token_core(
         _ => format!("{} WHERE q.status = 'in-progress' FOR UPDATE OF q", SELECT_QUEUE),
     };
     let mut current = sqlx::query_as::<_, QueueToken>(&q);
-    if let Some(dep) = department_id { current = current.bind(dep); }
-    if let Some(doc) = doctor_id { current = current.bind(doc); }
-    if let Some(active) = current.fetch_optional(&mut *tx).await.map_err(|e| e.to_string())? {
+    if let Some(dep) = department_id {
+        current = current.bind(dep);
+    }
+    if let Some(doc) = doctor_id {
+        current = current.bind(doc);
+    }
+    if let Some(active) = current
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?
+    {
         sqlx::query("UPDATE queue_tokens SET status='completed', completed_at=NOW() WHERE id=$1")
-            .bind(active.id).execute(&mut *tx).await
+            .bind(active.id)
+            .execute(&mut *tx)
+            .await
             .map_err(|e| format!("Complete token: {}", e))?;
-        audit::for_session(pool, &s, "queue_token_complete", "queue",
-            Some(&active.id.to_string()), None).await;
+        audit::for_session(
+            pool,
+            &s,
+            "queue_token_complete",
+            "queue",
+            Some(&active.id.to_string()),
+            None,
+        )
+        .await;
     }
 
     // 2) Pick + atomically claim the next waiting token.
@@ -192,16 +220,32 @@ pub async fn call_next_token_core(
              ORDER BY q.priority DESC, q.issued_at ASC LIMIT 1 FOR UPDATE OF q SKIP LOCKED", SELECT_QUEUE),
     };
     let mut pick_q = sqlx::query_as::<_, QueueToken>(&pick);
-    if let Some(dep) = department_id { pick_q = pick_q.bind(dep); }
-    if let Some(doc) = doctor_id { pick_q = pick_q.bind(doc); }
-    let next = pick_q.fetch_optional(&mut *tx).await.map_err(|e| e.to_string())?;
+    if let Some(dep) = department_id {
+        pick_q = pick_q.bind(dep);
+    }
+    if let Some(doc) = doctor_id {
+        pick_q = pick_q.bind(doc);
+    }
+    let next = pick_q
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
     if let Some(t) = &next {
         sqlx::query("UPDATE queue_tokens SET status='in-progress', called_at=NOW() WHERE id=$1")
-            .bind(t.id).execute(&mut *tx).await
+            .bind(t.id)
+            .execute(&mut *tx)
+            .await
             .map_err(|e| format!("Call token: {}", e))?;
-        audit::for_session(pool, &s, "queue_token_call", "queue",
-            Some(&t.id.to_string()), None).await;
+        audit::for_session(
+            pool,
+            &s,
+            "queue_token_call",
+            "queue",
+            Some(&t.id.to_string()),
+            None,
+        )
+        .await;
     }
 
     tx.commit().await.map_err(|e| format!("Commit: {}", e))?;
@@ -226,8 +270,11 @@ pub async fn set_token_status_core(
     status: String,
 ) -> Result<(), String> {
     let s = rbac::require(session_state, Permission::QueueManage)?;
-    let completed_at: Option<chrono::DateTime<chrono::Utc>> =
-        if status == "completed" { Some(chrono::Utc::now()) } else { None };
+    let completed_at: Option<chrono::DateTime<chrono::Utc>> = if status == "completed" {
+        Some(chrono::Utc::now())
+    } else {
+        None
+    };
     sqlx::query("UPDATE queue_tokens SET status=$1, completed_at=$2 WHERE id=$3")
         .bind(&status)
         .bind(completed_at)
@@ -235,7 +282,14 @@ pub async fn set_token_status_core(
         .execute(pool)
         .await
         .map_err(|e| format!("Update token status: {}", e))?;
-    audit::for_session(pool, &s, "queue_token_status", "queue",
-        Some(&id.to_string()), Some(serde_json::json!({"status": status}))).await;
+    audit::for_session(
+        pool,
+        &s,
+        "queue_token_status",
+        "queue",
+        Some(&id.to_string()),
+        Some(serde_json::json!({"status": status})),
+    )
+    .await;
     Ok(())
 }

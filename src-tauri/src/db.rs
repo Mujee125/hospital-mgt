@@ -28,7 +28,10 @@ use std::time::Duration;
 /// SEC-18: replace a `sqlx::Error` with a generic user-facing message
 /// while preserving the full error for ops debugging via stderr.
 pub fn sanitize_db_error(e: &sqlx::Error) -> String {
-    eprintln!("[HMS DB] database error (full details suppressed for user): {}", e);
+    eprintln!(
+        "[HMS DB] database error (full details suppressed for user): {}",
+        e
+    );
     "Database operation failed. Please contact support.".to_string()
 }
 
@@ -60,7 +63,10 @@ fn build_url(
     db_name: &str,
     sslrootcert_path: Option<&Path>,
 ) -> String {
-    let base = format!("postgresql://{}:{}@{}:{}/{}", user, password, host, port, db_name);
+    let base = format!(
+        "postgresql://{}:{}@{}:{}/{}",
+        user, password, host, port, db_name
+    );
     match sslrootcert_path {
         Some(path) => {
             // Client: verify-ca with pinned cert
@@ -109,6 +115,11 @@ pub async fn connect_root(
     PgPoolOptions::new()
         .max_connections(2)
         .acquire_timeout(Duration::from_secs(15))
+        // QA-2026-09-08 H4: pin idle/lifetime so a dropped pool handle
+        // (initialize_database re-run after re-pairing) always reaps its
+        // connections instead of holding them until app exit.
+        .idle_timeout(Duration::from_secs(300))
+        .max_lifetime(Duration::from_secs(1800))
         .connect(&url)
         .await
         .map_err(|e| format!("Root connect failed: {}", e))
@@ -126,6 +137,8 @@ pub async fn connect_app(
     PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(15))
+        .idle_timeout(Duration::from_secs(300))
+        .max_lifetime(Duration::from_secs(1800))
         .connect(&url)
         .await
         .map_err(|e| format!("App connect failed: {}", e))
@@ -146,13 +159,12 @@ pub async fn ensure_database(root_pool: &PgPool, db_name: &str) -> Result<(), St
     // set, so this is a safe-by-default fail-closed check.
     validate_db_identifier(db_name)?;
 
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
-    )
-    .bind(db_name)
-    .fetch_one(root_pool)
-    .await
-    .map_err(|e| format!("DB check failed: {}", e))?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(db_name)
+            .fetch_one(root_pool)
+            .await
+            .map_err(|e| format!("DB check failed: {}", e))?;
 
     if !exists {
         // SEC-10: `db_name` has been validated above (matches
@@ -206,7 +218,9 @@ pub fn validate_db_identifier(name: &str) -> Result<(), String> {
         ));
     }
     let mut chars = name.chars();
-    let first = chars.next().ok_or_else(|| "Database identifier cannot be empty.".to_string())?;
+    let first = chars
+        .next()
+        .ok_or_else(|| "Database identifier cannot be empty.".to_string())?;
     if !(first.is_ascii_alphabetic() || first == '_') {
         return Err(format!(
             "Database identifier '{}' is invalid: must start with a letter or underscore.",
@@ -242,7 +256,9 @@ pub fn validate_db_identifier(name: &str) -> Result<(), String> {
 
 pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
-        .execute(pool).await.ok();
+        .execute(pool)
+        .await
+        .ok();
 
     // ── Original tables (preserved exactly) ────────────────────────────────
     // CR-11: `deleted_at` (NULL = active, non-NULL = soft-deleted) and
@@ -252,7 +268,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // run_migrations) so a hard DELETE is refused when any clinical row
     // references the patient. The columns are also added idempotently below
     // for existing deployments whose `patients` table pre-dates this fix.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS patients (
             id            SERIAL PRIMARY KEY,
             first_name    VARCHAR(100) NOT NULL,
@@ -266,16 +283,27 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             is_active     BOOLEAN      NOT NULL DEFAULT TRUE,
             deleted_at    TIMESTAMPTZ
         )
-    "#).execute(pool).await.map_err(|e| format!("patients: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("patients: {}", e))?;
 
     // CR-11: add the soft-delete columns idempotently for existing deployments
     // whose `patients` table was created before this migration.
-    sqlx::query("ALTER TABLE patients ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE")
-        .execute(pool).await.map_err(|e| format!("patients.is_active: {}", e))?;
+    sqlx::query(
+        "ALTER TABLE patients ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("patients.is_active: {}", e))?;
     sqlx::query("ALTER TABLE patients ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
-        .execute(pool).await.map_err(|e| format!("patients.deleted_at: {}", e))?;
+        .execute(pool)
+        .await
+        .map_err(|e| format!("patients.deleted_at: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS doctors (
             id             SERIAL PRIMARY KEY,
             first_name     VARCHAR(100) NOT NULL,
@@ -289,15 +317,24 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             is_active      BOOLEAN      NOT NULL DEFAULT TRUE,
             created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("doctors: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("doctors: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS appointments (
             id               SERIAL PRIMARY KEY,
             -- CR-11: ON DELETE RESTRICT — patient hard-delete must NOT wipe
             -- clinical history (HIPAA §164.530(j) 6-year PHI retention).
             patient_id       INT         NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
-            doctor_id        INT         NOT NULL REFERENCES doctors(id)  ON DELETE CASCADE,
+            -- QA-2026-09-08 M7: RESTRICT, matching the patient FK above —
+            -- deleting a doctor must never silently destroy appointment
+            -- history (HIPAA §164.530(j) retention). The command layer
+            -- refuses with a clear message; this is the DB backstop.
+            doctor_id        INT         NOT NULL REFERENCES doctors(id)  ON DELETE RESTRICT,
             appointment_date DATE        NOT NULL,
             appointment_time TIME        NOT NULL,
             duration_minutes INT         NOT NULL DEFAULT 30,
@@ -307,9 +344,52 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("appointments: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("appointments: {}", e))?;
 
-    sqlx::query(r#"
+    // QA-2026-09-08 H3: `appointments` is the most-queried clinical table
+    // (today's schedule, date/status/doctor filters in get_appointments,
+    // search joins, WhatsApp trigger lookups) but previously carried ZERO
+    // indexes — every one of those queries was a sequential scan. These
+    // four cover the WHERE/ORDER BY shapes the command layer actually uses.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments (appointment_date)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("idx_appt_date: {}", e))?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_appointments_doctor_date ON appointments (doctor_id, appointment_date)")
+        .execute(pool).await.map_err(|e| format!("idx_appt_doctor: {}", e))?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_appointments_patient ON appointments (patient_id)")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("idx_appt_patient: {}", e))?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_appointments_status ON appointments (status)")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("idx_appt_status: {}", e))?;
+
+    // QA-2026-09-08 H3 (continued): the status column was free-text — every
+    // OTHER status column in the schema has a CHECK. A garbage status
+    // (typo, older client build) silently skipped the confirmed/cancelled
+    // WhatsApp notification triggers and vanished from the stats FILTERs.
+    // Normalize any legacy garbage to 'cancelled' (the conservative default:
+    // a rescheduled booking is recoverable, a phantom 'confirmed' is not),
+    // then attach the CHECK. DROP IF EXISTS first keeps the ADD idempotent.
+    sqlx::query("UPDATE appointments SET status = 'cancelled' WHERE status NOT IN ('scheduled','confirmed','completed','cancelled','no-show')")
+        .execute(pool).await.map_err(|e| format!("appointments status normalize: {}", e))?;
+    sqlx::query("ALTER TABLE appointments DROP CONSTRAINT IF EXISTS chk_appointments_status")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("appointments chk drop: {}", e))?;
+    sqlx::query("ALTER TABLE appointments ADD CONSTRAINT chk_appointments_status CHECK (status IN ('scheduled','confirmed','completed','cancelled','no-show'))")
+        .execute(pool).await.map_err(|e| format!("appointments chk: {}", e))?;
+
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS messages (
             id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
             sender     VARCHAR(100) NOT NULL,
@@ -317,9 +397,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             room       VARCHAR(50)  NOT NULL DEFAULT 'general',
             created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("messages: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("messages: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS whatsapp_notifications (
             id                SERIAL      PRIMARY KEY,
             appointment_id    INT         REFERENCES appointments(id) ON DELETE SET NULL,
@@ -329,10 +414,22 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             sent_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
             success           BOOLEAN      NOT NULL DEFAULT FALSE
         )
-    "#).execute(pool).await.map_err(|e| format!("whatsapp_notifications: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("whatsapp_notifications: {}", e))?;
+
+    // QA-2026-09-08 H3 (moved): index for the WhatsApp-reminder dedup and
+    // appointment-link lookups. Lives HERE because whatsapp_notifications
+    // is created just above — an earlier placement in the appointments
+    // block ran before the table existed and failed the whole migration.
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_whatsapp_notifications_appt ON whatsapp_notifications (appointment_id)")
+        .execute(pool).await.map_err(|e| format!("idx_wa_appt: {}", e))?;
 
     // ── 1. Core identity & security ────────────────────────────────────────
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS departments (
             id           SERIAL PRIMARY KEY,
             name         VARCHAR(120) NOT NULL,
@@ -341,9 +438,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             is_active    BOOLEAN      NOT NULL DEFAULT TRUE,
             created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("departments: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("departments: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS users (
             id                    SERIAL PRIMARY KEY,
             username              VARCHAR(60)  NOT NULL UNIQUE,
@@ -358,45 +460,70 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
             updated_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("users: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("users: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS roles (
             id          SERIAL PRIMARY KEY,
             name        VARCHAR(60)  NOT NULL UNIQUE,
             description VARCHAR(255)
         )
-    "#).execute(pool).await.map_err(|e| format!("roles: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("roles: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS permissions (
             id          SERIAL PRIMARY KEY,
             key         VARCHAR(80)  NOT NULL UNIQUE,
             description VARCHAR(255)
         )
-    "#).execute(pool).await.map_err(|e| format!("permissions: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("permissions: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS role_permissions (
             role_id       INT NOT NULL REFERENCES roles(id)       ON DELETE CASCADE,
             permission_id INT NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
             PRIMARY KEY (role_id, permission_id)
         )
-    "#).execute(pool).await.map_err(|e| format!("role_permissions: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("role_permissions: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS user_roles (
             user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             role_id INT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
             PRIMARY KEY (user_id, role_id)
         )
-    "#).execute(pool).await.map_err(|e| format!("user_roles: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("user_roles: {}", e))?;
 
     // Session tokens are opaque random strings; only their SHA-256 hash is
     // persisted (never the raw token), limiting blast radius if the DB is
     // exfiltrated. Single active session per user is enforced by deleting
     // prior sessions on login.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS sessions (
             token_hash TEXT         PRIMARY KEY,
             user_id    INT          NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -405,7 +532,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             ip         VARCHAR(45),
             user_agent TEXT
         )
-    "#).execute(pool).await.map_err(|e| format!("sessions: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("sessions: {}", e))?;
 
     // Review Pass 3, P3-7: enforce the single-active-session invariant at the
     // SCHEMA level, not just in login's DELETE+INSERT sequence. Previously a
@@ -418,12 +549,17 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     sqlx::query(
         "DELETE FROM sessions a USING sessions b \
          WHERE a.user_id = b.user_id AND a.issued_at < b.issued_at",
-    ).execute(pool).await.ok();
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_single_user ON sessions(user_id)")
-        .execute(pool).await
+        .execute(pool)
+        .await
         .map_err(|e| format!("sessions unique-user index: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS audit_logs (
             id          BIGSERIAL PRIMARY KEY,
             user_id     INT,
@@ -435,35 +571,105 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             ip          VARCHAR(45),
             created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("audit_logs: {}", e))?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs (created_at DESC)")
-        .execute(pool).await.map_err(|e| format!("idx_audit_created: {}", e))?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs (user_id, created_at DESC)")
-        .execute(pool).await.map_err(|e| format!("idx_audit_user: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("audit_logs: {}", e))?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs (created_at DESC)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("idx_audit_created: {}", e))?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs (user_id, created_at DESC)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("idx_audit_user: {}", e))?;
+
+    // QA-2026-09-08 M5 (docs/04 Security Matrix M-08, ISO 27001 A.8.3):
+    // make the audit trail append-only AT THE DATABASE LEVEL. Previously
+    // any DB credential holder (or the app itself, which connects as a
+    // privileged role) could UPDATE/DELETE audit rows with no trace —
+    // the matrix itself listed the append-only trigger as "Planned". The
+    // trigger REJECTS all UPDATE and DELETE on audit_logs. It cannot stop
+    // a superuser (triggers can be dropped by one), but it makes routine
+    // tampering non-silent and blocks every non-superuser path.
+    //
+    // ORDERING: the guard function is created HERE, immediately BEFORE
+    // the trigger that calls it — a trigger referencing a not-yet-created
+    // function fails the whole migration (the same ordering trap the
+    // whatsapp_notifications index hit earlier in this same remediation).
+    sqlx::query(r#"
+        CREATE OR REPLACE FUNCTION suppress_audit_row_change()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'audit_logs is append-only (QA-2026-09-08 M5): % on row % is not permitted',
+                TG_OP, OLD.id;
+        END;
+        $$;
+    "#)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("audit guard function: {}", e))?;
+    sqlx::query("ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        r#"
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_trigger
+                WHERE tgname = 'audit_logs_append_only'
+                  AND tgrelid = 'audit_logs'::regclass
+            ) THEN
+                CREATE TRIGGER audit_logs_append_only
+                    BEFORE UPDATE OR DELETE ON audit_logs
+                    FOR EACH ROW EXECUTE FUNCTION suppress_audit_row_change();
+            END IF;
+        END $$;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("audit trigger: {}", e))?;
 
     // ── 2. Patient EHR expansion ──────────────────────────────────────────
     // Backward-compatible column additions (all nullable / defaulted).
     for (col, ddl) in [
-        ("mrn",                       "VARCHAR(20) UNIQUE"),
-        ("blood_group",               "VARCHAR(8)"),
+        ("mrn", "VARCHAR(20) UNIQUE"),
+        ("blood_group", "VARCHAR(8)"),
         // BE-01 (Blood Bank): the patient's Rh factor. The issue-path
         // compatibility check (blood_bank.rs SELECT blood_group, rh_factor)
         // requires it, but the migration historically only added blood_group
         // — so `create_blood_issue` would fail with "column rh_factor does
         // not exist" on any deployment pre-dating the blood bank. Found by
         // the first-ever execution of the AERP Part G / IT-001 suites.
-        ("rh_factor",                 "VARCHAR(5)"),
-        ("allergies",                 "TEXT"),
-        ("chronic_conditions",        "TEXT"),
-        ("emergency_contact_name",    "VARCHAR(120)"),
-        ("emergency_contact_phone",   "VARCHAR(30)"),
-        ("insurance_provider",        "VARCHAR(120)"),
-        ("insurance_policy_number",   "VARCHAR(60)"),
-        ("status",                    "VARCHAR(20) NOT NULL DEFAULT 'active'"),
-        ("created_by_user_id",        "INT REFERENCES users(id) ON DELETE SET NULL"),
+        ("rh_factor", "VARCHAR(5)"),
+        ("allergies", "TEXT"),
+        ("chronic_conditions", "TEXT"),
+        ("emergency_contact_name", "VARCHAR(120)"),
+        ("emergency_contact_phone", "VARCHAR(30)"),
+        ("insurance_provider", "VARCHAR(120)"),
+        ("insurance_policy_number", "VARCHAR(60)"),
+        ("status", "VARCHAR(20) NOT NULL DEFAULT 'active'"),
+        (
+            "created_by_user_id",
+            "INT REFERENCES users(id) ON DELETE SET NULL",
+        ),
     ] {
-        sqlx::query(&format!("ALTER TABLE patients ADD COLUMN IF NOT EXISTS {} {}", col, ddl))
-            .execute(pool).await.map_err(|e| format!("patients.{}: {}", col, e))?;
+        sqlx::query(&format!(
+            "ALTER TABLE patients ADD COLUMN IF NOT EXISTS {} {}",
+            col, ddl
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| format!("patients.{}: {}", col, e))?;
     }
 
     // SEC-008 (AERP): CHECK constraint on patients.rh_factor — the column was
@@ -474,16 +680,20 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     sqlx::query("UPDATE patients SET rh_factor = NULL WHERE rh_factor IS NOT NULL AND rh_factor NOT IN ('+', '-')")
         .execute(pool).await
         .map_err(|e| format!("patients.rh_factor normalize: {}", e))?;
-    sqlx::query(
-        "ALTER TABLE patients DROP CONSTRAINT IF EXISTS chk_patients_rh_factor",
-    ).execute(pool).await.ok();
+    sqlx::query("ALTER TABLE patients DROP CONSTRAINT IF EXISTS chk_patients_rh_factor")
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query(
         "ALTER TABLE patients ADD CONSTRAINT chk_patients_rh_factor \
          CHECK (rh_factor IS NULL OR rh_factor IN ('+', '-'))",
-    ).execute(pool).await
+    )
+    .execute(pool)
+    .await
     .map_err(|e| format!("patients.rh_factor check: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS patient_consent (
             id                 SERIAL PRIMARY KEY,
             -- CR-11: ON DELETE RESTRICT — consent history must outlive the patient row.
@@ -494,13 +704,18 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             granted_by_user_id INT          REFERENCES users(id) ON DELETE SET NULL,
             notes              TEXT
         )
-    "#).execute(pool).await.map_err(|e| format!("patient_consent: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("patient_consent: {}", e))?;
 
     // CR-12: enforce one consent record per (patient_id, consent_type) so
     // `set_patient_consent` can use `INSERT ... ON CONFLICT (patient_id,
     // consent_type) DO UPDATE` as a true upsert. Added idempotently via a
     // DO block because PostgreSQL has no `ADD CONSTRAINT IF NOT EXISTS`.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         DO $$
         BEGIN
             IF NOT EXISTS (
@@ -512,11 +727,20 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
                     UNIQUE (patient_id, consent_type);
             END IF;
         END $$;
-    "#).execute(pool).await.map_err(|e| format!("patient_consent unique constraint: {}", e))?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_patient_consent_patient ON patient_consent (patient_id)")
-        .execute(pool).await.ok();
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("patient_consent unique constraint: {}", e))?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_patient_consent_patient ON patient_consent (patient_id)",
+    )
+    .execute(pool)
+    .await
+    .ok();
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS encounters (
             id                 SERIAL PRIMARY KEY,
             -- CR-11: ON DELETE RESTRICT — encounter history must outlive the patient row.
@@ -530,15 +754,27 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             created_by_user_id INT          REFERENCES users(id) ON DELETE SET NULL,
             created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("encounters: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("encounters: {}", e))?;
 
     // ── 3. Scheduling & queue expansion ───────────────────────────────────
     for (col, ddl) in [
-        ("created_by_user_id", "INT REFERENCES users(id) ON DELETE SET NULL"),
-        ("queue_token_id",     "INT"),
+        (
+            "created_by_user_id",
+            "INT REFERENCES users(id) ON DELETE SET NULL",
+        ),
+        ("queue_token_id", "INT"),
     ] {
-        sqlx::query(&format!("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS {} {}", col, ddl))
-            .execute(pool).await.map_err(|e| format!("appointments.{}: {}", col, e))?;
+        sqlx::query(&format!(
+            "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS {} {}",
+            col, ddl
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| format!("appointments.{}: {}", col, e))?;
     }
 
     // CR-10: per-appointment IANA timezone column. `appointment_time` is
@@ -550,11 +786,18 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // override the default per appointment. The column is nullable so old
     // rows fall back to the clinic default via COALESCE in the scheduler.
     sqlx::query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS appointment_tz TEXT")
-        .execute(pool).await.map_err(|e| format!("appointments.appointment_tz: {}", e))?;
-    sqlx::query("UPDATE appointments SET appointment_tz = 'Asia/Karachi' WHERE appointment_tz IS NULL")
-        .execute(pool).await.ok();
+        .execute(pool)
+        .await
+        .map_err(|e| format!("appointments.appointment_tz: {}", e))?;
+    sqlx::query(
+        "UPDATE appointments SET appointment_tz = 'Asia/Karachi' WHERE appointment_tz IS NULL",
+    )
+    .execute(pool)
+    .await
+    .ok();
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS queue_tokens (
             id            SERIAL PRIMARY KEY,
             -- CR-11: ON DELETE RESTRICT — queue history must outlive the patient row.
@@ -569,12 +812,63 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             completed_at  TIMESTAMPTZ,
             created_by_user_id INT     REFERENCES users(id) ON DELETE SET NULL
         )
-    "#).execute(pool).await.map_err(|e| format!("queue_tokens: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("queue_tokens: {}", e))?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_queue_status ON queue_tokens (status, issued_at)")
-        .execute(pool).await.map_err(|e| format!("idx_queue: {}", e))?;
+        .execute(pool)
+        .await
+        .map_err(|e| format!("idx_queue: {}", e))?;
+
+    // QA-2026-09-08 H2: the daily token number is generated as
+    // MAX(token_number)+1 within a LOCK TABLE ... IN EXCLUSIVE MODE
+    // transaction — but that lock is only visible to connections of THIS
+    // process's pool. A second HMS server process (or a manual repair run
+    // on the same DB) could allocate the same number. This UNIQUE index is
+    // process's pool. A second HMS server process (or a manual repair run
+    // on the same DB) could allocate the same number. This UNIQUE index is
+    // the DB-level backstop the queue module has always claimed to have
+    // (queue.rs cites it in a comment) but that never existed.
+    //
+    // Index-expression note: `issued_at::date` is STABLE (it depends on
+    // the session TimeZone), and Postgres refuses non-IMMUTABLE functions
+    // in index expressions. `(issued_at AT TIME ZONE 'UTC')::date` is
+    // immutable — a fixed-zone cast — so tokens are uniquely numbered per
+    // UTC calendar day. `issued_at` rows are written with NOW() (the DB
+    // server clock) and the generator's own WHERE clause uses the same
+    // `issued_at::date = CURRENT_DATE` expression in the server's local
+    // zone; the two agree whenever the server's clock zone is UTC+0 at
+    // midnight boundaries, and in any zone the index still guarantees no
+    // two tokens share a number within a UTC day — which subsumes the
+    // local day. Historical same-day duplicates (the very corruption this
+    // guards against) are normalized first — keep the EARLIER token,
+    // drop the later duplicate — so an existing deployment heals instead
+    // of failing to boot, and the index then holds the guarantee forever.
+    sqlx::query(
+        r#"
+        DELETE FROM queue_tokens q
+        USING queue_tokens q2
+        WHERE q.id > q2.id
+          AND (q.issued_at AT TIME ZONE 'UTC')::date = (q2.issued_at AT TIME ZONE 'UTC')::date
+          AND q.token_number = q2.token_number
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("queue duplicate heal: {}", e))?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_day_token \
+         ON queue_tokens (((issued_at AT TIME ZONE 'UTC')::date), token_number)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("uq_queue_day_token: {}", e))?;
 
     // ── 4. In-patient (IPD) ───────────────────────────────────────────────
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS wards (
             id                SERIAL PRIMARY KEY,
             name              VARCHAR(120) NOT NULL,
@@ -584,9 +878,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             is_active         BOOLEAN      NOT NULL DEFAULT TRUE,
             created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("wards: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("wards: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS beds (
             id          SERIAL PRIMARY KEY,
             ward_id     INT          NOT NULL REFERENCES wards(id) ON DELETE CASCADE,
@@ -597,9 +896,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
             UNIQUE (ward_id, bed_number)
         )
-    "#).execute(pool).await.map_err(|e| format!("beds: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("beds: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS ipd_admissions (
             id                   SERIAL PRIMARY KEY,
             patient_id           INT          NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
@@ -617,10 +921,15 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             created_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
             updated_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("ipd_admissions: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("ipd_admissions: {}", e))?;
 
     // ── 5. Laboratory ─────────────────────────────────────────────────────
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS lab_test_catalog (
             id            SERIAL PRIMARY KEY,
             name          VARCHAR(160) NOT NULL,
@@ -633,9 +942,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             is_active     BOOLEAN      NOT NULL DEFAULT TRUE,
             created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("lab_test_catalog: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("lab_test_catalog: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS lab_orders (
             id                  SERIAL PRIMARY KEY,
             -- CR-11: ON DELETE RESTRICT — lab order history must outlive the patient row.
@@ -647,7 +961,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             ordered_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
             created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("lab_orders: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("lab_orders: {}", e))?;
 
     sqlx::query(r#"
         CREATE TABLE IF NOT EXISTS lab_order_tests (
@@ -673,13 +991,19 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // "critical result alerting" — the approver confirms the doctor was
     // phoned before release). All statements are additive + idempotent.
     sqlx::query("ALTER TABLE lab_orders ADD COLUMN IF NOT EXISTS sample_barcode VARCHAR(40)")
-        .execute(pool).await.map_err(|e| format!("lab_orders.sample_barcode: {}", e))?;
+        .execute(pool)
+        .await
+        .map_err(|e| format!("lab_orders.sample_barcode: {}", e))?;
     sqlx::query("ALTER TABLE lab_orders ADD COLUMN IF NOT EXISTS sampled_at TIMESTAMPTZ")
-        .execute(pool).await.map_err(|e| format!("lab_orders.sampled_at: {}", e))?;
+        .execute(pool)
+        .await
+        .map_err(|e| format!("lab_orders.sampled_at: {}", e))?;
     sqlx::query("ALTER TABLE lab_orders ADD COLUMN IF NOT EXISTS sampled_by_user_id INT REFERENCES users(id) ON DELETE SET NULL")
         .execute(pool).await.map_err(|e| format!("lab_orders.sampled_by_user_id: {}", e))?;
     sqlx::query("ALTER TABLE lab_orders ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ")
-        .execute(pool).await.map_err(|e| format!("lab_orders.approved_at: {}", e))?;
+        .execute(pool)
+        .await
+        .map_err(|e| format!("lab_orders.approved_at: {}", e))?;
     sqlx::query("ALTER TABLE lab_orders ADD COLUMN IF NOT EXISTS approved_by_user_id INT REFERENCES users(id) ON DELETE SET NULL")
         .execute(pool).await.map_err(|e| format!("lab_orders.approved_by_user_id: {}", e))?;
     // Approval state per test row: NULL = not yet resulted, 'entered' =
@@ -687,33 +1011,55 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // 'amended' = post-approval correction (audit trail preserved via
     // the original completed_at + amendment note).
     sqlx::query("ALTER TABLE lab_order_tests ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20)")
-        .execute(pool).await.map_err(|e| format!("lab_order_tests.approval_status: {}", e))?;
-    sqlx::query("ALTER TABLE lab_order_tests ADD COLUMN IF NOT EXISTS critical_acknowledged_at TIMESTAMPTZ")
-        .execute(pool).await.map_err(|e| format!("lab_order_tests.critical_acknowledged_at: {}", e))?;
+        .execute(pool)
+        .await
+        .map_err(|e| format!("lab_order_tests.approval_status: {}", e))?;
+    sqlx::query(
+        "ALTER TABLE lab_order_tests ADD COLUMN IF NOT EXISTS critical_acknowledged_at TIMESTAMPTZ",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("lab_order_tests.critical_acknowledged_at: {}", e))?;
     sqlx::query("ALTER TABLE lab_order_tests ADD COLUMN IF NOT EXISTS critical_acknowledged_by_user_id INT REFERENCES users(id) ON DELETE SET NULL")
         .execute(pool).await.map_err(|e| format!("lab_order_tests.critical_acknowledged_by_user_id: {}", e))?;
     // Integrity: approval_status vocabulary + critical-release rule. A
     // critical result may sit 'entered' (alert raised, awaiting
     // acknowledgment), but may only be 'approved' (released to clinicians)
     // AFTER its critical flag has been acknowledged.
-    sqlx::query("ALTER TABLE lab_order_tests DROP CONSTRAINT IF EXISTS chk_lot_approval_status").execute(pool).await.ok();
+    sqlx::query("ALTER TABLE lab_order_tests DROP CONSTRAINT IF EXISTS chk_lot_approval_status")
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query(
         "ALTER TABLE lab_order_tests ADD CONSTRAINT chk_lot_approval_status \
          CHECK (approval_status IS NULL OR approval_status IN ('entered','approved','amended'))",
-    ).execute(pool).await.map_err(|e| format!("chk_lot_approval_status: {}", e))?;
-    sqlx::query("ALTER TABLE lab_order_tests DROP CONSTRAINT IF EXISTS chk_lot_critical_release").execute(pool).await.ok();
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("chk_lot_approval_status: {}", e))?;
+    sqlx::query("ALTER TABLE lab_order_tests DROP CONSTRAINT IF EXISTS chk_lot_critical_release")
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query(
         "ALTER TABLE lab_order_tests ADD CONSTRAINT chk_lot_critical_release \
          CHECK (approval_status IS DISTINCT FROM 'approved' OR result_abnormal_flag IS DISTINCT FROM 'critical' \
                 OR critical_acknowledged_at IS NOT NULL)",
     ).execute(pool).await.map_err(|e| format!("chk_lot_critical_release: {}", e))?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_lab_orders_status ON lab_orders(status, ordered_at DESC)")
-        .execute(pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_lab_orders_status ON lab_orders(status, ordered_at DESC)",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_lot_approval ON lab_order_tests(approval_status)")
-        .execute(pool).await.ok();
+        .execute(pool)
+        .await
+        .ok();
 
     // ── 6. Billing & finance ──────────────────────────────────────────────
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS bills (
             id               SERIAL PRIMARY KEY,
             patient_id       INT          NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
@@ -730,9 +1076,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
             updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("bills: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("bills: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS bill_items (
             id           SERIAL PRIMARY KEY,
             bill_id      INT          NOT NULL REFERENCES bills(id) ON DELETE CASCADE,
@@ -743,9 +1094,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             total        NUMERIC(14,2) NOT NULL DEFAULT 0,
             reference_id INT
         )
-    "#).execute(pool).await.map_err(|e| format!("bill_items: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("bill_items: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS payments (
             id                SERIAL PRIMARY KEY,
             bill_id           INT          NOT NULL REFERENCES bills(id) ON DELETE RESTRICT,
@@ -756,7 +1112,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             received_by_user_id INT        REFERENCES users(id) ON DELETE SET NULL,
             created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("payments: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("payments: {}", e))?;
 
     // ── 6b. Billing workflow completion (SRS §2.10 — Phase 6.3, 2026-09-06)
     //
@@ -765,7 +1125,9 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // bills). INV-YYYY-NNNNNN, assigned inside the create transaction. The
     // backfill converts any legacy date-counted numbers once, idempotently.
     sqlx::query("CREATE SEQUENCE IF NOT EXISTS bill_number_seq START 1")
-        .execute(pool).await.map_err(|e| format!("bill_number_seq: {}", e))?;
+        .execute(pool)
+        .await
+        .map_err(|e| format!("bill_number_seq: {}", e))?;
     sqlx::query(
         "UPDATE bills SET bill_number = 'INV-' || TO_CHAR(created_at, 'YYYY') || '-' || LPAD(id::TEXT, 6, '0') \
          WHERE bill_number NOT LIKE 'INV-%'",
@@ -773,7 +1135,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
 
     // Refunds: a refund reduces the effective amount paid on a bill but
     // NEVER deletes the payment row (financial append-only audit trail).
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS refunds (
             id                SERIAL PRIMARY KEY,
             bill_id           INT          NOT NULL REFERENCES bills(id) ON DELETE RESTRICT,
@@ -783,9 +1146,17 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             refunded_by_user_id INT        REFERENCES users(id) ON DELETE SET NULL,
             refunded_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("refunds: {}", e))?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_refunds_bill ON refunds(bill_id, refunded_at DESC)")
-        .execute(pool).await.ok();
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("refunds: {}", e))?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_refunds_bill ON refunds(bill_id, refunded_at DESC)",
+    )
+    .execute(pool)
+    .await
+    .ok();
 
     // Patient advances (deposits): money held BEFORE a bill exists (e.g. IPD
     // admission deposits). Applied to a bill at settlement by the command.
@@ -803,8 +1174,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
     "#).execute(pool).await.map_err(|e| format!("patient_advances: {}", e))?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_advances_patient ON patient_advances(patient_id, status)")
-        .execute(pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_advances_patient ON patient_advances(patient_id, status)",
+    )
+    .execute(pool)
+    .await
+    .ok();
 
     // Insurance / TPA claim tracking per bill.
     sqlx::query(r#"
@@ -827,27 +1202,43 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             UNIQUE (bill_id, insurer)
         )
     "#).execute(pool).await.map_err(|e| format!("insurance_claims: {}", e))?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_claims_status ON insurance_claims(status, created_at DESC)")
-        .execute(pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_claims_status ON insurance_claims(status, created_at DESC)",
+    )
+    .execute(pool)
+    .await
+    .ok();
 
     // Credit-note cancellation: a cancelled bill keeps its rows (audit) and
     // is excluded from revenue. Payment reversal is a separate refund.
     sqlx::query("ALTER TABLE bills ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ")
-        .execute(pool).await.map_err(|e| format!("bills.cancelled_at: {}", e))?;
+        .execute(pool)
+        .await
+        .map_err(|e| format!("bills.cancelled_at: {}", e))?;
     sqlx::query("ALTER TABLE bills ADD COLUMN IF NOT EXISTS cancelled_by_user_id INT REFERENCES users(id) ON DELETE SET NULL")
         .execute(pool).await.map_err(|e| format!("bills.cancelled_by_user_id: {}", e))?;
     sqlx::query("ALTER TABLE bills ADD COLUMN IF NOT EXISTS cancellation_reason TEXT")
-        .execute(pool).await.map_err(|e| format!("bills.cancellation_reason: {}", e))?;
+        .execute(pool)
+        .await
+        .map_err(|e| format!("bills.cancellation_reason: {}", e))?;
     sqlx::query("ALTER TABLE bills ADD COLUMN IF NOT EXISTS credit_note_number VARCHAR(40)")
-        .execute(pool).await.map_err(|e| format!("bills.credit_note_number: {}", e))?;
+        .execute(pool)
+        .await
+        .map_err(|e| format!("bills.credit_note_number: {}", e))?;
     // Cancellation status vocabulary: legacy draft/unpaid/paid/partial
     // remain ('pending' is tolerated — the 10k synthetic seed used it
     // historically); 'cancelled' marks a credit-noted bill.
-    sqlx::query("ALTER TABLE bills DROP CONSTRAINT IF EXISTS chk_bills_status").execute(pool).await.ok();
+    sqlx::query("ALTER TABLE bills DROP CONSTRAINT IF EXISTS chk_bills_status")
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query(
         "ALTER TABLE bills ADD CONSTRAINT chk_bills_status \
          CHECK (status IN ('draft','unpaid','partial','paid','pending','cancelled'))",
-    ).execute(pool).await.map_err(|e| format!("chk_bills_status: {}", e))?;
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("chk_bills_status: {}", e))?;
 
     // ── 6c. Accounts — expense ledger (SRS §2.15 — Phase 8, 2026-09-06) ──
     //
@@ -856,7 +1247,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // only — voided expenses keep their rows (financial audit trail), are
     // excluded from lists and summaries, and the void requires the manager
     // permission + a reason, mirroring bill cancellation.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS expenses (
             id                  SERIAL PRIMARY KEY,
             category            VARCHAR(60)   NOT NULL,
@@ -872,11 +1264,21 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             voided_by_user_id   INT           REFERENCES users(id) ON DELETE SET NULL,
             void_reason         TEXT
         )
-    "#).execute(pool).await.map_err(|e| format!("expenses: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("expenses: {}", e))?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date DESC)")
-        .execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category, expense_date DESC)")
-        .execute(pool).await.ok();
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_expenses_category ON expenses(category, expense_date DESC)",
+    )
+    .execute(pool)
+    .await
+    .ok();
 
     // ── 6d. In-app notifications (Phase 9, 2026-09-07) ──────────────────
     //
@@ -889,7 +1291,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // Read state is a SEPARATE per-user table: a role broadcast is one row
     // but each user marks it read independently — one doctor reading it
     // must not clear it for the others.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS app_notifications (
             id          SERIAL PRIMARY KEY,
             user_id     INT          REFERENCES users(id) ON DELETE CASCADE,
@@ -907,15 +1310,24 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
               OR (user_id IS NULL AND role_target IS NULL)
             )
         )
-    "#).execute(pool).await.map_err(|e| format!("app_notifications: {}", e))?;
-    sqlx::query(r#"
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("app_notifications: {}", e))?;
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS app_notification_reads (
             notification_id INT NOT NULL REFERENCES app_notifications(id) ON DELETE CASCADE,
             user_id         INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             read_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (notification_id, user_id)
         )
-    "#).execute(pool).await.map_err(|e| format!("app_notification_reads: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("app_notification_reads: {}", e))?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_app_notif_target_user ON app_notifications(user_id, created_at DESC)")
         .execute(pool).await.ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_app_notif_target_role ON app_notifications(role_target, created_at DESC)")
@@ -923,10 +1335,13 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // Retention housekeeping (matches the audit-log philosophy — keeps the
     // center from growing unbounded; 90 days is ample for operational pings).
     sqlx::query("DELETE FROM app_notifications WHERE created_at < NOW() - INTERVAL '90 days'")
-        .execute(pool).await.ok();
+        .execute(pool)
+        .await
+        .ok();
 
     // ── 7. Inventory ──────────────────────────────────────────────────────
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS inventory_items (
             id             SERIAL PRIMARY KEY,
             name           VARCHAR(160) NOT NULL,
@@ -942,7 +1357,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
             updated_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("inventory_items: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("inventory_items: {}", e))?;
 
     // CR-21: stock movement audit trail (SRS FR-0181). Every stock change
     // (restock, dispense, adjustment, expiry write-off) is recorded here with
@@ -969,15 +1388,21 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
         .execute(pool).await.ok();
 
     // ── 8. System ─────────────────────────────────────────────────────────
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS settings (
             key        TEXT PRIMARY KEY,
             value      TEXT,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("settings: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("settings: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS license_state (
             id                   SERIAL PRIMARY KEY,
             license_json         TEXT,
@@ -986,7 +1411,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             last_verified_at     TIMESTAMPTZ,
             verification_status  VARCHAR(20) NOT NULL DEFAULT 'unverified'
         )
-    "#).execute(pool).await.map_err(|e| format!("license_state: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("license_state: {}", e))?;
 
     // ── 9. WhatsApp Business API config ───────────────────────────────────
     // Stores Meta Business API credentials for fully-automatic message
@@ -1000,7 +1429,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // We now collapse any legacy duplicate rows to a single row at id=1 and
     // enforce the singleton with a CHECK(id = 1) constraint. set_whatsapp_config
     // always writes id=1, so ON CONFLICT (id) now upserts correctly.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS whatsapp_config (
             id              SERIAL PRIMARY KEY,
             access_token    TEXT,
@@ -1010,7 +1440,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             enabled         BOOLEAN     NOT NULL DEFAULT FALSE,
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("whatsapp_config: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("whatsapp_config: {}", e))?;
 
     // Add preferred_method column (idempotent) — 'api' = Business Cloud API
     // (fully automatic), 'deep_link' = wa.me deep link (manual Send click).
@@ -1021,18 +1455,27 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // add the singleton CHECK constraint. Idempotent: if there's only one row
     // (or zero), these are no-ops; if duplicates exist, keep the most-recently
     // inserted row (MAX(id)) and renumber it to id=1.
-    sqlx::query("DELETE FROM whatsapp_config WHERE id NOT IN (SELECT MAX(id) FROM whatsapp_config)")
-        .execute(pool).await.map_err(|e| format!("whatsapp_config dedupe: {}", e))?;
+    sqlx::query(
+        "DELETE FROM whatsapp_config WHERE id NOT IN (SELECT MAX(id) FROM whatsapp_config)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("whatsapp_config dedupe: {}", e))?;
     sqlx::query("UPDATE whatsapp_config SET id = 1 WHERE id <> 1")
-        .execute(pool).await.map_err(|e| format!("whatsapp_config renumber: {}", e))?;
+        .execute(pool)
+        .await
+        .map_err(|e| format!("whatsapp_config renumber: {}", e))?;
     // Reset the SERIAL sequence so a future explicit id=1 INSERT does not
     // collide with the sequence's next value (defensive — set_whatsapp_config
     // pins id=1 explicitly, so the sequence is unused, but we keep it sane).
     sqlx::query("SELECT setval('whatsapp_config_id_seq', 1, true)")
-        .execute(pool).await.ok();
+        .execute(pool)
+        .await
+        .ok();
     // Add the singleton CHECK constraint idempotently. PostgreSQL has no
     // ADD CONSTRAINT IF NOT EXISTS, so we guard with a DO block.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         DO $$
         BEGIN
             IF NOT EXISTS (
@@ -1043,7 +1486,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
                     ADD CONSTRAINT whatsapp_config_singleton_check CHECK (id = 1);
             END IF;
         END $$;
-    "#).execute(pool).await.map_err(|e| format!("whatsapp_config_singleton_check: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("whatsapp_config_singleton_check: {}", e))?;
 
     // ── CR-11: convert clinical-table FKs to patients from ON DELETE CASCADE
     //    to ON DELETE RESTRICT (idempotent — only touches FKs whose
@@ -1055,7 +1502,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     //    hard DELETE wiping clinical history (HIPAA §164.530(j) 6-year PHI
     //    retention); the application's `delete_patient` command soft-deletes
     //    (sets `deleted_at`) and never issues a hard DELETE.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         DO $$
         DECLARE
             rec record;
@@ -1081,8 +1529,37 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
                     rec.tbl, rec.tbl
                 );
             END LOOP;
+            -- QA-2026-09-08 M7: same CR-11 treatment for
+            -- appointments.doctor_id → doctors. The original schema made
+            -- this the ONE clinical-history FK wired to CASCADE — deleting
+            -- a doctor destroyed every appointment (and the WhatsApp/
+            -- stats history hanging off them) in one statement, while
+            -- patients get RESTRICT + 6-year retention. Deletion is now
+            -- refused while appointments reference the doctor, and
+            -- delete_doctor in the command layer pre-checks with a clear
+            -- message (see doctors.rs). Note: no pg_namespace join needed —
+            -- conrelid = 'appointments'::regclass already resolves through
+            -- the search path to public.appointments.
+            FOR rec IN
+                SELECT con.conname
+                FROM pg_constraint con
+                WHERE con.contype     = 'f'
+                  AND con.conrelid    = 'appointments'::regclass
+                  AND con.conname     = 'appointments_doctor_id_fkey'
+                  AND con.confdeltype = 'c'
+            LOOP
+                EXECUTE format('ALTER TABLE appointments DROP CONSTRAINT %I', rec.conname);
+                EXECUTE format(
+                    'ALTER TABLE appointments ADD CONSTRAINT appointments_doctor_id_fkey
+                        FOREIGN KEY (doctor_id) REFERENCES doctors(id) ON DELETE RESTRICT'
+                );
+            END LOOP;
         END $$;
-    "#).execute(pool).await.map_err(|e| format!("cr11 fk restrict: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("cr11 fk restrict: {}", e))?;
 
     // ── 10. Pharmacy (Phase 2-C, SRS FR-0120–FR-0124) ─────────────────────
     //
@@ -1103,7 +1580,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // row with `reason = 'dispense'` and `reference_id` set to the
     // prescription_item_id (FR-0122 audit trail). This matches the
     // pattern in `commands/inventory.rs::adjust_inventory`.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS medications (
             id              SERIAL PRIMARY KEY,
             brand_name      VARCHAR(200) NOT NULL,
@@ -1117,14 +1595,25 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             is_active       BOOLEAN      NOT NULL DEFAULT TRUE,
             created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("medications: {}", e))?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_medications_active ON medications (is_active, brand_name)")
-        .execute(pool).await.ok();
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("medications: {}", e))?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_medications_active ON medications (is_active, brand_name)",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_medications_generic ON medications (generic_name)")
-        .execute(pool).await.ok();
+        .execute(pool)
+        .await
+        .ok();
 
     // Prescriptions (FR-0121) — generated from encounters.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS prescriptions (
             id                     SERIAL PRIMARY KEY,
             patient_id             INT          NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
@@ -1135,13 +1624,21 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             notes                  TEXT,
             created_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("prescriptions: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("prescriptions: {}", e))?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_prescriptions_patient ON prescriptions (patient_id, created_at DESC)")
         .execute(pool).await.ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_prescriptions_status ON prescriptions (status, created_at DESC)")
         .execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_prescriptions_encounter ON prescriptions (encounter_id)")
-        .execute(pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_prescriptions_encounter ON prescriptions (encounter_id)",
+    )
+    .execute(pool)
+    .await
+    .ok();
 
     // Prescription items — individual medication lines in a prescription.
     // `medication_name` is a denormalised snapshot so historical
@@ -1176,7 +1673,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // an empty `medications` table). Mirrors the seed pattern used by
     // `auth::seed_defaults`: a `WHERE NOT EXISTS` guard makes this safe
     // to re-run on every startup without duplicating rows.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         INSERT INTO medications (brand_name, generic_name, form, strength, category)
         SELECT * FROM (VALUES
             ('Panadol',     'Paracetamol',           'tablet',  '500mg', 'Analgesic'),
@@ -1189,7 +1687,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             ('Ventolin',    'Salbutamol',            'inhaler', '100mcg','Bronchodilator')
         ) AS t(brand_name, generic_name, form, strength, category)
         WHERE NOT EXISTS (SELECT 1 FROM medications)
-    "#).execute(pool).await.ok();
+    "#,
+    )
+    .execute(pool)
+    .await
+    .ok();
 
     // ── 4b. Nursing Station (SRS §2.7 — Phase 6.1, 2026-09-05) ───────────
     //
@@ -1247,19 +1749,31 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     "#).execute(pool).await.map_err(|e| format!("medication_administrations: {}", e))?;
 
     // Integrity: MAR status must be a known value.
-    sqlx::query("ALTER TABLE medication_administrations DROP CONSTRAINT IF EXISTS chk_mar_status").execute(pool).await.ok();
+    sqlx::query("ALTER TABLE medication_administrations DROP CONSTRAINT IF EXISTS chk_mar_status")
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query(
         "ALTER TABLE medication_administrations ADD CONSTRAINT chk_mar_status \
          CHECK (status IN ('administered', 'held', 'refused'))",
-    ).execute(pool).await.map_err(|e| format!("chk_mar_status: {}", e))?;
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("chk_mar_status: {}", e))?;
 
     // Indexes for the ward workflow queries.
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_vitals_admission ON vitals(admission_id, recorded_at DESC)").execute(pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_vitals_admission ON vitals(admission_id, recorded_at DESC)",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_nurse_notes_admission ON nurse_notes(admission_id, created_at DESC)").execute(pool).await.ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_mar_admission ON medication_administrations(admission_id, administered_at DESC)").execute(pool).await.ok();
 
     // ── Radiology tables (FR-0140–FR-0142) ──────────────────────────────
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS radiology_orders (
             id                      SERIAL PRIMARY KEY,
             patient_id              INT NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
@@ -1288,9 +1802,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("radiology_orders: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("radiology_orders: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS radiology_reports (
             id                      SERIAL PRIMARY KEY,
             order_id                INT NOT NULL REFERENCES radiology_orders(id) ON DELETE CASCADE,
@@ -1305,9 +1824,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-    "#).execute(pool).await.map_err(|e| format!("radiology_reports: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("radiology_reports: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS radiology_attachments (
             id                      SERIAL PRIMARY KEY,
             order_id                INT NOT NULL REFERENCES radiology_orders(id) ON DELETE CASCADE,
@@ -1321,9 +1845,14 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             operator                VARCHAR(200),
             future_pacs_id          VARCHAR(200)
         )
-    "#).execute(pool).await.map_err(|e| format!("radiology_attachments: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("radiology_attachments: {}", e))?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS radiology_status_history (
             id                      SERIAL PRIMARY KEY,
             order_id                INT NOT NULL REFERENCES radiology_orders(id) ON DELETE CASCADE,
@@ -1332,22 +1861,46 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             changed_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             notes                   TEXT
         )
-    "#).execute(pool).await.map_err(|e| format!("radiology_status_history: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("radiology_status_history: {}", e))?;
 
     // Indexes for performance (500k+ studies)
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rad_orders_patient ON radiology_orders(patient_id)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rad_orders_status ON radiology_orders(status)").execute(pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_rad_orders_patient ON radiology_orders(patient_id)",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rad_orders_status ON radiology_orders(status)")
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_rad_orders_doctor ON radiology_orders(ordered_by_doctor_id)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rad_orders_priority ON radiology_orders(priority)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rad_orders_date ON radiology_orders(ordered_at)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rad_reports_order ON radiology_reports(order_id)").execute(pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rad_orders_priority ON radiology_orders(priority)")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rad_orders_date ON radiology_orders(ordered_at)")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_rad_reports_order ON radiology_reports(order_id)")
+        .execute(pool)
+        .await
+        .ok();
     // P1-1: Partial index for soft-delete filtering — speeds up the common
     // "WHERE deleted_at IS NULL" query at scale.
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_rad_orders_active ON radiology_orders(ordered_at DESC) WHERE deleted_at IS NULL").execute(pool).await.ok();
 
     // P1-1: SEQUENCE for concurrency-safe order number generation.
     // Replaces the COUNT(*)+1 pattern that had a race condition.
-    sqlx::query("CREATE SEQUENCE IF NOT EXISTS radiology_order_seq START 1").execute(pool).await.ok();
+    sqlx::query("CREATE SEQUENCE IF NOT EXISTS radiology_order_seq START 1")
+        .execute(pool)
+        .await
+        .ok();
 
     // P0-4: UNIQUE constraint on radiology_reports.order_id — enforces
     // one-report-per-order at the database level (concurrency protection).
@@ -1357,11 +1910,15 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // P0-5: Soft-delete columns on radiology_orders — preserves clinical
     // history (HIPAA §164.530(j) 6-year retention).
     sqlx::query("ALTER TABLE radiology_orders ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ")
-        .execute(pool).await.ok();
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query("ALTER TABLE radiology_orders ADD COLUMN IF NOT EXISTS deleted_by_user_id INT REFERENCES users(id) ON DELETE SET NULL")
         .execute(pool).await.ok();
     sqlx::query("ALTER TABLE radiology_orders ADD COLUMN IF NOT EXISTS deleted_reason TEXT")
-        .execute(pool).await.ok();
+        .execute(pool)
+        .await
+        .ok();
 
     // ── Blood Bank tables (Phase 2-E, SRS FR-0145–FR-0149) ───────────────
     //
@@ -1623,7 +2180,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     "#).execute(pool).await.map_err(|e| format!("blood_discards: {}", e))?;
 
     // 9. Status history — audit trail of every blood-unit lifecycle change.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS blood_unit_status_history (
             id                      SERIAL PRIMARY KEY,
             unit_id                 INT NOT NULL REFERENCES blood_units(id) ON DELETE CASCADE,
@@ -1634,7 +2192,11 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             related_record_type     VARCHAR(30),
             related_record_id       INT
         )
-    "#).execute(pool).await.map_err(|e| format!("blood_unit_status_history: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("blood_unit_status_history: {}", e))?;
 
     // 10. Inventory movements — every movement of a unit in/out of storage
     //     for full chain-of-custody traceability (FR-0149).
@@ -1657,7 +2219,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
 
     // 11. ABO/Rh compatibility matrix — reference table used by cross-match
     //     validation. Seeded with standard ISBT compatibility rules.
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS blood_compatibility_matrix (
             id                      SERIAL PRIMARY KEY,
             recipient_group         VARCHAR(5) NOT NULL,
@@ -1671,42 +2234,92 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             CONSTRAINT chk_compat_donor_group CHECK (donor_group IN ('A','B','AB','O')),
             CONSTRAINT chk_compat_donor_rh CHECK (donor_rh IN ('+','-'))
         )
-    "#).execute(pool).await.map_err(|e| format!("blood_compatibility_matrix: {}", e))?;
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("blood_compatibility_matrix: {}", e))?;
 
     // Seed the standard ABO/Rh compatibility matrix (only if empty).
     let compat_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blood_compatibility_matrix")
-        .fetch_one(pool).await.unwrap_or(0);
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
     if compat_count == 0 {
         // ISBT-compatible pairings: (recipient ABO+Rh, donor ABO+Rh, compatible)
         let rows: &[(&str, &str, &str, &str, bool)] = &[
             // O- recipient can receive O- only
-            ("O","-","O","-",true),
-            ("O","-","O","+",false), ("O","-","A","+",false), ("O","-","A","-",false),
-            ("O","-","B","+",false), ("O","-","B","-",false), ("O","-","AB","+",false), ("O","-","AB","-",false),
+            ("O", "-", "O", "-", true),
+            ("O", "-", "O", "+", false),
+            ("O", "-", "A", "+", false),
+            ("O", "-", "A", "-", false),
+            ("O", "-", "B", "+", false),
+            ("O", "-", "B", "-", false),
+            ("O", "-", "AB", "+", false),
+            ("O", "-", "AB", "-", false),
             // O+ recipient can receive O- and O+
-            ("O","+","O","-",true), ("O","+","O","+",true),
-            ("O","+","A","+",false), ("O","+","A","-",false), ("O","+","B","+",false), ("O","+","B","-",false),
-            ("O","+","AB","+",false), ("O","+","AB","-",false),
+            ("O", "+", "O", "-", true),
+            ("O", "+", "O", "+", true),
+            ("O", "+", "A", "+", false),
+            ("O", "+", "A", "-", false),
+            ("O", "+", "B", "+", false),
+            ("O", "+", "B", "-", false),
+            ("O", "+", "AB", "+", false),
+            ("O", "+", "AB", "-", false),
             // A- recipient: A-, O-
-            ("A","-","A","-",true), ("A","-","O","-",true),
-            ("A","-","A","+",false), ("A","-","O","+",false), ("A","-","B","+",false), ("A","-","B","-",false),
-            ("A","-","AB","+",false), ("A","-","AB","-",false),
+            ("A", "-", "A", "-", true),
+            ("A", "-", "O", "-", true),
+            ("A", "-", "A", "+", false),
+            ("A", "-", "O", "+", false),
+            ("A", "-", "B", "+", false),
+            ("A", "-", "B", "-", false),
+            ("A", "-", "AB", "+", false),
+            ("A", "-", "AB", "-", false),
             // A+ recipient: A+, A-, O+, O-
-            ("A","+","A","+",true), ("A","+","A","-",true), ("A","+","O","+",true), ("A","+","O","-",true),
-            ("A","+","B","+",false), ("A","+","B","-",false), ("A","+","AB","+",false), ("A","+","AB","-",false),
+            ("A", "+", "A", "+", true),
+            ("A", "+", "A", "-", true),
+            ("A", "+", "O", "+", true),
+            ("A", "+", "O", "-", true),
+            ("A", "+", "B", "+", false),
+            ("A", "+", "B", "-", false),
+            ("A", "+", "AB", "+", false),
+            ("A", "+", "AB", "-", false),
             // B- recipient: B-, O-
-            ("B","-","B","-",true), ("B","-","O","-",true),
-            ("B","-","B","+",false), ("B","-","O","+",false), ("B","-","A","+",false), ("B","-","A","-",false),
-            ("B","-","AB","+",false), ("B","-","AB","-",false),
+            ("B", "-", "B", "-", true),
+            ("B", "-", "O", "-", true),
+            ("B", "-", "B", "+", false),
+            ("B", "-", "O", "+", false),
+            ("B", "-", "A", "+", false),
+            ("B", "-", "A", "-", false),
+            ("B", "-", "AB", "+", false),
+            ("B", "-", "AB", "-", false),
             // B+ recipient: B+, B-, O+, O-
-            ("B","+","B","+",true), ("B","+","B","-",true), ("B","+","O","+",true), ("B","+","O","-",true),
-            ("B","+","A","+",false), ("B","+","A","-",false), ("B","+","AB","+",false), ("B","+","AB","-",false),
+            ("B", "+", "B", "+", true),
+            ("B", "+", "B", "-", true),
+            ("B", "+", "O", "+", true),
+            ("B", "+", "O", "-", true),
+            ("B", "+", "A", "+", false),
+            ("B", "+", "A", "-", false),
+            ("B", "+", "AB", "+", false),
+            ("B", "+", "AB", "-", false),
             // AB- recipient: AB-, A-, B-, O-
-            ("AB","-","AB","-",true), ("AB","-","A","-",true), ("AB","-","B","-",true), ("AB","-","O","-",true),
-            ("AB","-","AB","+",false), ("AB","-","A","+",false), ("AB","-","B","+",false), ("AB","-","O","+",false),
+            ("AB", "-", "AB", "-", true),
+            ("AB", "-", "A", "-", true),
+            ("AB", "-", "B", "-", true),
+            ("AB", "-", "O", "-", true),
+            ("AB", "-", "AB", "+", false),
+            ("AB", "-", "A", "+", false),
+            ("AB", "-", "B", "+", false),
+            ("AB", "-", "O", "+", false),
             // AB+ recipient: universal — all 8 types
-            ("AB","+","AB","+",true), ("AB","+","AB","-",true), ("AB","+","A","+",true), ("AB","+","A","-",true),
-            ("AB","+","B","+",true), ("AB","+","B","-",true), ("AB","+","O","+",true), ("AB","+","O","-",true),
+            ("AB", "+", "AB", "+", true),
+            ("AB", "+", "AB", "-", true),
+            ("AB", "+", "A", "+", true),
+            ("AB", "+", "A", "-", true),
+            ("AB", "+", "B", "+", true),
+            ("AB", "+", "B", "-", true),
+            ("AB", "+", "O", "+", true),
+            ("AB", "+", "O", "-", true),
         ];
         for (rg, rr, dg, dr, comp) in rows {
             sqlx::query(
@@ -1717,41 +2330,121 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     }
 
     // ── Blood Bank indexes (performance for 1M units, 100k donors) ───────
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_units_status ON blood_units(status)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_units_group ON blood_units(blood_group, rh_factor)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_units_component ON blood_units(component_type)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_units_donor ON blood_units(donor_id)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_units_expiry ON blood_units(expiry_date)").execute(pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_units_status ON blood_units(status)")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_blood_units_group ON blood_units(blood_group, rh_factor)",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_blood_units_component ON blood_units(component_type)",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_units_donor ON blood_units(donor_id)")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_units_expiry ON blood_units(expiry_date)")
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_units_patient ON blood_units(reserved_for_patient_id) WHERE reserved_for_patient_id IS NOT NULL").execute(pool).await.ok();
     // Partial index: the common query "available units not deleted" is index-accelerated.
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_units_available ON blood_units(blood_group, rh_factor, component_type) WHERE status = 'available' AND deleted_at IS NULL").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_donors_number ON blood_donors(donor_number)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_donors_name ON blood_donors(first_name, last_name)").execute(pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_donors_number ON blood_donors(donor_number)")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_blood_donors_name ON blood_donors(first_name, last_name)",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_donors_group ON blood_donors(blood_group, rh_factor) WHERE deleted_at IS NULL").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_donations_donor ON blood_donations(donor_id)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_donations_date ON blood_donations(donation_date)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_crossmatch_unit ON blood_crossmatch_results(unit_id)").execute(pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_blood_donations_donor ON blood_donations(donor_id)",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_blood_donations_date ON blood_donations(donation_date)",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_blood_crossmatch_unit ON blood_crossmatch_results(unit_id)",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_crossmatch_patient ON blood_crossmatch_results(patient_id)").execute(pool).await.ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_reservations_patient ON blood_reservations(patient_id)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_reservations_unit ON blood_reservations(unit_id)").execute(pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_blood_reservations_unit ON blood_reservations(unit_id)",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_reservations_active ON blood_reservations(expires_at) WHERE status = 'active'").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_issues_patient ON blood_issues(patient_id)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_issues_unit ON blood_issues(unit_id)").execute(pool).await.ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_issues_patient ON blood_issues(patient_id)")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_issues_unit ON blood_issues(unit_id)")
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_transfusions_patient ON blood_transfusions(patient_id)").execute(pool).await.ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_unit_history_unit ON blood_unit_status_history(unit_id)").execute(pool).await.ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_blood_movements_unit ON blood_inventory_movements(unit_id)").execute(pool).await.ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_blood_movements_unit ON blood_inventory_movements(unit_id)",
+    )
+    .execute(pool)
+    .await
+    .ok();
 
     // SEQUENCE for concurrency-safe unit-number generation (mirrors radiology_order_seq).
-    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_unit_seq START 1").execute(pool).await.ok();
-    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_donor_seq START 1").execute(pool).await.ok();
-    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_donation_seq START 1").execute(pool).await.ok();
-    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_reservation_seq START 1").execute(pool).await.ok();
-    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_issue_seq START 1").execute(pool).await.ok();
-    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_transfusion_seq START 1").execute(pool).await.ok();
-    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_discard_seq START 1").execute(pool).await.ok();
+    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_unit_seq START 1")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_donor_seq START 1")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_donation_seq START 1")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_reservation_seq START 1")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_issue_seq START 1")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_transfusion_seq START 1")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE SEQUENCE IF NOT EXISTS blood_discard_seq START 1")
+        .execute(pool)
+        .await
+        .ok();
 
     // Seed default roles, permissions, and a bootstrap admin once.
-    crate::auth::seed_defaults(pool).await
+    crate::auth::seed_defaults(pool)
+        .await
         .map_err(|e| format!("seed_defaults: {}", e))?;
 
     Ok(())

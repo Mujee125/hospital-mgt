@@ -25,8 +25,16 @@ use hospital_mgmt_lib::commands::backup;
 #[test]
 fn ph2_validate_filename_rejects_traversal() {
     for bad in [
-        "", ".", "..", "a/b.sql", "a\\b.sql", "..\\..\\evil.sql", "C:\\x\\y.sql",
-        "backup.txt", "backup", "name.sql.exe",
+        "",
+        ".",
+        "..",
+        "a/b.sql",
+        "a\\b.sql",
+        "..\\..\\evil.sql",
+        "C:\\x\\y.sql",
+        "backup.txt",
+        "backup",
+        "name.sql.exe",
         // ".sql" (a dotfile named ".sql") is accepted by the current guard's
         // letter-by-letter rules but is a pathological edge — asserted as
         // accepted here to pin CURRENT behavior; tightening it would break
@@ -76,7 +84,11 @@ async fn ph2_backup_restore_round_trip() {
     let url = std::env::var("HMS_TEST_DB_URL").unwrap();
     let (creds_and_host, _db) = url.rsplit_once('/').unwrap();
     let (user_pass, host_port) = creds_and_host.rsplit_once('@').unwrap();
-    let (user, pass) = user_pass.strip_prefix("postgresql://").unwrap().split_once(':').unwrap();
+    let (user, pass) = user_pass
+        .strip_prefix("postgresql://")
+        .unwrap()
+        .split_once(':')
+        .unwrap();
     let (host, port) = host_port.split_once(':').unwrap();
 
     let tmp = std::env::temp_dir().join(format!("hms_bk_test_{}", rand_nanos()));
@@ -84,12 +96,17 @@ async fn ph2_backup_restore_round_trip() {
     let dump_path = tmp.join("roundtrip.sql");
 
     let dump = tokio::process::Command::new("C:/ProgramData/HMS/pgsql/bin/pg_dump.exe")
-        .arg("-h").arg(host)
-        .arg("-p").arg(port)
-        .arg("-U").arg(user)
+        .arg("-h")
+        .arg(host)
+        .arg("-p")
+        .arg(port)
+        .arg("-U")
+        .arg(user)
         .arg("-Fc")
-        .arg("-d").arg("hospital_db_test")
-        .arg("--file").arg(&dump_path)
+        .arg("-d")
+        .arg("hospital_db_test")
+        .arg("--file")
+        .arg(&dump_path)
         .env("PGPASSWORD", pass)
         .output()
         .await
@@ -119,12 +136,16 @@ async fn ph2_backup_restore_round_trip() {
 
     // ── Restore (replicates restore_backup's pg_restore invocation) ──
     let restore = tokio::process::Command::new("C:/ProgramData/HMS/pgsql/bin/pg_restore.exe")
-        .arg("-h").arg(host)
-        .arg("-p").arg(port)
-        .arg("-U").arg(user)
+        .arg("-h")
+        .arg(host)
+        .arg("-p")
+        .arg(port)
+        .arg("-U")
+        .arg(user)
         .arg("--clean")
         .arg("--if-exists")
-        .arg("-d").arg("hospital_db_test")
+        .arg("-d")
+        .arg("hospital_db_test")
         .arg(&dump_path)
         .env("PGPASSWORD", pass)
         .output()
@@ -141,23 +162,23 @@ async fn ph2_backup_restore_round_trip() {
 
     // ── Verify: fresh pool (post-restore, like the app's restart advice) ──
     let pool2 = test_pool().await;
-    let marker: Option<(i32,)> = sqlx::query_as(
-        "SELECT id FROM patients WHERE first_name = $1 AND deleted_at IS NULL",
-    )
-    .bind(&marker_patient)
-    .fetch_optional(&pool2)
-    .await
-    .unwrap();
+    let marker: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM patients WHERE first_name = $1 AND deleted_at IS NULL")
+            .bind(&marker_patient)
+            .fetch_optional(&pool2)
+            .await
+            .unwrap();
     assert!(marker.is_some(), "marker row must be BACK after restore");
 
-    let after: Option<(i32,)> = sqlx::query_as(
-        "SELECT id FROM patients WHERE first_name = $1",
-    )
-    .bind(&after_name)
-    .fetch_optional(&pool2)
-    .await
-    .unwrap();
-    assert!(after.is_none(), "post-backup mutation must be GONE after restore");
+    let after: Option<(i32,)> = sqlx::query_as("SELECT id FROM patients WHERE first_name = $1")
+        .bind(&after_name)
+        .fetch_optional(&pool2)
+        .await
+        .unwrap();
+    assert!(
+        after.is_none(),
+        "post-backup mutation must be GONE after restore"
+    );
 
     // Schema objects survive intact (a constraint still enforced).
     let bad = sqlx::query(
@@ -231,7 +252,11 @@ fn phase7_prune_keeps_newest_n_and_spares_non_sql() {
         survivors.contains(&"prune_notes.txt".to_string()),
         "non-.sql files must never be pruned"
     );
-    assert_eq!(survivors.len(), 3, "exactly the newest 2 archives + the txt file");
+    assert_eq!(
+        survivors.len(),
+        3,
+        "exactly the newest 2 archives + the txt file"
+    );
 
     // keep=0 is rejected — retention must always keep at least one backup.
     assert!(backup::prune_backups_in(&dir, 0).is_err());

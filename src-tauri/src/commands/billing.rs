@@ -21,14 +21,14 @@
 //!   • Insurance/TPA claims track draft→submitted→settled per bill+insurer.
 //!   • Discounts above the threshold (5% of gross) require BillingApprove.
 
-use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use sqlx::{PgPool, Row};
 
 use crate::audit;
 use crate::models::{
-    Bill, BillItem, CreateAdvance, CreateBill, CreateInsuranceClaim, CreatePayment,
-    CreateRefund, InsuranceClaim, PatientAdvance, Payment, Refund, UpdateClaimStatus,
+    Bill, BillItem, CreateAdvance, CreateBill, CreateInsuranceClaim, CreatePayment, CreateRefund,
+    InsuranceClaim, PatientAdvance, Payment, Refund, UpdateClaimStatus,
 };
 use crate::rbac::{self, Permission, SessionState};
 
@@ -62,14 +62,18 @@ pub async fn get_bills(
 ) -> Result<Vec<Bill>, String> {
     let _ = rbac::require(&session, Permission::BillingView)?;
     let q = match status_filter.as_deref() {
-        Some(s) if !s.is_empty() => format!("{} WHERE b.status = $1 ORDER BY b.created_at DESC", SELECT_BILLS),
+        Some(s) if !s.is_empty() => format!(
+            "{} WHERE b.status = $1 ORDER BY b.created_at DESC",
+            SELECT_BILLS
+        ),
         _ => format!("{} ORDER BY b.created_at DESC", SELECT_BILLS),
     };
     let mut query = sqlx::query_as::<_, Bill>(&q);
     if let Some(s) = status_filter.filter(|s| !s.is_empty()) {
         query = query.bind(s);
     }
-    query.fetch_all(pool.inner())
+    query
+        .fetch_all(pool.inner())
         .await
         .map_err(|e| format!("Get bills: {}", e))
 }
@@ -155,7 +159,10 @@ pub async fn create_bill_core(
         }
     }
 
-    let mut tx = pool.begin().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     // Sequential, immutable invoice number from the SEQUENCE — assigned
     // inside the same transaction as the INSERT (Phase 6.3; replaces the
@@ -164,11 +171,7 @@ pub async fn create_bill_core(
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
-    let bill_number = format!(
-        "INV-{}-{:0>6}",
-        chrono::Utc::now().format("%Y"),
-        seq.0
-    );
+    let bill_number = format!("INV-{}-{:0>6}", chrono::Utc::now().format("%Y"), seq.0);
 
     let row: (i32,) = sqlx::query_as(
         r#"INSERT INTO bills
@@ -208,7 +211,9 @@ pub async fn create_bill_core(
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
     }
 
-    tx.commit().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(pool, &s, "bill_create", "bills",
         Some(&row.0.to_string()),
@@ -241,16 +246,18 @@ pub async fn record_payment(
         return Err("Invalid payment amount.".to_string());
     }
 
-    let mut tx = pool.begin().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     // A cancelled (credit-noted) bill can never receive money.
-    let live: Option<(i32,)> = sqlx::query_as(
-        "SELECT id FROM bills WHERE id = $1 AND status <> 'cancelled' FOR UPDATE",
-    )
-    .bind(payment.bill_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let live: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM bills WHERE id = $1 AND status <> 'cancelled' FOR UPDATE")
+            .bind(payment.bill_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| crate::db::sanitize_db_error(&e))?;
     if live.is_none() {
         return Err("This bill is cancelled — payments are closed on it.".to_string());
     }
@@ -283,11 +290,19 @@ pub async fn record_payment(
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    tx.commit().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    audit::for_session(pool.inner(), &s, "payment_record", "payments",
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "payment_record",
+        "payments",
         Some(&row.0.to_string()),
-        Some(serde_json::json!({"bill_id": payment.bill_id, "amount": payment.amount}))).await;
+        Some(serde_json::json!({"bill_id": payment.bill_id, "amount": payment.amount})),
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -337,16 +352,18 @@ pub async fn record_refund_core(
         return Err("A refund reason is required.".to_string());
     }
 
-    let mut tx = pool.begin().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     // Lock the bill row: serializes concurrent refunds on the same bill.
-    let bill: Option<(Decimal,)> = sqlx::query_as(
-        "SELECT net_amount FROM bills WHERE id = $1 FOR UPDATE",
-    )
-    .bind(refund.bill_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let bill: Option<(Decimal,)> =
+        sqlx::query_as("SELECT net_amount FROM bills WHERE id = $1 FOR UPDATE")
+            .bind(refund.bill_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| crate::db::sanitize_db_error(&e))?;
     if bill.is_none() {
         return Err("Bill not found.".to_string());
     }
@@ -395,7 +412,9 @@ pub async fn record_refund_core(
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    tx.commit().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(pool, &s, "refund_record", "refunds",
         Some(&row.0.to_string()),
@@ -454,9 +473,15 @@ pub async fn record_advance_core(
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    audit::for_session(pool, &s, "advance_record", "patient_advances",
+    audit::for_session(
+        pool,
+        &s,
+        "advance_record",
+        "patient_advances",
         Some(&row.0.to_string()),
-        Some(serde_json::json!({"patient_id": advance.patient_id, "amount": advance.amount}))).await;
+        Some(serde_json::json!({"patient_id": advance.patient_id, "amount": advance.amount})),
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -487,7 +512,10 @@ pub async fn apply_advance_core(
         return Err("Invalid application amount.".to_string());
     }
 
-    let mut tx = pool.begin().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     // Lock the advance; read remaining + status.
     let adv: Option<(Decimal, String, i32)> = sqlx::query_as(
@@ -497,14 +525,19 @@ pub async fn apply_advance_core(
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
-    let (remaining, status, patient_id) =
-        adv.ok_or_else(|| "Advance not found.".to_string())?;
+    let (remaining, status, patient_id) = adv.ok_or_else(|| "Advance not found.".to_string())?;
     if status != "active" {
-        return Err(format!("This advance is {} — only active advances can be applied.", status));
+        return Err(format!(
+            "This advance is {} — only active advances can be applied.",
+            status
+        ));
     }
     let amt = dec(amount);
     if amt > remaining {
-        return Err(format!("Application amount exceeds the advance balance ({}).", remaining));
+        return Err(format!(
+            "Application amount exceeds the advance balance ({}).",
+            remaining
+        ));
     }
 
     // The bill must belong to the same patient and not be cancelled.
@@ -559,11 +592,19 @@ pub async fn apply_advance_core(
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    tx.commit().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    audit::for_session(pool, &s, "advance_applied", "patient_advances",
+    audit::for_session(
+        pool,
+        &s,
+        "advance_applied",
+        "patient_advances",
         Some(&advance_id.to_string()),
-        Some(serde_json::json!({"bill_id": bill_id, "amount": amount}))).await;
+        Some(serde_json::json!({"bill_id": bill_id, "amount": amount})),
+    )
+    .await;
     Ok(())
 }
 
@@ -619,7 +660,10 @@ pub async fn cancel_bill_core(
         return Err("A cancellation reason is required.".to_string());
     }
 
-    let mut tx = pool.begin().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     let seq: (i64,) = sqlx::query_as("SELECT NEXTVAL('bill_number_seq')")
         .fetch_one(&mut *tx)
@@ -646,15 +690,23 @@ pub async fn cancel_bill_core(
         .try_get::<String, _>(0)
         .map_err(|e| format!("Read bill number: {}", e))?;
 
-    tx.commit().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    audit::for_session(pool, &s, "bill_cancelled", "bills",
+    audit::for_session(
+        pool,
+        &s,
+        "bill_cancelled",
+        "bills",
         Some(&bill_id.to_string()),
         Some(serde_json::json!({
             "bill_number": bill_number,
             "credit_note": credit_note,
             "reason": reason,
-        }))).await;
+        })),
+    )
+    .await;
     Ok(credit_note)
 }
 
@@ -683,15 +735,16 @@ pub async fn create_insurance_claim_core(
     }
 
     // Claim attaches to an existing, non-cancelled bill.
-    let bill: Option<(i32,)> = sqlx::query_as(
-        "SELECT patient_id FROM bills WHERE id = $1 AND status <> 'cancelled'",
-    )
-    .bind(claim.bill_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let bill: Option<(i32,)> =
+        sqlx::query_as("SELECT patient_id FROM bills WHERE id = $1 AND status <> 'cancelled'")
+            .bind(claim.bill_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| crate::db::sanitize_db_error(&e))?;
     let patient_id = bill
-        .ok_or_else(|| "Bill not found (or cancelled) — claims attach to live bills only.".to_string())?
+        .ok_or_else(|| {
+            "Bill not found (or cancelled) — claims attach to live bills only.".to_string()
+        })?
         .0;
 
     let row: (i32,) = sqlx::query_as(
@@ -737,16 +790,13 @@ pub async fn update_insurance_claim_status_core(
 ) -> Result<(), String> {
     let s = rbac::require_strong(session_state, pool, Permission::BillingManage).await?;
 
-    let current: Option<(String,)> = sqlx::query_as(
-        "SELECT status FROM insurance_claims WHERE id = $1",
-    )
-    .bind(update.id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| crate::db::sanitize_db_error(&e))?;
-    let current_status = current
-        .ok_or_else(|| "Claim not found.".to_string())?
-        .0;
+    let current: Option<(String,)> =
+        sqlx::query_as("SELECT status FROM insurance_claims WHERE id = $1")
+            .bind(update.id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let current_status = current.ok_or_else(|| "Claim not found.".to_string())?.0;
 
     // State machine: only forward moves through the pipeline.
     let allowed: &[(&str, &[&str])] = &[
@@ -790,21 +840,26 @@ pub async fn update_insurance_claim_status_core(
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    audit::for_session(pool, &s, "insurance_claim_status", "insurance_claims",
+    audit::for_session(
+        pool,
+        &s,
+        "insurance_claim_status",
+        "insurance_claims",
         Some(&update.id.to_string()),
-        Some(serde_json::json!({"to": update.status, "from": current_status}))).await;
+        Some(serde_json::json!({"to": update.status, "from": current_status})),
+    )
+    .await;
 
     // Phase 9: a settled claim is money the billing desk should follow up
     // on (reconcile the insurer payment into the bill). Best-effort.
     if update.status == "settled" {
-        let info: Option<(String, i32)> = sqlx::query_as(
-            "SELECT c.insurer, c.bill_id FROM insurance_claims c WHERE c.id = $1",
-        )
-        .bind(update.id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
+        let info: Option<(String, i32)> =
+            sqlx::query_as("SELECT c.insurer, c.bill_id FROM insurance_claims c WHERE c.id = $1")
+                .bind(update.id)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
         if let Some((insurer, bill_id)) = info {
             let title = format!("Claim settled: {} (bill #{})", insurer, bill_id);
             let body = format!(
@@ -822,7 +877,9 @@ pub async fn update_insurance_claim_status_core(
                     entity_type: Some("bill".into()),
                     entity_id: Some(bill_id),
                 },
-            ).await {
+            )
+            .await
+            {
                 eprintln!("[HMS Billing] notification emit failed (non-fatal): {}", e);
             }
         }
@@ -849,14 +906,17 @@ pub async fn get_insurance_claims(
         LEFT JOIN bills b ON b.id = c.bill_id
     "#;
     let q = match status_filter.as_deref() {
-        Some(s) if !s.is_empty() => format!("{} WHERE c.status = $1 ORDER BY c.created_at DESC", base),
+        Some(s) if !s.is_empty() => {
+            format!("{} WHERE c.status = $1 ORDER BY c.created_at DESC", base)
+        }
         _ => format!("{} ORDER BY c.created_at DESC LIMIT 200", base),
     };
     let mut query = sqlx::query_as::<_, InsuranceClaim>(&q);
     if let Some(s) = status_filter.filter(|s| !s.is_empty()) {
         query = query.bind(s);
     }
-    query.fetch_all(pool.inner())
+    query
+        .fetch_all(pool.inner())
         .await
         .map_err(|e| format!("Get claims: {}", e))
 }

@@ -104,7 +104,11 @@ pub async fn global_search_core(
             let mut sub = mrn.clone();
             if let Some(p) = &phone {
                 if !p.is_empty() {
-                    sub = if sub.is_empty() { p.clone() } else { format!("{} · {}", sub, p) };
+                    sub = if sub.is_empty() {
+                        p.clone()
+                    } else {
+                        format!("{} · {}", sub, p)
+                    };
                 }
             }
             if !gender.is_empty() {
@@ -348,7 +352,11 @@ pub async fn global_search_core(
             let mut sub = generic;
             if let Some(m) = maker {
                 if !m.is_empty() {
-                    sub = if sub.is_empty() { m } else { format!("{} · {}", sub, m) };
+                    sub = if sub.is_empty() {
+                        m
+                    } else {
+                        format!("{} · {}", sub, m)
+                    };
                 }
             }
             hits.push(GlobalSearchHit {
@@ -477,7 +485,11 @@ pub async fn global_search_core(
         .await
         .map_err(|e| format!("Search users: {}", e))?;
         for (id, name, username, active) in rows {
-            let sub = if active { username } else { format!("{} · inactive", username) };
+            let sub = if active {
+                username
+            } else {
+                format!("{} · inactive", username)
+            };
             hits.push(GlobalSearchHit {
                 entity_type: "user".into(),
                 id,

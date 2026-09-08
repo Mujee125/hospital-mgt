@@ -65,7 +65,10 @@ pub async fn get_medications(
                 .await
         }
         None => {
-            let q = format!("{} ORDER BY is_active DESC, brand_name ASC", SELECT_MEDICATIONS);
+            let q = format!(
+                "{} ORDER BY is_active DESC, brand_name ASC",
+                SELECT_MEDICATIONS
+            );
             sqlx::query_as::<_, Medication>(&q)
                 .fetch_all(pool.inner())
                 .await
@@ -321,7 +324,10 @@ pub async fn get_prescription(
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    Ok(PrescriptionWithItems { prescription, items })
+    Ok(PrescriptionWithItems {
+        prescription,
+        items,
+    })
 }
 
 /// Create a prescription with one or more line items. The whole insert is
@@ -371,7 +377,10 @@ pub async fn create_prescription_core(
         }
     }
 
-    let mut tx = pool.begin().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     let row: (i32,) = sqlx::query_as(
         r#"INSERT INTO prescriptions
@@ -430,7 +439,9 @@ pub async fn create_prescription_core(
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
     }
 
-    tx.commit().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(
         pool,
@@ -487,7 +498,10 @@ pub async fn dispense_prescription_item(
 ) -> Result<(), String> {
     let s = rbac::require_strong(&session, pool.inner(), Permission::InventoryManage).await?;
 
-    let mut tx = pool.begin().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     // Lock the prescription_item row and read its current state.
     let item_row: Option<(i32, i32, String, i32, bool)> = sqlx::query_as(
@@ -499,9 +513,8 @@ pub async fn dispense_prescription_item(
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    let (item_id, rx_id, med_name, qty, already_dispensed) = item_row.ok_or_else(|| {
-        format!("Prescription item {} not found.", prescription_item_id)
-    })?;
+    let (item_id, rx_id, med_name, qty, already_dispensed) =
+        item_row.ok_or_else(|| format!("Prescription item {} not found.", prescription_item_id))?;
 
     if already_dispensed {
         return Err("This prescription item has already been dispensed.".to_string());
@@ -537,12 +550,14 @@ pub async fn dispense_prescription_item(
                 med_name, current_balance, qty
             ));
         }
-        sqlx::query("UPDATE inventory_items SET stock_quantity = $1, updated_at = NOW() WHERE id = $2")
-            .bind(new_balance)
-            .bind(inv_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| crate::db::sanitize_db_error(&e))?;
+        sqlx::query(
+            "UPDATE inventory_items SET stock_quantity = $1, updated_at = NOW() WHERE id = $2",
+        )
+        .bind(new_balance)
+        .bind(inv_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
         sqlx::query(
             r#"INSERT INTO inventory_movements
@@ -597,7 +612,9 @@ pub async fn dispense_prescription_item(
     .execute(&mut *tx)
     .await;
 
-    tx.commit().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(
         pool.inner(),

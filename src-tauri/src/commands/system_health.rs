@@ -92,7 +92,9 @@ pub async fn get_system_health(
     let (disk_free, disk_total) = disk_free_on_backups_volume();
 
     Ok(SystemHealth {
-        server_time: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        server_time: chrono::Utc::now()
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         db_name,
         db_size_bytes: db_size,
@@ -115,7 +117,9 @@ fn scan_backups() -> (i64, Option<i64>, Option<String>) {
     let Some(program_data) = std::env::var_os("ProgramData") else {
         return (0, None, None);
     };
-    let dir = std::path::Path::new(&program_data).join("HMS").join("backups");
+    let dir = std::path::Path::new(&program_data)
+        .join("HMS")
+        .join("backups");
     let Ok(read) = std::fs::read_dir(&dir) else {
         return (0, None, None);
     };
@@ -144,11 +148,7 @@ fn scan_backups() -> (i64, Option<i64>, Option<String>) {
             .unwrap_or(0);
         age / 3600
     });
-    (
-        count,
-        latest_age_hours,
-        newest.map(|(_, n)| n),
-    )
+    (count, latest_age_hours, newest.map(|(_, n)| n))
 }
 
 /// Free/total bytes on the volume hosting %ProgramData% (where the backups

@@ -30,9 +30,7 @@
 mod common;
 
 use common::*;
-use hospital_mgmt_lib::commands::lab::{
-    approve_lab_result_core, collect_lab_sample_core,
-};
+use hospital_mgmt_lib::commands::lab::{approve_lab_result_core, collect_lab_sample_core};
 use hospital_mgmt_lib::rbac::SessionState;
 use sqlx::PgPool;
 use std::sync::{Arc, Mutex};
@@ -154,13 +152,12 @@ async fn test_lw1_collect_sample_state_door() {
         "barcode must be '<order_id>-<test_row>' shaped, got: {}",
         barcode
     );
-    let stored: (String, Option<i32>) = sqlx::query_as(
-        "SELECT status, sampled_by_user_id FROM lab_orders WHERE id = $1",
-    )
-    .bind(order_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let stored: (String, Option<i32>) =
+        sqlx::query_as("SELECT status, sampled_by_user_id FROM lab_orders WHERE id = $1")
+            .bind(order_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(stored.0, "sampled");
     assert_eq!(stored.1, Some(tech_id));
 
@@ -198,14 +195,15 @@ async fn test_lw2_full_workflow_resulted_then_approved() {
     enter_result(&pool, tests[0], "98", Some("normal")).await;
     enter_result(&pool, tests[1], "5.2", Some("high")).await;
 
-    let (status,): (String,) = sqlx::query_as(
-        "SELECT status FROM lab_orders WHERE id = $1",
-    )
-    .bind(order_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(status, "resulted", "fully-entered order must await approval, never auto-release");
+    let (status,): (String,) = sqlx::query_as("SELECT status FROM lab_orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        status, "resulted",
+        "fully-entered order must await approval, never auto-release"
+    );
 
     // Approve the first test only — order must REMAIN 'resulted'.
     approve_lab_result_core(&pool, &tech_state, tests[0], false)
@@ -216,19 +214,21 @@ async fn test_lw2_full_workflow_resulted_then_approved() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(status, "resulted", "order with one unapproved test must not be 'approved'");
+    assert_eq!(
+        status, "resulted",
+        "order with one unapproved test must not be 'approved'"
+    );
 
     // Approve the second → order 'approved' with attribution.
     approve_lab_result_core(&pool, &tech_state, tests[1], false)
         .await
         .expect("approve second test");
-    let (status, approver): (String, Option<i32>) = sqlx::query_as(
-        "SELECT status, approved_by_user_id FROM lab_orders WHERE id = $1",
-    )
-    .bind(order_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (status, approver): (String, Option<i32>) =
+        sqlx::query_as("SELECT status, approved_by_user_id FROM lab_orders WHERE id = $1")
+            .bind(order_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(status, "approved");
     assert_eq!(approver, Some(tech_id));
 
@@ -268,13 +268,12 @@ async fn test_lw3_nurse_cannot_approve_results() {
     );
 
     // Unapproved state remains.
-    let (status,): (Option<String>,) = sqlx::query_as(
-        "SELECT approval_status FROM lab_order_tests WHERE id = $1",
-    )
-    .bind(tests[0])
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (status,): (Option<String>,) =
+        sqlx::query_as("SELECT approval_status FROM lab_order_tests WHERE id = $1")
+            .bind(tests[0])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(status.as_deref(), Some("entered"));
 }
 
@@ -316,7 +315,11 @@ async fn test_lw4_critical_release_requires_acknowledgment() {
     .await;
     match raw {
         Ok(res) => {
-            assert_eq!(res.rows_affected(), 0, "CHECK should have blocked the release, or no row matched");
+            assert_eq!(
+                res.rows_affected(),
+                0,
+                "CHECK should have blocked the release, or no row matched"
+            );
         }
         Err(_) => {
             // Postgres raises the CHECK violation — both outcomes prove the backstop.
@@ -335,7 +338,11 @@ async fn test_lw4_critical_release_requires_acknowledgment() {
     .await
     .unwrap();
     assert_eq!(status.as_deref(), Some("approved"));
-    assert_eq!(ack_by, Some(tech_id), "acknowledgment must be attributed to the approver");
+    assert_eq!(
+        ack_by,
+        Some(tech_id),
+        "acknowledgment must be attributed to the approver"
+    );
 }
 
 /// An amended (post-release corrected) result must go back through approval
@@ -358,24 +365,22 @@ async fn test_lw4_amendment_requires_reapproval() {
     // Tech re-enters a corrected value → row becomes 'amended' (mirrors
     // update_lab_result's CASE), which must be re-approved.
     enter_result(&pool, tests[0], "4.4", Some("normal")).await;
-    let (status,): (Option<String>,) = sqlx::query_as(
-        "SELECT approval_status FROM lab_order_tests WHERE id = $1",
-    )
-    .bind(tests[0])
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (status,): (Option<String>,) =
+        sqlx::query_as("SELECT approval_status FROM lab_order_tests WHERE id = $1")
+            .bind(tests[0])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(status.as_deref(), Some("amended"));
 
     approve_lab_result_core(&pool, &tech_state, tests[0], false)
         .await
         .expect("amendment re-approval");
-    let (status,): (Option<String>,) = sqlx::query_as(
-        "SELECT approval_status FROM lab_order_tests WHERE id = $1",
-    )
-    .bind(tests[0])
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (status,): (Option<String>,) =
+        sqlx::query_as("SELECT approval_status FROM lab_order_tests WHERE id = $1")
+            .bind(tests[0])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(status.as_deref(), Some("approved"));
 }

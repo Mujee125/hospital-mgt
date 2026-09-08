@@ -140,20 +140,18 @@ async fn seed_zqx_everywhere(pool: &PgPool) -> ZqxFixtures {
     .unwrap();
 
     // IPD admission (needs a ward + bed to satisfy the NOT NULL FKs).
-    let (ward_id,): (i32,) = sqlx::query_as(
-        "INSERT INTO wards (name, code) VALUES ('ZQX Ward', $1) RETURNING id",
-    )
-    .bind(format!("ZQX{}", std::process::id()))
-    .fetch_one(pool)
-    .await
-    .unwrap();
-    let (bed_id,): (i32,) = sqlx::query_as(
-        "INSERT INTO beds (ward_id, bed_number) VALUES ($1, 'ZQX-01') RETURNING id",
-    )
-    .bind(ward_id)
-    .fetch_one(pool)
-    .await
-    .unwrap();
+    let (ward_id,): (i32,) =
+        sqlx::query_as("INSERT INTO wards (name, code) VALUES ('ZQX Ward', $1) RETURNING id")
+            .bind(format!("ZQX{}", std::process::id()))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let (bed_id,): (i32,) =
+        sqlx::query_as("INSERT INTO beds (ward_id, bed_number) VALUES ($1, 'ZQX-01') RETURNING id")
+            .bind(ward_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
     sqlx::query(
         "INSERT INTO ipd_admissions (patient_id, doctor_id, ward_id, bed_id, admitting_diagnosis) \
          VALUES ($1, $2, $3, $4, 'zqx fever')",
@@ -186,7 +184,10 @@ async fn seed_zqx_everywhere(pool: &PgPool) -> ZqxFixtures {
     .await
     .unwrap();
 
-    ZqxFixtures { _patient_id: patient_id, _doctor_id: doctor_id }
+    ZqxFixtures {
+        _patient_id: patient_id,
+        _doctor_id: doctor_id,
+    }
 }
 
 // ── SST-1: sections follow the signed-in user's permissions ─────────────────
@@ -202,27 +203,70 @@ async fn test_sst1_rbac_sections() {
     let clerk = seed_user(&pool, "sst_clerk", &pw, &["billing_clerk"]).await;
     seed_session_row(&pool, clerk, "hash_sst_clerk").await;
     let clerk_state = state_for(&pool, clerk, "hash_sst_clerk").await;
-    let hits = global_search_core(&pool, &clerk_state, "zqx".to_string()).await.unwrap();
+    let hits = global_search_core(&pool, &clerk_state, "zqx".to_string())
+        .await
+        .unwrap();
     let t = types_of(&hits);
-    assert!(t.contains("patient"), "clerk: patient hit expected, got {:?}", t);
-    assert!(t.contains("invoice"), "clerk: invoice hit expected, got {:?}", t);
-    assert!(t.contains("appointment"), "clerk: appointment hit expected, got {:?}", t);
-    assert!(!t.contains("doctor"), "clerk must NOT see doctor hits: {:?}", t);
-    assert!(!t.contains("inventory_item"), "clerk must NOT see inventory hits: {:?}", t);
-    assert!(!t.contains("lab_order"), "clerk must NOT see lab order hits: {:?}", t);
+    assert!(
+        t.contains("patient"),
+        "clerk: patient hit expected, got {:?}",
+        t
+    );
+    assert!(
+        t.contains("invoice"),
+        "clerk: invoice hit expected, got {:?}",
+        t
+    );
+    assert!(
+        t.contains("appointment"),
+        "clerk: appointment hit expected, got {:?}",
+        t
+    );
+    assert!(
+        !t.contains("doctor"),
+        "clerk must NOT see doctor hits: {:?}",
+        t
+    );
+    assert!(
+        !t.contains("inventory_item"),
+        "clerk must NOT see inventory hits: {:?}",
+        t
+    );
+    assert!(
+        !t.contains("lab_order"),
+        "clerk must NOT see lab order hits: {:?}",
+        t
+    );
 
     // Pharmacist: patients + invoices + inventory. No doctors, appointments,
     // or lab orders.
     let pharm = seed_user(&pool, "sst_pharm", &pw, &["pharmacist"]).await;
     seed_session_row(&pool, pharm, "hash_sst_pharm").await;
     let pharm_state = state_for(&pool, pharm, "hash_sst_pharm").await;
-    let hits = global_search_core(&pool, &pharm_state, "zqx".to_string()).await.unwrap();
+    let hits = global_search_core(&pool, &pharm_state, "zqx".to_string())
+        .await
+        .unwrap();
     let t = types_of(&hits);
-    assert!(t.contains("patient") && t.contains("invoice") && t.contains("inventory_item"),
-        "pharmacist: patient/invoice/inventory expected, got {:?}", t);
-    assert!(!t.contains("doctor"), "pharmacist must NOT see doctor hits: {:?}", t);
-    assert!(!t.contains("appointment"), "pharmacist must NOT see appointment hits: {:?}", t);
-    assert!(!t.contains("lab_order"), "pharmacist must NOT see lab order hits: {:?}", t);
+    assert!(
+        t.contains("patient") && t.contains("invoice") && t.contains("inventory_item"),
+        "pharmacist: patient/invoice/inventory expected, got {:?}",
+        t
+    );
+    assert!(
+        !t.contains("doctor"),
+        "pharmacist must NOT see doctor hits: {:?}",
+        t
+    );
+    assert!(
+        !t.contains("appointment"),
+        "pharmacist must NOT see appointment hits: {:?}",
+        t
+    );
+    assert!(
+        !t.contains("lab_order"),
+        "pharmacist must NOT see lab order hits: {:?}",
+        t
+    );
 
     // Doctor: patients + doctors + lab orders + appointments + invoices +
     // inventory — the seeded doctor role holds all six view permissions
@@ -232,11 +276,16 @@ async fn test_sst1_rbac_sections() {
     let doc = seed_user(&pool, "sst_doc", &pw, &["doctor"]).await;
     seed_session_row(&pool, doc, "hash_sst_doc").await;
     let doc_state = state_for(&pool, doc, "hash_sst_doc").await;
-    let hits = global_search_core(&pool, &doc_state, "zqx".to_string()).await.unwrap();
+    let hits = global_search_core(&pool, &doc_state, "zqx".to_string())
+        .await
+        .unwrap();
     let t = types_of(&hits);
     assert!(
-        t.contains("patient") && t.contains("doctor") && t.contains("lab_order")
-            && t.contains("invoice") && t.contains("inventory_item"),
+        t.contains("patient")
+            && t.contains("doctor")
+            && t.contains("lab_order")
+            && t.contains("invoice")
+            && t.contains("inventory_item"),
         "doctor: all six sections expected, got {:?}",
         t
     );
@@ -246,13 +295,30 @@ async fn test_sst1_rbac_sections() {
     let tech = seed_user(&pool, "sst_tech", &pw, &["lab_technician"]).await;
     seed_session_row(&pool, tech, "hash_sst_tech").await;
     let tech_state = state_for(&pool, tech, "hash_sst_tech").await;
-    let hits = global_search_core(&pool, &tech_state, "zqx".to_string()).await.unwrap();
+    let hits = global_search_core(&pool, &tech_state, "zqx".to_string())
+        .await
+        .unwrap();
     let t = types_of(&hits);
-    assert!(t.contains("patient") && t.contains("lab_order") && t.contains("inventory_item"),
-        "lab tech: patient/lab_order/inventory expected, got {:?}", t);
-    assert!(!t.contains("doctor"), "lab tech must NOT see doctor hits: {:?}", t);
-    assert!(!t.contains("appointment"), "lab tech must NOT see appointment hits: {:?}", t);
-    assert!(!t.contains("invoice"), "lab tech must NOT see invoice hits: {:?}", t);
+    assert!(
+        t.contains("patient") && t.contains("lab_order") && t.contains("inventory_item"),
+        "lab tech: patient/lab_order/inventory expected, got {:?}",
+        t
+    );
+    assert!(
+        !t.contains("doctor"),
+        "lab tech must NOT see doctor hits: {:?}",
+        t
+    );
+    assert!(
+        !t.contains("appointment"),
+        "lab tech must NOT see appointment hits: {:?}",
+        t
+    );
+    assert!(
+        !t.contains("invoice"),
+        "lab tech must NOT see invoice hits: {:?}",
+        t
+    );
 }
 
 // ── SST-5: pharmacy sections (prescriptions / medications) ───────────────────
@@ -272,10 +338,20 @@ async fn test_sst5_pharmacy_sections() {
     let clerk = seed_user(&pool, "sst5_clerk", &pw, &["billing_clerk"]).await;
     seed_session_row(&pool, clerk, "hash_sst5_clerk").await;
     let clerk_state = state_for(&pool, clerk, "hash_sst5_clerk").await;
-    let hits = global_search_core(&pool, &clerk_state, "zqx".to_string()).await.unwrap();
+    let hits = global_search_core(&pool, &clerk_state, "zqx".to_string())
+        .await
+        .unwrap();
     let t = types_of(&hits);
-    assert!(t.contains("prescription"), "clerk: prescription hit expected, got {:?}", t);
-    assert!(!t.contains("medication"), "clerk must NOT see medication hits: {:?}", t);
+    assert!(
+        t.contains("prescription"),
+        "clerk: prescription hit expected, got {:?}",
+        t
+    );
+    assert!(
+        !t.contains("medication"),
+        "clerk must NOT see medication hits: {:?}",
+        t
+    );
 
     // Doctor holds both PatientsView and InventoryView: both pharmacy
     // sections visible, and the prescription matches BOTH via the patient
@@ -283,10 +359,15 @@ async fn test_sst5_pharmacy_sections() {
     let doc = seed_user(&pool, "sst5_doc", &pw, &["doctor"]).await;
     seed_session_row(&pool, doc, "hash_sst5_doc").await;
     let doc_state = state_for(&pool, doc, "hash_sst5_doc").await;
-    let hits = global_search_core(&pool, &doc_state, "zqx".to_string()).await.unwrap();
+    let hits = global_search_core(&pool, &doc_state, "zqx".to_string())
+        .await
+        .unwrap();
     let t = types_of(&hits);
-    assert!(t.contains("prescription") && t.contains("medication"),
-        "doctor: prescription + medication expected, got {:?}", t);
+    assert!(
+        t.contains("prescription") && t.contains("medication"),
+        "doctor: prescription + medication expected, got {:?}",
+        t
+    );
 }
 
 // ── SST-6: every section of the app, via the one role that holds them all ────
@@ -303,16 +384,32 @@ async fn test_sst6_whole_app_coverage() {
     let admin = seed_user(&pool, "sst6_admin", &pw, &["super_admin"]).await;
     seed_session_row(&pool, admin, "hash_sst6_admin").await;
     let admin_state = state_for(&pool, admin, "hash_sst6_admin").await;
-    let hits = global_search_core(&pool, &admin_state, "zqx".to_string()).await.unwrap();
+    let hits = global_search_core(&pool, &admin_state, "zqx".to_string())
+        .await
+        .unwrap();
     let t = types_of(&hits);
 
     let expected = [
-        "patient", "doctor", "appointment", "invoice", "lab_order",
-        "inventory_item", "prescription", "medication", "radiology_order",
-        "ipd_admission", "blood_donor", "user",
+        "patient",
+        "doctor",
+        "appointment",
+        "invoice",
+        "lab_order",
+        "inventory_item",
+        "prescription",
+        "medication",
+        "radiology_order",
+        "ipd_admission",
+        "blood_donor",
+        "user",
     ];
     for e in expected {
-        assert!(t.contains(e), "super admin must see '{}' hits, got {:?}", e, t);
+        assert!(
+            t.contains(e),
+            "super admin must see '{}' hits, got {:?}",
+            e,
+            t
+        );
     }
 }
 
@@ -334,7 +431,9 @@ async fn test_sst2_wildcards_escaped() {
     // not act as the any-single-char wildcard. (Queries are ≥2 chars: the
     // backend's min-length guard would empty out a single "_" before the
     // LIKE ever runs, so the wildcard has to ride along with a literal.)
-    let hits = global_search_core(&pool, &nurse_state, "_z".to_string()).await.unwrap();
+    let hits = global_search_core(&pool, &nurse_state, "_z".to_string())
+        .await
+        .unwrap();
     assert!(!hits.is_empty(), "literal '_z' name must be found");
     for h in &hits {
         assert!(
@@ -347,8 +446,14 @@ async fn test_sst2_wildcards_escaped() {
     // "%q" must match nothing (no fixture contains a literal percent). If
     // the escape were broken, the pattern would degenerate to "contains q"
     // and match the seeded patient.
-    let hits = global_search_core(&pool, &nurse_state, "%q".to_string()).await.unwrap();
-    assert!(hits.is_empty(), "'%' must match literally, got {:?}", hits.len());
+    let hits = global_search_core(&pool, &nurse_state, "%q".to_string())
+        .await
+        .unwrap();
+    assert!(
+        hits.is_empty(),
+        "'%' must match literally, got {:?}",
+        hits.len()
+    );
 }
 
 // ── SST-3: soft-deleted patients stay out of the patient section ────────────
@@ -368,7 +473,9 @@ async fn test_sst3_soft_deleted_excluded() {
         .await
         .unwrap();
 
-    let hits = global_search_core(&pool, &clerk_state, "zqxd".to_string()).await.unwrap();
+    let hits = global_search_core(&pool, &clerk_state, "zqxd".to_string())
+        .await
+        .unwrap();
     assert!(
         hits.iter().all(|h| h.entity_type != "patient"),
         "soft-deleted patient must not appear in the patient section: {:?}",
@@ -387,12 +494,25 @@ async fn test_sst4_min_length_contract() {
     let clerk_state = state_for(&pool, clerk, "hash_sst4_clerk").await;
 
     for q in ["z", "  ", ""] {
-        let hits = global_search_core(&pool, &clerk_state, q.to_string()).await.unwrap();
-        assert!(hits.is_empty(), "'{:?}' must return empty, got {}", q, hits.len());
+        let hits = global_search_core(&pool, &clerk_state, q.to_string())
+            .await
+            .unwrap();
+        assert!(
+            hits.is_empty(),
+            "'{:?}' must return empty, got {}",
+            q,
+            hits.len()
+        );
     }
 
     // Not signed in → hard error (the session guard, not the length guard).
     let anon: SessionState = Arc::new(Mutex::new(None));
-    let err = global_search_core(&pool, &anon, "zqx".to_string()).await.unwrap_err();
-    assert!(err.contains("not signed in"), "expected session error, got: {}", err);
+    let err = global_search_core(&pool, &anon, "zqx".to_string())
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("not signed in"),
+        "expected session error, got: {}",
+        err
+    );
 }

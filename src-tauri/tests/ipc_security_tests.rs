@@ -30,7 +30,10 @@ async fn test_sec001_check_constraint_rejects_invalid_status() {
     .bind(donor_id)
     .execute(&pool)
     .await;
-    assert!(result.is_err(), "CHECK constraint must reject status='hacked'");
+    assert!(
+        result.is_err(),
+        "CHECK constraint must reject status='hacked'"
+    );
 }
 
 /// SEC-002: CHECK constraint prevents invalid rh_factor injection.
@@ -44,7 +47,10 @@ async fn test_sec002_check_constraint_rejects_invalid_rh() {
     )
     .execute(&pool)
     .await;
-    assert!(result.is_err(), "CHECK constraint must reject rh_factor='positive'");
+    assert!(
+        result.is_err(),
+        "CHECK constraint must reject rh_factor='positive'"
+    );
 }
 
 /// SEC-003: SQL injection in search field is parameterized (safe).
@@ -76,7 +82,10 @@ async fn test_sec003_sql_injection_in_search() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count, 1, "Table must still exist and contain the seeded donor");
+    assert_eq!(
+        count, 1,
+        "Table must still exist and contain the seeded donor"
+    );
     assert!(result.is_empty(), "Malicious search must match nothing");
 }
 
@@ -97,13 +106,12 @@ async fn test_sec004_soft_deleted_unit_inaccessible() {
         .await
         .unwrap();
 
-    let result: Option<(i32,)> = sqlx::query_as(
-        "SELECT id FROM blood_units WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(unit_id)
-    .fetch_optional(&pool)
-    .await
-    .unwrap();
+    let result: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM blood_units WHERE id = $1 AND deleted_at IS NULL")
+            .bind(unit_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
 
     assert!(result.is_none(), "Soft-deleted unit must not be accessible");
 }
@@ -120,7 +128,9 @@ async fn test_sec005_unique_unit_number() {
     // Unique-per-run literal: the test DB persists across runs, so a fixed
     // 'BU-DUP-TEST' would collide with the previous run's row.
     let uniq: u32 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
     let unit_number = format!("BU-DUP-{}", uniq);
     let result = sqlx::query(
         r#"INSERT INTO blood_units
@@ -133,7 +143,11 @@ async fn test_sec005_unique_unit_number() {
     .bind(&unit_number)
     .execute(&pool)
     .await;
-    assert!(result.is_ok(), "First insert with unique number must succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "First insert with unique number must succeed: {:?}",
+        result.err()
+    );
 
     let result2 = sqlx::query(
         r#"INSERT INTO blood_units
@@ -146,7 +160,10 @@ async fn test_sec005_unique_unit_number() {
     .bind(&unit_number)
     .execute(&pool)
     .await;
-    assert!(result2.is_err(), "UNIQUE constraint must reject duplicate unit_number");
+    assert!(
+        result2.is_err(),
+        "UNIQUE constraint must reject duplicate unit_number"
+    );
 }
 
 /// SEC-006: Volume CHECK constraint rejects zero/negative volume.
@@ -172,7 +189,9 @@ async fn test_sec007_volume_boundary_minimum() {
     let pool = setup_pool().await;
     let donor_id = seed_donor(&pool, "O", "-").await;
     let uniq: u32 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
     let unit_number = format!("BU-VOL-{}", uniq);
     let result = sqlx::query(
         r#"INSERT INTO blood_units
@@ -185,7 +204,11 @@ async fn test_sec007_volume_boundary_minimum() {
     .bind(&unit_number)
     .execute(&pool)
     .await;
-    assert!(result.is_ok(), "volume_ml=1 must be accepted (boundary): {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "volume_ml=1 must be accepted (boundary): {:?}",
+        result.err()
+    );
 }
 
 /// SEC-008: patients.rh_factor CHECK constraint (BE-01) rejects invalid values.
@@ -218,7 +241,12 @@ async fn test_sec008_patients_rh_factor_check() {
         .bind(rh)
         .execute(&pool)
         .await;
-        assert!(ok.is_ok(), "rh_factor '{}' must be accepted: {:?}", rh, ok.err());
+        assert!(
+            ok.is_ok(),
+            "rh_factor '{}' must be accepted: {:?}",
+            rh,
+            ok.err()
+        );
     }
 }
 
@@ -233,7 +261,10 @@ async fn test_sec009_patients_rh_factor_null_accepted() {
     )
     .execute(&pool)
     .await;
-    assert!(result.is_ok(), "NULL rh_factor must be accepted (unknown blood type)");
+    assert!(
+        result.is_ok(),
+        "NULL rh_factor must be accepted (unknown blood type)"
+    );
 }
 
 /// SEC-010: FK constraint — cannot insert blood_unit with nonexistent donor.
@@ -263,11 +294,15 @@ async fn test_sec011_max_volume_boundary() {
            VALUES ($2, $1, 600, 'O', '-', 'collected', 'pending')"#,
     )
     .bind(donor_id)
-    .bind(&format!("BDN-MAX-{}", std::time::SystemTime::now()
+    .bind(format!("BDN-MAX-{}", std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()))
     .execute(&pool)
     .await;
-    assert!(result.is_ok(), "volume_ml=600 must be accepted (boundary): {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "volume_ml=600 must be accepted (boundary): {:?}",
+        result.err()
+    );
 }
 
 /// SEC-012: Large payload — donation with volume >600ml is rejected.
@@ -283,5 +318,8 @@ async fn test_sec012_over_max_volume_rejected() {
     .bind(donor_id)
     .execute(&pool)
     .await;
-    assert!(result.is_err(), "CHECK constraint must reject volume_ml=601 (>600)");
+    assert!(
+        result.is_err(),
+        "CHECK constraint must reject volume_ml=601 (>600)"
+    );
 }

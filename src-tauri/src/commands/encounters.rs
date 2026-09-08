@@ -38,14 +38,18 @@ pub async fn get_encounters(
 ) -> Result<Vec<EncounterWithPatient>, String> {
     let _ = rbac::require(&session, Permission::PatientsView)?;
     let q = match patient_id {
-        Some(_pid) => format!("{} WHERE e.patient_id = $1 ORDER BY e.visit_date DESC", SELECT_ENCOUNTERS),
+        Some(_pid) => format!(
+            "{} WHERE e.patient_id = $1 ORDER BY e.visit_date DESC",
+            SELECT_ENCOUNTERS
+        ),
         None => format!("{} ORDER BY e.visit_date DESC", SELECT_ENCOUNTERS),
     };
     let mut query = sqlx::query_as::<_, EncounterWithPatient>(&q);
     if let Some(pid) = patient_id {
         query = query.bind(pid);
     }
-    query.fetch_all(pool.inner())
+    query
+        .fetch_all(pool.inner())
         .await
         .map_err(|e| format!("Get encounters: {}", e))
 }
@@ -73,8 +77,14 @@ pub async fn create_encounter(
     .await
     .map_err(|e| format!("Create encounter: {}", e))?;
 
-    audit::for_session(pool.inner(), &s, "encounter_create", "encounters",
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "encounter_create",
+        "encounters",
         Some(&row.0.to_string()),
-        Some(serde_json::json!({"patient_id": encounter.patient_id}))).await;
+        Some(serde_json::json!({"patient_id": encounter.patient_id})),
+    )
+    .await;
     Ok(row.0)
 }

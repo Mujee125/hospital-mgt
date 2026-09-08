@@ -183,10 +183,7 @@ const F8: &str = "::float8";
 
 // ── Fetchers (shared by typed-report commands + CSV exporter) ────────────────
 
-async fn fetch_daily_opd(
-    pool: &PgPool,
-    date: Option<String>,
-) -> Result<DailyOpdReport, String> {
+async fn fetch_daily_opd(pool: &PgPool, date: Option<String>) -> Result<DailyOpdReport, String> {
     let resolved = resolve_date_or_today(&date);
 
     // Total appointments for the day. `appointments.appointment_date` is a
@@ -219,13 +216,12 @@ async fn fetch_daily_opd(
 
     // Total encounters/visits for the day. `encounters.visit_date` is
     // TIMESTAMPTZ; cast to date for the comparison.
-    let (total_encounters,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*)::bigint FROM encounters WHERE visit_date::date = $1::date",
-    )
-    .bind(&resolved)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| format!("Daily OPD report (encounters): {e}"))?;
+    let (total_encounters,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*)::bigint FROM encounters WHERE visit_date::date = $1::date")
+            .bind(&resolved)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| format!("Daily OPD report (encounters): {e}"))?;
 
     // New patients registered that day (active only — soft-deleted rows are
     // excluded so a deletion after-the-fact doesn't inflate the count).
@@ -271,10 +267,7 @@ async fn fetch_daily_opd(
     })
 }
 
-async fn fetch_ipd_census(
-    pool: &PgPool,
-    date: Option<String>,
-) -> Result<IpdCensusReport, String> {
+async fn fetch_ipd_census(pool: &PgPool, date: Option<String>) -> Result<IpdCensusReport, String> {
     let resolved = resolve_date_or_today(&date);
 
     // Bed snapshot — total + per-status counts in a single pass. The beds
@@ -303,12 +296,11 @@ async fn fetch_ipd_census(
     let maintenance_beds = cleaning_beds;
 
     // Current admissions — patients physically in a bed right now.
-    let (current_admissions,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*)::bigint FROM ipd_admissions WHERE status = 'admitted'",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| format!("IPD census report (admissions): {e}"))?;
+    let (current_admissions,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*)::bigint FROM ipd_admissions WHERE status = 'admitted'")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| format!("IPD census report (admissions): {e}"))?;
 
     // Discharges for the day. `discharge_date` is TIMESTAMPTZ; cast to
     // date for the comparison.
@@ -343,15 +335,15 @@ async fn fetch_ipd_census(
     .map_err(|e| format!("IPD census report (wards): {e}"))?;
     let by_ward = ward_rows
         .into_iter()
-        .map(|(ward_id, ward_name, total_beds, occupied_beds, available_beds)| {
-            IpdCensusWardRow {
+        .map(
+            |(ward_id, ward_name, total_beds, occupied_beds, available_beds)| IpdCensusWardRow {
                 ward_id,
                 ward_name,
                 total_beds,
                 occupied_beds,
                 available_beds,
-            }
-        })
+            },
+        )
         .collect::<Vec<_>>();
 
     Ok(IpdCensusReport {
@@ -452,7 +444,10 @@ async fn fetch_revenue(
     .map_err(|e| format!("Revenue report (top items): {e}"))?;
     let top_bill_items = item_rows
         .into_iter()
-        .map(|(description, revenue)| TopBillItemRow { description, revenue })
+        .map(|(description, revenue)| TopBillItemRow {
+            description,
+            revenue,
+        })
         .collect::<Vec<_>>();
 
     Ok(RevenueReport {
@@ -636,10 +631,7 @@ fn format_daily_opd_csv(r: DailyOpdReport) -> String {
 }
 
 fn format_ipd_census_csv(r: IpdCensusReport) -> String {
-    let mut rows: Vec<String> = vec![csv_row(&[
-        "Report".to_string(),
-        "IPD Census".to_string(),
-    ])];
+    let mut rows: Vec<String> = vec![csv_row(&["Report".to_string(), "IPD Census".to_string()])];
     rows.push(csv_row(&["Date".to_string(), r.date.clone()]));
     rows.push(csv_row(&[
         "Total beds".to_string(),
@@ -684,10 +676,7 @@ fn format_ipd_census_csv(r: IpdCensusReport) -> String {
 }
 
 fn format_revenue_csv(r: RevenueReport) -> String {
-    let mut rows: Vec<String> = vec![csv_row(&[
-        "Report".to_string(),
-        "Revenue".to_string(),
-    ])];
+    let mut rows: Vec<String> = vec![csv_row(&["Report".to_string(), "Revenue".to_string()])];
     rows.push(csv_row(&["From".to_string(), r.from_date.clone()]));
     rows.push(csv_row(&["To".to_string(), r.to_date.clone()]));
     rows.push(csv_row(&[
@@ -1040,11 +1029,24 @@ pub async fn fetch_doctor_performance(
     .map_err(|e| format!("Doctor performance report: {e}"))?;
     let doctors = rows
         .into_iter()
-        .map(|(doctor_id, doctor_name, appointments, encounters, lab_orders, prescriptions)| {
-            DoctorPerformanceRow { doctor_id, doctor_name, appointments, encounters, lab_orders, prescriptions }
-        })
+        .map(
+            |(doctor_id, doctor_name, appointments, encounters, lab_orders, prescriptions)| {
+                DoctorPerformanceRow {
+                    doctor_id,
+                    doctor_name,
+                    appointments,
+                    encounters,
+                    lab_orders,
+                    prescriptions,
+                }
+            },
+        )
         .collect();
-    Ok(DoctorPerformanceReport { from_date, to_date, doctors })
+    Ok(DoctorPerformanceReport {
+        from_date,
+        to_date,
+        doctors,
+    })
 }
 
 pub async fn fetch_diagnosis_frequency(
@@ -1079,9 +1081,17 @@ pub async fn fetch_diagnosis_frequency(
     .map_err(|e| format!("Diagnosis frequency report (top): {e}"))?;
     let top_diagnoses = rows
         .into_iter()
-        .map(|(diagnosis, encounter_count)| DiagnosisCountRow { diagnosis, encounter_count })
+        .map(|(diagnosis, encounter_count)| DiagnosisCountRow {
+            diagnosis,
+            encounter_count,
+        })
         .collect();
-    Ok(DiagnosisFrequencyReport { from_date, to_date, total_encounters, top_diagnoses })
+    Ok(DiagnosisFrequencyReport {
+        from_date,
+        to_date,
+        total_encounters,
+        top_diagnoses,
+    })
 }
 
 pub async fn fetch_pharmacy_consumption(
@@ -1117,11 +1127,20 @@ pub async fn fetch_pharmacy_consumption(
     .map_err(|e| format!("Pharmacy consumption report (top): {e}"))?;
     let top_medications = rows
         .into_iter()
-        .map(|(medication_name, times_dispensed, total_quantity)| {
-            MedicationConsumptionRow { medication_name, times_dispensed, total_quantity }
-        })
+        .map(
+            |(medication_name, times_dispensed, total_quantity)| MedicationConsumptionRow {
+                medication_name,
+                times_dispensed,
+                total_quantity,
+            },
+        )
         .collect();
-    Ok(PharmacyConsumptionReport { from_date, to_date, total_dispensed_items, top_medications })
+    Ok(PharmacyConsumptionReport {
+        from_date,
+        to_date,
+        total_dispensed_items,
+        top_medications,
+    })
 }
 
 pub async fn fetch_drug_expiry(pool: &PgPool) -> Result<DrugExpiryReport, String> {
@@ -1228,10 +1247,22 @@ pub async fn fetch_daily_collection(
         .map(|(date, payments, collected, refunded)| {
             total_collected += collected;
             total_refunded += refunded;
-            CollectionDayRow { date, payments, collected, refunded, net: collected - refunded }
+            CollectionDayRow {
+                date,
+                payments,
+                collected,
+                refunded,
+                net: collected - refunded,
+            }
         })
         .collect();
-    Ok(DailyCollectionReport { from_date, to_date, total_collected, total_refunded, by_day })
+    Ok(DailyCollectionReport {
+        from_date,
+        to_date,
+        total_collected,
+        total_refunded,
+        by_day,
+    })
 }
 
 pub async fn fetch_receivables_aging(pool: &PgPool) -> Result<ReceivablesAgingReport, String> {
@@ -1266,7 +1297,11 @@ pub async fn fetch_receivables_aging(pool: &PgPool) -> Result<ReceivablesAgingRe
     let total_open_bills = rows.iter().map(|r| r.1).sum();
     let buckets = rows
         .into_iter()
-        .map(|(bucket, bill_count, outstanding)| AgingBucketRow { bucket, bill_count, outstanding })
+        .map(|(bucket, bill_count, outstanding)| AgingBucketRow {
+            bucket,
+            bill_count,
+            outstanding,
+        })
         .collect();
     Ok(ReceivablesAgingReport {
         as_of_date: Utc::now().format("%Y-%m-%d").to_string(),
@@ -1293,9 +1328,14 @@ pub async fn fetch_insurance_claims(pool: &PgPool) -> Result<InsuranceClaimsRepo
     let total_approved = rows.iter().map(|r| r.3).sum();
     let by_status = rows
         .into_iter()
-        .map(|(status, claims, claimed_amount, approved_amount)| {
-            ClaimStatusRow { status, claims, claimed_amount, approved_amount }
-        })
+        .map(
+            |(status, claims, claimed_amount, approved_amount)| ClaimStatusRow {
+                status,
+                claims,
+                claimed_amount,
+                approved_amount,
+            },
+        )
         .collect();
     Ok(InsuranceClaimsReport {
         as_of_date: Utc::now().format("%Y-%m-%d").to_string(),
@@ -1330,7 +1370,11 @@ pub async fn fetch_stock_status(pool: &PgPool) -> Result<StockStatusReport, Stri
     .map_err(|e| format!("Stock status report (low stock): {e}"))?;
     let low_stock_items = rows
         .into_iter()
-        .map(|(name, stock_quantity, reorder_level)| LowStockRow { name, stock_quantity, reorder_level })
+        .map(|(name, stock_quantity, reorder_level)| LowStockRow {
+            name,
+            stock_quantity,
+            reorder_level,
+        })
         .collect();
     Ok(StockStatusReport {
         as_of_date: Utc::now().format("%Y-%m-%d").to_string(),
@@ -1365,11 +1409,21 @@ pub async fn fetch_user_activity(
     let total_actions = rows.iter().map(|r| r.2).sum();
     let by_user = rows
         .into_iter()
-        .map(|(username, full_name, action_count, last_action_at)| {
-            UserActivityRow { username, full_name, action_count, last_action_at }
-        })
+        .map(
+            |(username, full_name, action_count, last_action_at)| UserActivityRow {
+                username,
+                full_name,
+                action_count,
+                last_action_at,
+            },
+        )
         .collect();
-    Ok(UserActivityReport { from_date, to_date, total_actions, by_user })
+    Ok(UserActivityReport {
+        from_date,
+        to_date,
+        total_actions,
+        by_user,
+    })
 }
 
 async fn fetch_backup_status() -> Result<BackupStatusReport, String> {
@@ -1386,7 +1440,9 @@ async fn fetch_backup_status() -> Result<BackupStatusReport, String> {
     let Some(program_data) = std::env::var_os("ProgramData") else {
         return Ok(report);
     };
-    let dir = std::path::Path::new(&program_data).join("HMS").join("backups");
+    let dir = std::path::Path::new(&program_data)
+        .join("HMS")
+        .join("backups");
     let Ok(read) = std::fs::read_dir(&dir) else {
         return Ok(report); // No backups yet (fresh install) — empty report.
     };
@@ -1414,7 +1470,11 @@ async fn fetch_backup_status() -> Result<BackupStatusReport, String> {
         report.backup_count += 1;
         report.total_size_bytes += meta.len() as i64;
         newest_age = Some(newest_age.map_or(age_days, |a| a.min(age_days)));
-        report.files.push(BackupFileRow { filename, size_bytes: meta.len() as i64, age_days });
+        report.files.push(BackupFileRow {
+            filename,
+            size_bytes: meta.len() as i64,
+            age_days,
+        });
     }
     report.latest_backup_age_days = newest_age;
     // Oldest-first is unhelpful; newest-first matches list_backups.
@@ -1430,13 +1490,19 @@ fn format_doctor_performance_csv(r: DoctorPerformanceReport) -> String {
     rows.push(csv_row(&["To".into(), r.to_date.clone()]));
     rows.push(String::new());
     rows.push(csv_row(&[
-        "Doctor".into(), "Appointments".into(), "Encounters".into(),
-        "Lab orders".into(), "Prescriptions".into(),
+        "Doctor".into(),
+        "Appointments".into(),
+        "Encounters".into(),
+        "Lab orders".into(),
+        "Prescriptions".into(),
     ]));
     for d in &r.doctors {
         rows.push(csv_row(&[
-            d.doctor_name.clone(), d.appointments.to_string(), d.encounters.to_string(),
-            d.lab_orders.to_string(), d.prescriptions.to_string(),
+            d.doctor_name.clone(),
+            d.appointments.to_string(),
+            d.encounters.to_string(),
+            d.lab_orders.to_string(),
+            d.prescriptions.to_string(),
         ]));
     }
     csv_join(rows)
@@ -1446,11 +1512,17 @@ fn format_diagnosis_frequency_csv(r: DiagnosisFrequencyReport) -> String {
     let mut rows = vec![csv_row(&["Report".into(), "Diagnosis Frequency".into()])];
     rows.push(csv_row(&["From".into(), r.from_date.clone()]));
     rows.push(csv_row(&["To".into(), r.to_date.clone()]));
-    rows.push(csv_row(&["Diagnosed encounters".into(), r.total_encounters.to_string()]));
+    rows.push(csv_row(&[
+        "Diagnosed encounters".into(),
+        r.total_encounters.to_string(),
+    ]));
     rows.push(String::new());
     rows.push(csv_row(&["Diagnosis".into(), "Encounter count".into()]));
     for d in &r.top_diagnoses {
-        rows.push(csv_row(&[d.diagnosis.clone(), d.encounter_count.to_string()]));
+        rows.push(csv_row(&[
+            d.diagnosis.clone(),
+            d.encounter_count.to_string(),
+        ]));
     }
     csv_join(rows)
 }
@@ -1459,12 +1531,21 @@ fn format_pharmacy_consumption_csv(r: PharmacyConsumptionReport) -> String {
     let mut rows = vec![csv_row(&["Report".into(), "Pharmacy Consumption".into()])];
     rows.push(csv_row(&["From".into(), r.from_date.clone()]));
     rows.push(csv_row(&["To".into(), r.to_date.clone()]));
-    rows.push(csv_row(&["Dispensed items".into(), r.total_dispensed_items.to_string()]));
+    rows.push(csv_row(&[
+        "Dispensed items".into(),
+        r.total_dispensed_items.to_string(),
+    ]));
     rows.push(String::new());
-    rows.push(csv_row(&["Medication".into(), "Times dispensed".into(), "Total quantity".into()]));
+    rows.push(csv_row(&[
+        "Medication".into(),
+        "Times dispensed".into(),
+        "Total quantity".into(),
+    ]));
     for m in &r.top_medications {
         rows.push(csv_row(&[
-            m.medication_name.clone(), m.times_dispensed.to_string(), fmt_f64(m.total_quantity),
+            m.medication_name.clone(),
+            m.times_dispensed.to_string(),
+            fmt_f64(m.total_quantity),
         ]));
     }
     csv_join(rows)
@@ -1472,15 +1553,34 @@ fn format_pharmacy_consumption_csv(r: PharmacyConsumptionReport) -> String {
 
 fn format_drug_expiry_csv(r: DrugExpiryReport) -> String {
     let mut rows = vec![csv_row(&["Report".into(), "Drug Expiry".into()])];
-    rows.push(csv_row(&["Expired items".into(), r.expired_count.to_string()]));
-    rows.push(csv_row(&["Expiring ≤90 days".into(), r.expiring_90_days.to_string()]));
-    rows.push(csv_row(&["Expiring ≤180 days".into(), r.expiring_180_days.to_string()]));
-    rows.push(csv_row(&["Expired stock value".into(), fmt_f64(r.expired_stock_value)]));
-    rows.push(csv_row(&["Expiring-90 stock value".into(), fmt_f64(r.expiring_90_stock_value)]));
+    rows.push(csv_row(&[
+        "Expired items".into(),
+        r.expired_count.to_string(),
+    ]));
+    rows.push(csv_row(&[
+        "Expiring ≤90 days".into(),
+        r.expiring_90_days.to_string(),
+    ]));
+    rows.push(csv_row(&[
+        "Expiring ≤180 days".into(),
+        r.expiring_180_days.to_string(),
+    ]));
+    rows.push(csv_row(&[
+        "Expired stock value".into(),
+        fmt_f64(r.expired_stock_value),
+    ]));
+    rows.push(csv_row(&[
+        "Expiring-90 stock value".into(),
+        fmt_f64(r.expiring_90_stock_value),
+    ]));
     rows.push(String::new());
     rows.push(csv_row(&[
-        "Item".into(), "Batch".into(), "Stock".into(), "Expiry".into(),
-        "Days left".into(), "Stock value".into(),
+        "Item".into(),
+        "Batch".into(),
+        "Stock".into(),
+        "Expiry".into(),
+        "Days left".into(),
+        "Stock value".into(),
     ]));
     for i in &r.items {
         rows.push(csv_row(&[
@@ -1488,7 +1588,9 @@ fn format_drug_expiry_csv(r: DrugExpiryReport) -> String {
             i.batch_number.clone().unwrap_or_else(|| "—".into()),
             fmt_f64(i.stock_quantity),
             i.expiry_date.clone().unwrap_or_else(|| "—".into()),
-            i.days_until_expiry.map(|d| d.to_string()).unwrap_or_else(|| "—".into()),
+            i.days_until_expiry
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "—".into()),
             fmt_f64(i.stock_value),
         ]));
     }
@@ -1499,16 +1601,29 @@ fn format_daily_collection_csv(r: DailyCollectionReport) -> String {
     let mut rows = vec![csv_row(&["Report".into(), "Daily Collection".into()])];
     rows.push(csv_row(&["From".into(), r.from_date.clone()]));
     rows.push(csv_row(&["To".into(), r.to_date.clone()]));
-    rows.push(csv_row(&["Total collected".into(), fmt_f64(r.total_collected)]));
-    rows.push(csv_row(&["Total refunded".into(), fmt_f64(r.total_refunded)]));
+    rows.push(csv_row(&[
+        "Total collected".into(),
+        fmt_f64(r.total_collected),
+    ]));
+    rows.push(csv_row(&[
+        "Total refunded".into(),
+        fmt_f64(r.total_refunded),
+    ]));
     rows.push(String::new());
     rows.push(csv_row(&[
-        "Date".into(), "Payments".into(), "Collected".into(), "Refunded".into(), "Net".into(),
+        "Date".into(),
+        "Payments".into(),
+        "Collected".into(),
+        "Refunded".into(),
+        "Net".into(),
     ]));
     for d in &r.by_day {
         rows.push(csv_row(&[
-            d.date.clone(), d.payments.to_string(),
-            fmt_f64(d.collected), fmt_f64(d.refunded), fmt_f64(d.net),
+            d.date.clone(),
+            d.payments.to_string(),
+            fmt_f64(d.collected),
+            fmt_f64(d.refunded),
+            fmt_f64(d.net),
         ]));
     }
     csv_join(rows)
@@ -1517,27 +1632,58 @@ fn format_daily_collection_csv(r: DailyCollectionReport) -> String {
 fn format_receivables_aging_csv(r: ReceivablesAgingReport) -> String {
     let mut rows = vec![csv_row(&["Report".into(), "Receivables Aging".into()])];
     rows.push(csv_row(&["As of".into(), r.as_of_date.clone()]));
-    rows.push(csv_row(&["Open bills".into(), r.total_open_bills.to_string()]));
-    rows.push(csv_row(&["Total outstanding".into(), fmt_f64(r.total_outstanding)]));
+    rows.push(csv_row(&[
+        "Open bills".into(),
+        r.total_open_bills.to_string(),
+    ]));
+    rows.push(csv_row(&[
+        "Total outstanding".into(),
+        fmt_f64(r.total_outstanding),
+    ]));
     rows.push(String::new());
-    rows.push(csv_row(&["Age bucket".into(), "Bills".into(), "Outstanding".into()]));
+    rows.push(csv_row(&[
+        "Age bucket".into(),
+        "Bills".into(),
+        "Outstanding".into(),
+    ]));
     for b in &r.buckets {
-        rows.push(csv_row(&[b.bucket.clone(), b.bill_count.to_string(), fmt_f64(b.outstanding)]));
+        rows.push(csv_row(&[
+            b.bucket.clone(),
+            b.bill_count.to_string(),
+            fmt_f64(b.outstanding),
+        ]));
     }
     csv_join(rows)
 }
 
 fn format_insurance_claims_csv(r: InsuranceClaimsReport) -> String {
-    let mut rows = vec![csv_row(&["Report".into(), "Insurance Claims Status".into()])];
+    let mut rows = vec![csv_row(&[
+        "Report".into(),
+        "Insurance Claims Status".into(),
+    ])];
     rows.push(csv_row(&["As of".into(), r.as_of_date.clone()]));
-    rows.push(csv_row(&["Total claims".into(), r.total_claims.to_string()]));
+    rows.push(csv_row(&[
+        "Total claims".into(),
+        r.total_claims.to_string(),
+    ]));
     rows.push(csv_row(&["Total claimed".into(), fmt_f64(r.total_claimed)]));
-    rows.push(csv_row(&["Total approved".into(), fmt_f64(r.total_approved)]));
+    rows.push(csv_row(&[
+        "Total approved".into(),
+        fmt_f64(r.total_approved),
+    ]));
     rows.push(String::new());
-    rows.push(csv_row(&["Status".into(), "Claims".into(), "Claimed".into(), "Approved".into()]));
+    rows.push(csv_row(&[
+        "Status".into(),
+        "Claims".into(),
+        "Claimed".into(),
+        "Approved".into(),
+    ]));
     for s in &r.by_status {
         rows.push(csv_row(&[
-            s.status.clone(), s.claims.to_string(), fmt_f64(s.claimed_amount), fmt_f64(s.approved_amount),
+            s.status.clone(),
+            s.claims.to_string(),
+            fmt_f64(s.claimed_amount),
+            fmt_f64(s.approved_amount),
         ]));
     }
     csv_join(rows)
@@ -1546,13 +1692,30 @@ fn format_insurance_claims_csv(r: InsuranceClaimsReport) -> String {
 fn format_stock_status_csv(r: StockStatusReport) -> String {
     let mut rows = vec![csv_row(&["Report".into(), "Stock Status".into()])];
     rows.push(csv_row(&["As of".into(), r.as_of_date.clone()]));
-    rows.push(csv_row(&["Active items".into(), r.active_items.to_string()]));
-    rows.push(csv_row(&["Total stock value".into(), fmt_f64(r.total_stock_value)]));
-    rows.push(csv_row(&["Low-stock items".into(), r.low_stock_count.to_string()]));
+    rows.push(csv_row(&[
+        "Active items".into(),
+        r.active_items.to_string(),
+    ]));
+    rows.push(csv_row(&[
+        "Total stock value".into(),
+        fmt_f64(r.total_stock_value),
+    ]));
+    rows.push(csv_row(&[
+        "Low-stock items".into(),
+        r.low_stock_count.to_string(),
+    ]));
     rows.push(String::new());
-    rows.push(csv_row(&["Item".into(), "Stock".into(), "Reorder level".into()]));
+    rows.push(csv_row(&[
+        "Item".into(),
+        "Stock".into(),
+        "Reorder level".into(),
+    ]));
     for i in &r.low_stock_items {
-        rows.push(csv_row(&[i.name.clone(), fmt_f64(i.stock_quantity), fmt_f64(i.reorder_level)]));
+        rows.push(csv_row(&[
+            i.name.clone(),
+            fmt_f64(i.stock_quantity),
+            fmt_f64(i.reorder_level),
+        ]));
     }
     csv_join(rows)
 }
@@ -1561,9 +1724,16 @@ fn format_user_activity_csv(r: UserActivityReport) -> String {
     let mut rows = vec![csv_row(&["Report".into(), "User Activity".into()])];
     rows.push(csv_row(&["From".into(), r.from_date.clone()]));
     rows.push(csv_row(&["To".into(), r.to_date.clone()]));
-    rows.push(csv_row(&["Total actions".into(), r.total_actions.to_string()]));
+    rows.push(csv_row(&[
+        "Total actions".into(),
+        r.total_actions.to_string(),
+    ]));
     rows.push(String::new());
-    rows.push(csv_row(&["User".into(), "Actions".into(), "Last action (UTC)".into()]));
+    rows.push(csv_row(&[
+        "User".into(),
+        "Actions".into(),
+        "Last action (UTC)".into(),
+    ]));
     for u in &r.by_user {
         rows.push(csv_row(&[
             u.full_name.clone().unwrap_or_else(|| u.username.clone()),
@@ -1576,16 +1746,32 @@ fn format_user_activity_csv(r: UserActivityReport) -> String {
 
 fn format_backup_status_csv(r: BackupStatusReport) -> String {
     let mut rows = vec![csv_row(&["Report".into(), "Backup Status".into()])];
-    rows.push(csv_row(&["Backup count".into(), r.backup_count.to_string()]));
+    rows.push(csv_row(&[
+        "Backup count".into(),
+        r.backup_count.to_string(),
+    ]));
     rows.push(csv_row(&[
         "Latest backup age (days)".into(),
-        r.latest_backup_age_days.map(|d| d.to_string()).unwrap_or_else(|| "never".into()),
+        r.latest_backup_age_days
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "never".into()),
     ]));
-    rows.push(csv_row(&["Total size (bytes)".into(), r.total_size_bytes.to_string()]));
+    rows.push(csv_row(&[
+        "Total size (bytes)".into(),
+        r.total_size_bytes.to_string(),
+    ]));
     rows.push(String::new());
-    rows.push(csv_row(&["File".into(), "Size (bytes)".into(), "Age (days)".into()]));
+    rows.push(csv_row(&[
+        "File".into(),
+        "Size (bytes)".into(),
+        "Age (days)".into(),
+    ]));
     for f in &r.files {
-        rows.push(csv_row(&[f.filename.clone(), f.size_bytes.to_string(), f.age_days.to_string()]));
+        rows.push(csv_row(&[
+            f.filename.clone(),
+            f.size_bytes.to_string(),
+            f.age_days.to_string(),
+        ]));
     }
     csv_join(rows)
 }
@@ -1594,15 +1780,32 @@ fn format_accounts_summary_csv(r: crate::models::AccountsSummary) -> String {
     let mut rows = vec![csv_row(&["Report".into(), "Accounts Summary".into()])];
     rows.push(csv_row(&["From".into(), r.from_date.clone()]));
     rows.push(csv_row(&["To".into(), r.to_date.clone()]));
-    rows.push(csv_row(&["Total collected".into(), fmt_f64(r.total_revenue + r.total_refunded)]));
-    rows.push(csv_row(&["Total refunded".into(), fmt_f64(r.total_refunded)]));
+    rows.push(csv_row(&[
+        "Total collected".into(),
+        fmt_f64(r.total_revenue + r.total_refunded),
+    ]));
+    rows.push(csv_row(&[
+        "Total refunded".into(),
+        fmt_f64(r.total_refunded),
+    ]));
     rows.push(csv_row(&["Net revenue".into(), fmt_f64(r.total_revenue)]));
-    rows.push(csv_row(&["Total expenses".into(), fmt_f64(r.total_expenses)]));
+    rows.push(csv_row(&[
+        "Total expenses".into(),
+        fmt_f64(r.total_expenses),
+    ]));
     rows.push(csv_row(&["Net position".into(), fmt_f64(r.net_position)]));
     rows.push(String::new());
-    rows.push(csv_row(&["Category".into(), "Total".into(), "Count".into()]));
+    rows.push(csv_row(&[
+        "Category".into(),
+        "Total".into(),
+        "Count".into(),
+    ]));
     for c in &r.by_category {
-        rows.push(csv_row(&[c.category.clone(), fmt_f64(c.total), c.count.to_string()]));
+        rows.push(csv_row(&[
+            c.category.clone(),
+            fmt_f64(c.total),
+            c.count.to_string(),
+        ]));
     }
     csv_join(rows)
 }
@@ -1776,8 +1979,7 @@ pub async fn export_report_csv(
                     .to_string()
             })?;
             let to_date = get_str("to_date").ok_or_else(|| {
-                "export_report_csv: 'to_date' is required for the lab_turnaround report"
-                    .to_string()
+                "export_report_csv: 'to_date' is required for the lab_turnaround report".to_string()
             })?;
             let report = fetch_lab_turnaround(pool, from_date, to_date).await?;
             Ok(format_lab_turnaround_csv(report))
@@ -1840,7 +2042,12 @@ pub async fn export_report_csv(
             // accounts module; the CSV surface stays unified here.
             let from_date = range_param(&p, "from_date", "accounts_summary")?;
             let to_date = range_param(&p, "to_date", "accounts_summary")?;
-            let r = crate::commands::accounts::fetch_accounts_summary(pool, from_date.clone(), to_date.clone()).await?;
+            let r = crate::commands::accounts::fetch_accounts_summary(
+                pool,
+                from_date.clone(),
+                to_date.clone(),
+            )
+            .await?;
             Ok(format_accounts_summary_csv(r))
         }
         other => Err(format!(
@@ -1853,13 +2060,11 @@ pub async fn export_report_csv(
 }
 
 /// Extract a mandatory range parameter for the CSV exporter dispatch.
-fn range_param(
-    p: &serde_json::Value,
-    key: &str,
-    report_type: &str,
-) -> Result<String, String> {
+fn range_param(p: &serde_json::Value, key: &str, report_type: &str) -> Result<String, String> {
     p.get(key)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| format!("export_report_csv: '{key}' is required for the {report_type} report"))
+        .ok_or_else(|| {
+            format!("export_report_csv: '{key}' is required for the {report_type} report")
+        })
 }

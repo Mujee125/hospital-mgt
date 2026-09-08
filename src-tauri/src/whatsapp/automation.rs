@@ -18,8 +18,8 @@
 //!
 //! Both strategies log the outcome to `whatsapp_notifications` for audit.
 
-use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_opener::OpenerExt;
 
 use super::WhatsAppMessage;
 
@@ -48,7 +48,10 @@ pub fn normalize_phone(raw: &str, default_country: Option<&str>) -> Result<Strin
         digits
     };
     if normalized.len() < 8 || !normalized.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!("Normalized phone number '{}' is invalid.", normalized));
+        return Err(format!(
+            "Normalized phone number '{}' is invalid.",
+            normalized
+        ));
     }
     Ok(normalized)
 }
@@ -103,7 +106,7 @@ fn validate_whatsapp_url(url: &str) -> Result<(), String> {
         ));
     }
     let after_scheme = &url[8..]; // skip "https://"
-    // Host is everything up to the first '/', '?', '#', or end-of-string.
+                                  // Host is everything up to the first '/', '?', '#', or end-of-string.
     let host_end = after_scheme
         .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
@@ -272,18 +275,34 @@ pub async fn send_whatsapp(
 
     // ── Strategy 1: Business API (user selected "api") ──
     // Only for non-group messages; groups can't use the simple text API.
+    //
+    // QA-2026-09-08 H5: the config load here previously `.unwrap()`ed — a
+    // transient DB error or a deleted config row between
+    // should_use_business_api() and this load PANICKED, killing the whole
+    // scheduler task (reminders, daily digest, and the nightly backup all
+    // stopped silently until the app was restarted). A config that fails
+    // to load (None — row gone or read error) is now treated as "Business
+    // API unusable this tick" and we fall through to the deep-link
+    // strategy — the same degraded mode already used when credentials
+    // are missing.
     if !msg.is_group && should_use_business_api(pool).await {
-        let config = load_whatsapp_config(pool).await.unwrap();
-        let phone = normalize_phone(&msg.recipient, clinic_default_cc.as_deref())?;
-        match send_via_business_api(&config, &phone, &msg.message).await {
-            Ok(()) => {
-                let _ = super::log::log_notification(pool, &msg, true).await;
-                return Ok(());
+        if let Some(config) = load_whatsapp_config(pool).await {
+            let phone = normalize_phone(&msg.recipient, clinic_default_cc.as_deref())?;
+            match send_via_business_api(&config, &phone, &msg.message).await {
+                Ok(()) => {
+                    let _ = super::log::log_notification(pool, &msg, true).await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[HMS WA] Business API failed ({}), falling back to deep link",
+                        e
+                    );
+                    // Fall through to deep-link strategy
+                }
             }
-            Err(e) => {
-                eprintln!("[HMS WA] Business API failed ({}), falling back to deep link", e);
-                // Fall through to deep-link strategy
-            }
+        } else {
+            eprintln!("[HMS WA] Config unavailable mid-send — falling back to deep link (scheduler stays alive)");
         }
     }
 
@@ -366,11 +385,9 @@ pub async fn check_patient_consent(
     if digits.len() < 9 {
         // Very short numbers are unusual; we cannot safely identify a
         // patient, so fail closed.
-        return Err(
-            "Patient has not consented to WhatsApp notifications. \
+        return Err("Patient has not consented to WhatsApp notifications. \
              Update consent in the patient record first."
-                .to_string(),
-        );
+            .to_string());
     }
     let suffix_len = digits.len().min(9);
     let suffix = &digits[digits.len() - suffix_len..];
@@ -408,10 +425,8 @@ pub async fn check_patient_consent(
 
     match row {
         Some((granted,)) if granted => Ok(()),
-        _ => Err(
-            "Patient has not consented to WhatsApp notifications. \
+        _ => Err("Patient has not consented to WhatsApp notifications. \
              Update consent in the patient record first."
-                .to_string(),
-        ),
+            .to_string()),
     }
 }

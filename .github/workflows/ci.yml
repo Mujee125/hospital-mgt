@@ -56,10 +56,50 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        # QA-2026-09-08 C3: the test targets (tests/*.rs) import the crate's
+        # private modules, which are only exported under the
+        # `hms-integration-tests` feature (see src/lib.rs module gating).
+        # Without it, `--all-targets` fails to compile session_tests and the
+        # rust-quality job has been red / skipped-in-practice.
+        #
+        # The LIB is held to -D warnings (zero tolerance). The test targets
+        # still carry ~12 pre-existing `field_reassign_with_default` style
+        # lints in config_tests.rs / common/mod.rs (predates this workflow
+        # change; cosmetic, test-only) — allowed via -A for now so the gate
+        # runs instead of being ignored. Clean them up, then drop the -A.
+        run: >
+          cargo clippy --all-targets --features hms-integration-tests --
+          -D warnings
+          -A clippy::field_reassign_with_default
 
       - name: Run unit tests (no DB required)
-        run: cargo test --lib
+        run: cargo test --lib --features hms-integration-tests
+
+  # ── Rust: Dependency vulnerability audit ────────────────────────────────────
+  # QA-2026-09-08 (3.2-10, was ❌): docs/04 marked cargo/npm audit as
+  # "Planned Batch 5" — nothing gated known-CVE dependencies. This FAILS
+  # the build on any advisory. If a dependency needs a documented
+  # exception, add the advisory ID to an ignore list here with a
+  # justification comment.
+  rust-audit:
+    name: Rust Dependency Audit (cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Audit Rust dependencies (app)
+        working-directory: src-tauri
+        run: cargo audit --deny warnings
+
+      - name: Audit Rust dependencies (keygen)
+        working-directory: keygen
+        run: cargo audit --deny warnings
 
   # ── Rust: Integration Tests (requires PostgreSQL) ─────────────────────────
   rust-integration:
@@ -100,9 +140,22 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: Run integration tests
-        run: cargo test --test integration_tests --test concurrency_tests --test ipc_security_tests --test scheduler_tests
+        # QA-2026-09-08 C3: previously only the 4 legacy suites ran — the
+        # 13 newer AERP suites (session security, WhatsApp authz, billing,
+        # backup, config, accounts, lab, nursing, queue, reports, search,
+        # notifications, ipc_posture) read HMS_TEST_DB_URL (never set in
+        # CI) and the feature gate was missing, so they NEVER executed in
+        # CI despite passing locally. Bare `--tests` builds and runs every
+        # suite in tests/ (do NOT list suite names after `--` — that is a
+        # test-name FILTER, not suite selection, and would match nothing).
+        # Set both env vars: legacy suites read DATABASE_URL, AERP suites
+        # read HMS_TEST_DB_URL. --test-threads=1 matches the project's own
+        # sequential battery (REVIEW-PACKAGE-P3.md): suites share one
+        # scratch DB and some fixtures rely on execution order.
+        run: cargo test --features hms-integration-tests --tests -- --test-threads=1
         env:
           DATABASE_URL: postgresql://hms_test:hms_test@localhost:5432/hms_test
+          HMS_TEST_DB_URL: postgresql://hms_test:hms_test@localhost:5432/postgres
 
   # ── Rust: Coverage ──────────────────────────────────────────────────────────
   rust-coverage:
@@ -139,9 +192,10 @@ jobs:
         run: cargo install cargo-llvm-cov
 
       - name: Run coverage
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --features hms-integration-tests --workspace --lcov --output-path lcov.info
         env:
           DATABASE_URL: postgresql://hms_test:hms_test@localhost:5432/hms_test
+          HMS_TEST_DB_URL: postgresql://hms_test:hms_test@localhost:5432/postgres
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
@@ -195,7 +249,7 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [rust-quality, rust-integration, rust-coverage, frontend-quality]
+    needs: [rust-quality, rust-audit, rust-integration, rust-coverage, frontend-quality]
     if: always()
     steps:
       - name: Check all jobs

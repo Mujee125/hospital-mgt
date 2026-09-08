@@ -426,18 +426,27 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/** Route table + page transition. AppShell never remounts on navigation. */
+/** Route table + page transition. AppShell never remounts on navigation.
+ *
+ * QA-2026-09-08 M11: every feature route is now wrapped in
+ * RequirePermission, matching the sidebar's own requiredPermission
+ * entries — previously only 6/19 routes were guarded, so a deep link to
+ * /billing, /users, /audit etc. rendered the page and fired its data
+ * queries for an unprivileged user before the backend RBAC rejected the
+ * invoke. The backend re-checks every command (this is UX-only, per the
+ * RequirePermission header comment); the route guard just stops the
+ * page from half-rendering + toasting a wall of permission errors. */
 function RoutedPages({ config, setConfig }: { config: AppConfig | null; setConfig: (c: AppConfig) => void }) {
   const navigate = useNavigate();
   return (
     <AnimatePresence mode="wait">
       <Routes>
         <Route path="/" element={<PageTransition><Dashboard onNavigate={(tab) => navigate(`/${tab}`)} triggerAddPatient={() => navigate("/patients?add=1")} triggerAddAppointment={() => navigate("/appointments?add=1")} /></PageTransition>} />
-        <Route path="/appointments" element={<PageTransition><Appointments /></PageTransition>} />
-        <Route path="/patients" element={<PageTransition><Patients /></PageTransition>} />
-        <Route path="/doctors" element={<PageTransition><Doctors /></PageTransition>} />
-        <Route path="/queue" element={<PageTransition><Queue /></PageTransition>} />
-        <Route path="/ipd" element={<PageTransition><IPD /></PageTransition>} />
+        <Route path="/appointments" element={<PageTransition><RequirePermission perm={PERMISSIONS.AppointmentsView}><Appointments /></RequirePermission></PageTransition>} />
+        <Route path="/patients" element={<PageTransition><RequirePermission perm={PERMISSIONS.PatientsView}><Patients /></RequirePermission></PageTransition>} />
+        <Route path="/doctors" element={<PageTransition><RequirePermission perm={PERMISSIONS.DoctorsView}><Doctors /></RequirePermission></PageTransition>} />
+        <Route path="/queue" element={<PageTransition><RequirePermission perm={PERMISSIONS.QueueView}><Queue /></RequirePermission></PageTransition>} />
+        <Route path="/ipd" element={<PageTransition><RequirePermission perm={PERMISSIONS.IpdView}><IPD /></RequirePermission></PageTransition>} />
         <Route
           path="/nursing"
           element={
@@ -448,7 +457,7 @@ function RoutedPages({ config, setConfig }: { config: AppConfig | null; setConfi
             </PageTransition>
           }
         />
-        <Route path="/laboratory" element={<PageTransition><Laboratory /></PageTransition>} />
+        <Route path="/laboratory" element={<PageTransition><RequirePermission perm={PERMISSIONS.LabView}><Laboratory /></RequirePermission></PageTransition>} />
         <Route
           path="/radiology"
           element={
@@ -485,8 +494,8 @@ function RoutedPages({ config, setConfig }: { config: AppConfig | null; setConfi
             </PageTransition>
           }
         />
-        <Route path="/billing" element={<PageTransition><Billing /></PageTransition>} />
-        <Route path="/inventory" element={<PageTransition><Inventory /></PageTransition>} />
+        <Route path="/billing" element={<PageTransition><RequirePermission perm={PERMISSIONS.BillingView}><Billing /></RequirePermission></PageTransition>} />
+        <Route path="/inventory" element={<PageTransition><RequirePermission perm={PERMISSIONS.InventoryView}><Inventory /></RequirePermission></PageTransition>} />
         <Route
           path="/pharmacy"
           element={
@@ -498,8 +507,8 @@ function RoutedPages({ config, setConfig }: { config: AppConfig | null; setConfi
           }
         />
         <Route path="/messaging" element={<PageTransition><Messaging /></PageTransition>} />
-        <Route path="/audit" element={<PageTransition><AuditLogPage /></PageTransition>} />
-        <Route path="/users" element={<PageTransition><UsersPage /></PageTransition>} />
+        <Route path="/audit" element={<PageTransition><RequirePermission perm={PERMISSIONS.AuditView}><AuditLogPage /></RequirePermission></PageTransition>} />
+        <Route path="/users" element={<PageTransition><RequirePermission perm={PERMISSIONS.UsersView}><UsersPage /></RequirePermission></PageTransition>} />
         <Route
           path="/reports"
           element={

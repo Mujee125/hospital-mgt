@@ -52,14 +52,17 @@ fn wait_until_accepting_connections(pg_bin_dir: &Path, port: u16, max_attempts: 
     for _ in 0..max_attempts {
         let ok = if pg_isready.exists() {
             Command::new(&pg_isready)
-                .arg("-p").arg(port.to_string())
+                .arg("-p")
+                .arg(port.to_string())
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false)
         } else {
             crate::discovery::is_reachable("127.0.0.1", port, 500)
         };
-        if ok { return true; }
+        if ok {
+            return true;
+        }
         std::thread::sleep(Duration::from_millis(500));
     }
     false
@@ -67,7 +70,12 @@ fn wait_until_accepting_connections(pg_bin_dir: &Path, port: u16, max_attempts: 
 
 pub fn default_pg_bin_dir() -> Option<std::path::PathBuf> {
     let program_data = std::env::var_os("ProgramData")?;
-    Some(std::path::PathBuf::from(program_data).join("HMS").join("pgsql").join("bin"))
+    Some(
+        std::path::PathBuf::from(program_data)
+            .join("HMS")
+            .join("pgsql")
+            .join("bin"),
+    )
 }
 
 /// Returns true if the SSL marker file already exists (SSL was enabled on
@@ -120,17 +128,17 @@ pub fn write_ssl_config_and_restart(
     let cleaned: String = existing
         .lines()
         .filter(|l| {
-            !l.contains("# HMS: TLS") &&
-            !l.trim_start().starts_with("ssl = ") &&
-            !l.trim_start().starts_with("ssl=") &&
-            !l.trim_start().starts_with("ssl_cert_file") &&
-            !l.trim_start().starts_with("ssl_key_file")
+            !l.contains("# HMS: TLS")
+                && !l.trim_start().starts_with("ssl = ")
+                && !l.trim_start().starts_with("ssl=")
+                && !l.trim_start().starts_with("ssl_cert_file")
+                && !l.trim_start().starts_with("ssl_key_file")
         })
         .collect::<Vec<_>>()
         .join("\n");
 
     let cert_str = cert_path.to_string_lossy().replace('\\', "/");
-    let key_str  = key_path.to_string_lossy().replace('\\', "/");
+    let key_str = key_path.to_string_lossy().replace('\\', "/");
 
     let new_conf = format!(
         "{}\n\n# HMS: TLS (written by app on first launch — see tls_provision.rs)\nssl = on\nssl_cert_file = '{}'\nssl_key_file = '{}'\n",
@@ -165,7 +173,7 @@ pub fn write_ssl_config_and_restart(
     // instead we rely on the config being operator-set. A future
     // hardening could quote the value with double-quotes to escape any
     // embedded quotes.
-    let hba_path  = pgdata_dir.join("pg_hba.conf");
+    let hba_path = pgdata_dir.join("pg_hba.conf");
     let hba_rules = format!(
         "# HMS managed — LAN + loopback, SSL required, scram-sha-256 auth.\n\
          # SEC-15: LAN rules restricted to the HMS app DB user (was: all all).\n\
@@ -176,16 +184,70 @@ pub fn write_ssl_config_and_restart(
          hostssl  all  {app_user}    192.168.0.0/16  scram-sha-256\n",
         app_user = app_db_user
     );
-    std::fs::write(&hba_path, hba_rules)
-        .map_err(|e| format!("Cannot write pg_hba.conf: {}", e))?;
+    std::fs::write(&hba_path, hba_rules).map_err(|e| format!("Cannot write pg_hba.conf: {}", e))?;
 
     // Restrict private key permissions
     let _ = Command::new("icacls")
         .arg(key_path)
-        .args(["/inheritance:r", "/grant:r", "SYSTEM:F", "/grant:r", "*S-1-5-32-544:F"])
+        .args([
+            "/inheritance:r",
+            "/grant:r",
+            "SYSTEM:F",
+            "/grant:r",
+            "*S-1-5-32-544:F",
+        ])
         .output();
 
+    // QA-2026-09-08 C1: harden the pgdata cluster directory itself. The
+    // NSIS installer grants BUILTIN\Users (OI)(CI)M on ALL of
+    // C:\ProgramData\HMS — including pgdata, the entire PHI store. Any
+    // local non-admin account could copy the whole cluster (every
+    // patient's data) or tamper with pg_hba.conf. The backups directory
+    // got the same hardening in Phase 7 (backup.rs); pgdata is the more
+    // valuable asset and never did. This runs once, here, on the same
+    // first-launch path that enables SSL.
+    harden_pgdata_acl(pgdata_dir);
+
     restart_service_and_wait()
+}
+
+/// QA-2026-09-08 C1: strip the inherited Users:Modify ACE from the pgdata
+/// cluster directory, leaving SYSTEM and Administrators with full control
+/// (the Postgres service runs as SYSTEM, so it keeps working untouched)
+/// plus the current user read access so the non-elevated HMS app can keep
+/// reading postgresql.conf / marker files. Best-effort — an ACL failure
+/// logs but never blocks SSL enablement or app boot (fail-open here is
+/// deliberate: a locked-down DB that can't start is a hospital-down event;
+/// the failure is visible in the log for the health dashboard to surface).
+fn harden_pgdata_acl(pgdata_dir: &Path) {
+    let mut cmd = Command::new("icacls");
+    cmd.arg(pgdata_dir.as_os_str())
+        .args(["/inheritance:r"])
+        .args(["/grant:r", "SYSTEM:(OI)(CI)F"])
+        .args(["/grant:r", "*S-1-5-32-544:(OI)(CI)F"]);
+    if let Some(user) = std::env::var_os("USERNAME") {
+        // The non-elevated HMS app reads postgresql.conf / SSL marker
+        // files from pgdata on every boot — keep (RX) for the installing
+        // user so health checks don't break. No write: the app never
+        // writes into pgdata (the SSL bootstrap writes config via
+        // elevated-path provisioning), and denying Users:Modify here is
+        // the entire point.
+        let _ = cmd.arg(format!("{}:(OI)(CI)RX", user.to_string_lossy()));
+    }
+    let status = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            eprintln!(
+                "[HMS PG] pgdata ACL hardened: SYSTEM + Administrators + installing user (read)"
+            );
+        }
+        _ => {
+            eprintln!("[HMS PG] WARNING: could not harden pgdata ACL — pgdata remains writable by local Users");
+        }
+    }
 }
 
 /// First-time SSL enablement. Idempotent via marker file.
@@ -207,8 +269,7 @@ pub fn ensure_postgres_ssl_enabled(
 
     write_ssl_config_and_restart(pgdata_dir, cert_path, key_path, app_db_user)?;
 
-    std::fs::write(&marker, "1")
-        .map_err(|e| format!("Cannot write SSL marker file: {}", e))?;
+    std::fs::write(&marker, "1").map_err(|e| format!("Cannot write SSL marker file: {}", e))?;
 
     Ok(true)
 }
@@ -252,7 +313,9 @@ fn restart_service_and_wait() -> Result<(), String> {
                 s.contains("STOPPED") || !s.contains("RUNNING")
             })
             .unwrap_or(true);
-        if stopped { break; }
+        if stopped {
+            break;
+        }
     }
 
     // Start

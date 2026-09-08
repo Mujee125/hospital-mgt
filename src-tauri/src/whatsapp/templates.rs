@@ -104,7 +104,10 @@ pub fn build_daily_digest_msg(
     if appointments.is_empty() {
         lines.push_str("No appointments scheduled for today.");
     } else {
-        lines.push_str(&format!("*{} appointment(s) today:*\n\n", appointments.len()));
+        lines.push_str(&format!(
+            "*{} appointment(s) today:*\n\n",
+            appointments.len()
+        ));
         for (time, patient, doctor, status) in appointments {
             let icon = match status.as_str() {
                 "confirmed" => "✅",
@@ -113,7 +116,10 @@ pub fn build_daily_digest_msg(
                 "no-show" => "⚠️",
                 _ => "🔵",
             };
-            lines.push_str(&format!("{} *{}* — {} with Dr. {}\n", icon, time, patient, doctor));
+            lines.push_str(&format!(
+                "{} *{}* — {} with Dr. {}\n",
+                icon, time, patient, doctor
+            ));
         }
     }
 

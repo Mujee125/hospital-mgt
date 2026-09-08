@@ -6,6 +6,63 @@ use crate::audit;
 use crate::models::{CreateDoctor, Doctor, UpdateDoctor};
 use crate::rbac::{self, Permission, SessionState};
 
+/// QA-2026-09-08 (3.2-1): shared input validation for create/update.
+/// Empty names previously sailed through to a raw `$7::TIME` cast error
+/// from Postgres when the time format was bad — validate shape here so
+/// the frontend gets a precise, field-named message.
+fn validate_doctor_fields(
+    first_name: &str,
+    last_name: &str,
+    specialization: &str,
+    available_from: &str,
+    available_to: &str,
+) -> Result<(), String> {
+    if first_name.trim().is_empty() {
+        return Err("First name is required.".to_string());
+    }
+    if last_name.trim().is_empty() {
+        return Err("Last name is required.".to_string());
+    }
+    if specialization.trim().is_empty() {
+        return Err("Specialization is required.".to_string());
+    }
+    // HH:MM or HH:MM:SS — reject anything else before Postgres's TIME cast
+    // turns it into an opaque error.
+    let valid_time = |t: &str| {
+        let parts: Vec<&str> = t.split(':').collect();
+        match parts.as_slice() {
+            [h, m] => {
+                h.len() == 2
+                    && h.parse::<u32>().map(|v| v < 24).unwrap_or(false)
+                    && m.len() == 2
+                    && m.parse::<u32>().map(|v| v < 60).unwrap_or(false)
+            }
+            [h, m, s] => {
+                h.len() == 2
+                    && h.parse::<u32>().map(|v| v < 24).unwrap_or(false)
+                    && m.len() == 2
+                    && m.parse::<u32>().map(|v| v < 60).unwrap_or(false)
+                    && s.len() == 2
+                    && s.parse::<u32>().map(|v| v < 60).unwrap_or(false)
+            }
+            _ => false,
+        }
+    };
+    if !valid_time(available_from) {
+        return Err(format!(
+            "'{}' is not a valid start time. Use HH:MM (24-hour).",
+            available_from
+        ));
+    }
+    if !valid_time(available_to) {
+        return Err(format!(
+            "'{}' is not a valid end time. Use HH:MM (24-hour).",
+            available_to
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn create_doctor(
     pool: tauri::State<'_, PgPool>,
@@ -13,6 +70,13 @@ pub async fn create_doctor(
     doctor: CreateDoctor,
 ) -> Result<i32, String> {
     let s = rbac::require(&session, Permission::DoctorsManage)?;
+    validate_doctor_fields(
+        &doctor.first_name,
+        &doctor.last_name,
+        &doctor.specialization,
+        &doctor.available_from,
+        &doctor.available_to,
+    )?;
     let row: (i32,) = sqlx::query_as(
         r#"
         INSERT INTO doctors
@@ -34,8 +98,15 @@ pub async fn create_doctor(
     .await
     .map_err(|e| format!("Failed to create doctor: {}", e))?;
 
-    audit::for_session(pool.inner(), &s, "doctor_create", "doctors",
-        Some(&row.0.to_string()), None).await;
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "doctor_create",
+        "doctors",
+        Some(&row.0.to_string()),
+        None,
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -79,6 +150,13 @@ pub async fn update_doctor(
     doctor: UpdateDoctor,
 ) -> Result<(), String> {
     let s = rbac::require(&session, Permission::DoctorsManage)?;
+    validate_doctor_fields(
+        &doctor.first_name,
+        &doctor.last_name,
+        &doctor.specialization,
+        &doctor.available_from,
+        &doctor.available_to,
+    )?;
     sqlx::query(
         r#"
         UPDATE doctors SET
@@ -103,8 +181,15 @@ pub async fn update_doctor(
     .await
     .map_err(|e| format!("Update failed: {}", e))?;
 
-    audit::for_session(pool.inner(), &s, "doctor_update", "doctors",
-        Some(&doctor.id.to_string()), None).await;
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "doctor_update",
+        "doctors",
+        Some(&doctor.id.to_string()),
+        None,
+    )
+    .await;
     Ok(())
 }
 
@@ -115,13 +200,41 @@ pub async fn delete_doctor(
     id: i32,
 ) -> Result<(), String> {
     let s = rbac::require(&session, Permission::DoctorsManage)?;
+
+    // QA-2026-09-08 M7 (HIPAA §164.530(j)): deleting a doctor used to
+    // CASCADE-delete every appointment (the schema's one clinical-history
+    // CASCADE FK) — silently destroying booking history, WhatsApp
+    // notification links and stats. The FK is now RESTRICT; this pre-check
+    // turns the DB's raw "violates foreign key constraint" into a clear,
+    // actionable message. Deactivating (is_active = false) is the
+    // retention-compliant path for departing doctors.
+    let appointments: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM appointments WHERE doctor_id = $1")
+            .bind(id)
+            .fetch_one(pool.inner())
+            .await
+            .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    if appointments.0 > 0 {
+        return Err(format!(
+            "This doctor has {} appointment(s) on record. Deleting them would destroy clinical history — mark the doctor as inactive instead.",
+            appointments.0
+        ));
+    }
+
     sqlx::query("DELETE FROM doctors WHERE id = $1")
         .bind(id)
         .execute(pool.inner())
         .await
-        .map_err(|e| format!("Delete failed: {}", e))?;
-    audit::for_session(pool.inner(), &s, "doctor_delete", "doctors",
-        Some(&id.to_string()), None).await;
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "doctor_delete",
+        "doctors",
+        Some(&id.to_string()),
+        None,
+    )
+    .await;
     Ok(())
 }
 
@@ -131,10 +244,8 @@ pub async fn get_specializations(
     session: tauri::State<'_, SessionState>,
 ) -> Result<Vec<String>, String> {
     let _ = rbac::require(&session, Permission::DoctorsView)?;
-    sqlx::query_scalar(
-        "SELECT DISTINCT specialization FROM doctors ORDER BY specialization",
-    )
-    .fetch_all(pool.inner())
-    .await
-    .map_err(|e| format!("Failed to get specializations: {}", e))
+    sqlx::query_scalar("SELECT DISTINCT specialization FROM doctors ORDER BY specialization")
+        .fetch_all(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to get specializations: {}", e))
 }

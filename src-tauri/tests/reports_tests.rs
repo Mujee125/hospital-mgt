@@ -21,8 +21,8 @@ mod common;
 
 use common::*;
 use hospital_mgmt_lib::commands::reports::{
-    fetch_daily_collection, fetch_diagnosis_frequency, fetch_doctor_performance,
-    fetch_drug_expiry, fetch_insurance_claims, fetch_receivables_aging, fetch_stock_status,
+    fetch_daily_collection, fetch_diagnosis_frequency, fetch_doctor_performance, fetch_drug_expiry,
+    fetch_insurance_claims, fetch_receivables_aging, fetch_stock_status,
 };
 
 fn today() -> String {
@@ -55,8 +55,11 @@ async fn test_rp1_doctor_performance_counts_all_activities() {
         .bind(patient_id).bind(doctor.0)
         .execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO encounters (patient_id, doctor_id, diagnosis) VALUES ($1, $2, 'Flu')")
-        .bind(patient_id).bind(doctor.0)
-        .execute(&pool).await.unwrap();
+        .bind(patient_id)
+        .bind(doctor.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     let lab: (i32,) = sqlx::query_as(
         "INSERT INTO lab_orders (patient_id, ordered_by_doctor_id, status) VALUES ($1, $2, 'ordered') RETURNING id",
     )
@@ -70,7 +73,9 @@ async fn test_rp1_doctor_performance_counts_all_activities() {
     .fetch_one(&pool).await.unwrap();
     let _ = rx;
 
-    let report = fetch_doctor_performance(&pool, days_ago(1), today()).await.unwrap();
+    let report = fetch_doctor_performance(&pool, days_ago(1), today())
+        .await
+        .unwrap();
     let row = report
         .doctors
         .iter()
@@ -90,25 +95,45 @@ async fn test_rp2_diagnosis_frequency_groups_and_counts() {
     let patient_id = seed_patient_with_phone(&pool, "Rep", "Diag", "+92300rp2a").await;
 
     sqlx::query("INSERT INTO encounters (patient_id, diagnosis) VALUES ($1, 'Hypertension')")
-        .bind(patient_id).execute(&pool).await.unwrap();
+        .bind(patient_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO encounters (patient_id, diagnosis) VALUES ($1, 'Hypertension')")
-        .bind(patient_id).execute(&pool).await.unwrap();
+        .bind(patient_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     // Un-diagnosed encounters must not count.
     sqlx::query("INSERT INTO encounters (patient_id, diagnosis) VALUES ($1, NULL)")
-        .bind(patient_id).execute(&pool).await.unwrap();
+        .bind(patient_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO encounters (patient_id, diagnosis) VALUES ($1, '   ')")
-        .bind(patient_id).execute(&pool).await.unwrap();
+        .bind(patient_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-    let report = fetch_diagnosis_frequency(&pool, days_ago(1), today()).await.unwrap();
+    let report = fetch_diagnosis_frequency(&pool, days_ago(1), today())
+        .await
+        .unwrap();
     let ht = report
         .top_diagnoses
         .iter()
         .find(|d| d.diagnosis == "Hypertension")
         .expect("Hypertension must appear");
-    assert_eq!(ht.encounter_count, 2, "only the two diagnosed encounters count");
+    assert_eq!(
+        ht.encounter_count, 2,
+        "only the two diagnosed encounters count"
+    );
     assert!(report.total_encounters >= 2);
     // Blank/whitespace diagnoses never surface as rows.
-    assert!(report.top_diagnoses.iter().all(|d| !d.diagnosis.trim().is_empty()));
+    assert!(report
+        .top_diagnoses
+        .iter()
+        .all(|d| !d.diagnosis.trim().is_empty()));
 }
 
 // ── RP-3: Daily collection ────────────────────────────────────────────────────
@@ -127,11 +152,19 @@ async fn test_rp3_daily_collection_net_math() {
     .unwrap();
 
     sqlx::query("INSERT INTO payments (bill_id, amount, payment_method) VALUES ($1, 300, 'cash')")
-        .bind(bill.0).execute(&pool).await.unwrap();
+        .bind(bill.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO refunds (bill_id, amount, reason) VALUES ($1, 50, 'test refund')")
-        .bind(bill.0).execute(&pool).await.unwrap();
+        .bind(bill.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-    let report = fetch_daily_collection(&pool, days_ago(1), today()).await.unwrap();
+    let report = fetch_daily_collection(&pool, days_ago(1), today())
+        .await
+        .unwrap();
     let today_row = report
         .by_day
         .iter()
@@ -172,7 +205,10 @@ async fn test_rp4_receivables_aging_excludes_settled() {
     .await
     .unwrap();
     sqlx::query("INSERT INTO payments (bill_id, amount, payment_method) VALUES ($1, 400, 'cash')")
-        .bind(paid.0).execute(&pool).await.unwrap();
+        .bind(paid.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // A cancelled (credit-noted) bill must not count as receivable.
     sqlx::query(
@@ -265,7 +301,10 @@ async fn test_rp6_stock_status_flags_low_stock() {
         "the below-reorder item must be flagged low-stock"
     );
     assert!(
-        !report.low_stock_items.iter().any(|i| i.name == "RP6-Healthy"),
+        !report
+            .low_stock_items
+            .iter()
+            .any(|i| i.name == "RP6-Healthy"),
         "healthy stock must not be flagged"
     );
     assert!(report.active_items >= 2);
@@ -299,8 +338,14 @@ async fn test_rp7_drug_expiry_buckets() {
 
     let report = fetch_drug_expiry(&pool).await.unwrap();
     assert!(report.expired_count >= 1, "the yesterday item is expired");
-    assert!(report.expiring_90_days >= 1, "the +30d item is in the 90 bucket");
-    assert!(report.expiring_180_days >= 1, "the +150d item is in the 180 bucket");
+    assert!(
+        report.expiring_90_days >= 1,
+        "the +30d item is in the 90 bucket"
+    );
+    assert!(
+        report.expiring_180_days >= 1,
+        "the +150d item is in the 180 bucket"
+    );
     assert!(report.expired_stock_value >= 40.0, "4 units × 10.0");
     // Detail rows ordered earliest-expiry-first.
     let gone_idx = report.items.iter().position(|i| i.name == "RP7-Gone");

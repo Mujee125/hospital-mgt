@@ -19,7 +19,6 @@ mod common;
 use common::*;
 use hospital_mgmt_lib::rbac::{self, Permission, Session, SessionState};
 use sqlx::PgPool;
-use tauri::Manager;
 use std::sync::{Arc, Mutex};
 
 async fn setup() -> PgPool {
@@ -81,7 +80,7 @@ async fn wp2_i01_me_rejects_after_cross_pc_login() {
 
     // PC-A's `me` (production me_core) must now fail.
     let r = hospital_mgmt_lib::auth::me_core(&pool, &pc_a).await;
-    let err = r.err().expect("PC-A me must fail after PC-B login");
+    let err = r.expect_err("PC-A me must fail after PC-B login");
     assert!(err.contains("Session expired"), "got: {}", err);
 
     // And PC-A's state was cleared by `me` (fail-fast for future calls).
@@ -194,11 +193,9 @@ async fn wp2_i05_require_strong_rejects_after_password_reset() {
     let target_state = state_for(&pool, target, "hash_i05_target").await;
 
     // Admin resets the target's password via the production core.
-    hospital_mgmt_lib::auth::reset_user_password_core(
-        &pool, &admin_state, target, fixture_pw(),
-    )
-    .await
-    .expect("reset");
+    hospital_mgmt_lib::auth::reset_user_password_core(&pool, &admin_state, target, fixture_pw())
+        .await
+        .expect("reset");
 
     // Target's session rows are gone.
     assert_eq!(count_sessions(&pool, target).await, 0);
@@ -223,7 +220,11 @@ async fn wp2_i06_low_risk_command_not_db_checked() {
     set_user_active(&pool, uid, false).await;
 
     // High-risk: rejected (DB-backed).
-    assert!(rbac::require_strong(&state, &pool, Permission::PatientsCreate).await.is_err());
+    assert!(
+        rbac::require_strong(&state, &pool, Permission::PatientsCreate)
+            .await
+            .is_err()
+    );
 
     // A fresh state (the high-risk failure above cleared `state`) with the
     // same session: the LOW-risk guard (pure in-memory) still succeeds.
@@ -251,11 +252,9 @@ async fn wp2_i07_i09_invalidation_observables() {
 
     // Reset → sessions deleted.
     seed_session_row(&pool, t_reset, "hash_i07_reset").await;
-    hospital_mgmt_lib::auth::reset_user_password_core(
-        &pool, &admin_state, t_reset, fixture_pw(),
-    )
-    .await
-    .unwrap();
+    hospital_mgmt_lib::auth::reset_user_password_core(&pool, &admin_state, t_reset, fixture_pw())
+        .await
+        .unwrap();
     assert_eq!(count_sessions(&pool, t_reset).await, 0);
 
     // Deactivate → is_active FALSE (observable half of the event).
@@ -314,20 +313,22 @@ async fn wp2_i10_login_invalidates_prior_sessions() {
 
     let pc_a: SessionState = Arc::new(Mutex::new(None));
     let pc_b: SessionState = Arc::new(Mutex::new(None));
-    login_on(&pool, &pc_a, "aerp_user_i10", &fixture_pw()).await.unwrap();
+    login_on(&pool, &pc_a, "aerp_user_i10", &fixture_pw())
+        .await
+        .unwrap();
     let token_a = current_token_hash(&pool).await;
-    login_on(&pool, &pc_b, "aerp_user_i10", &fixture_pw()).await.unwrap();
+    login_on(&pool, &pc_b, "aerp_user_i10", &fixture_pw())
+        .await
+        .unwrap();
     let token_b = current_token_hash(&pool).await;
 
     assert_ne!(token_a, token_b);
-    let n: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sessions WHERE token_hash IN ($1, $2)",
-    )
-    .bind(&token_a)
-    .bind(&token_b)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let n: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions WHERE token_hash IN ($1, $2)")
+        .bind(&token_a)
+        .bind(&token_b)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(n.0, 1, "only the newest session row survives");
 }
 
@@ -416,7 +417,11 @@ async fn wp2_n02_deleted_user_cannot_act() {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(count_sessions(&pool, uid).await, 0, "FK cascade removes sessions");
+    assert_eq!(
+        count_sessions(&pool, uid).await,
+        0,
+        "FK cascade removes sessions"
+    );
 
     let r = rbac::require_strong(&state, &pool, Permission::PatientsCreate)
         .await
@@ -442,20 +447,34 @@ async fn wp2_n03_token_hash_not_in_frontend_responses() {
     // hash (64 hex chars) — never the raw base64url token. (Test fixtures
     // use short synthetic hashes and are excluded by user filter.)
     let uid: (i32,) = sqlx::query_as("SELECT id FROM users WHERE username = 'aerp_user_n03'")
-        .fetch_one(&pool).await.unwrap();
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT token_hash FROM sessions WHERE user_id = $1",
-    )
-    .bind(uid.0)
-    .fetch_all(&pool).await.unwrap();
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT token_hash FROM sessions WHERE user_id = $1")
+        .bind(uid.0)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
     assert_eq!(rows.len(), 1);
     let (h,) = rows[0].clone();
-    assert_eq!(h.len(), 64, "stored token_hash must be SHA-256 hex, got len {}", h.len());
+    assert_eq!(
+        h.len(),
+        64,
+        "stored token_hash must be SHA-256 hex, got len {}",
+        h.len()
+    );
     assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
     // And the raw token never appears anywhere in the sessions table.
-    let all: String = sqlx::query_scalar::<_, String>("SELECT string_agg(token_hash, ',') FROM sessions")
-        .fetch_one(&pool).await.unwrap_or_default();
-    assert!(!json.contains("token"), "raw token leaked into a response: {}", json);
+    let _all: String =
+        sqlx::query_scalar::<_, String>("SELECT string_agg(token_hash, ',') FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_default();
+    assert!(
+        !json.contains("token"),
+        "raw token leaked into a response: {}",
+        json
+    );
 }
 
 // ── G.2.4 Penetration tests (WP2-P01 … P04) ───────────────────────────────────
@@ -506,14 +525,16 @@ async fn wp2_p02_race_deactivate_vs_commands() {
     let state = Arc::new(state);
     let uid_c = uid;
 
-    let (guards, deact) = tokio::join!(
+    let (guards, _deact) = tokio::join!(
         async {
             let mut hs = vec![];
             for _ in 0..30 {
                 let p = pool.clone();
                 let s = state.clone();
                 hs.push(tokio::spawn(async move {
-                    rbac::require_strong(&s, &p, Permission::PatientsCreate).await.is_ok()
+                    rbac::require_strong(&s, &p, Permission::PatientsCreate)
+                        .await
+                        .is_ok()
                 }));
             }
             let mut ok = 0usize;
@@ -563,11 +584,9 @@ async fn wp2_p04_me_bypass_still_enforced() {
     let admin = seed_user(&pool, "aerp_admin_p04", &fixture_pw(), &["super_admin"]).await;
     seed_session_row(&pool, admin, "hash_p04_admin").await;
     let admin_state = state_for(&pool, admin, "hash_p04_admin").await;
-    hospital_mgmt_lib::auth::reset_user_password_core(
-        &pool, &admin_state, uid, fixture_pw(),
-    )
-    .await
-    .unwrap();
+    hospital_mgmt_lib::auth::reset_user_password_core(&pool, &admin_state, uid, fixture_pw())
+        .await
+        .unwrap();
 
     let r = rbac::require_strong(&state, &pool, Permission::PatientsCreate)
         .await
@@ -619,7 +638,11 @@ async fn wp2_c01_concurrent_logins_single_session() {
         .await
         .unwrap();
     let n = count_sessions(&pool, uid.0).await;
-    assert_eq!(n, 1, "single active session must survive concurrent logins, got {}", n);
+    assert_eq!(
+        n, 1,
+        "single active session must survive concurrent logins, got {}",
+        n
+    );
 }
 
 /// WP2-C02 — 100 concurrent high-risk calls WHILE the user is deactivated:
@@ -669,7 +692,11 @@ async fn wp2_c02_concurrent_create_patient_vs_deactivation() {
             let mut ok = 0usize;
             let mut errs = 0usize;
             for h in handles {
-                if h.await.unwrap() { ok += 1 } else { errs += 1 }
+                if h.await.unwrap() {
+                    ok += 1
+                } else {
+                    errs += 1
+                }
             }
             (ok, errs)
         },
@@ -680,12 +707,10 @@ async fn wp2_c02_concurrent_create_patient_vs_deactivation() {
     );
 
     assert_eq!(results.0 + results.1, 100, "every call must resolve");
-    let created: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM patients WHERE last_name = 'Conc'",
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+    let created: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM patients WHERE last_name = 'Conc'")
+        .fetch_one(&*pool)
+        .await
+        .unwrap();
     assert_eq!(
         created.0 as usize, results.0,
         "created rows must equal successful calls (no partial writes)"
@@ -711,12 +736,16 @@ async fn wp2_c03_concurrent_role_change_vs_commands() {
                 let p = Arc::clone(&pool);
                 let s = Arc::clone(&state);
                 hs.push(tokio::spawn(async move {
-                    rbac::require_strong(&s, &p, Permission::PatientsCreate).await.is_ok()
+                    rbac::require_strong(&s, &p, Permission::PatientsCreate)
+                        .await
+                        .is_ok()
                 }));
             }
             let mut ok = 0usize;
             for h in hs {
-                if h.await.unwrap() { ok += 1 }
+                if h.await.unwrap() {
+                    ok += 1
+                }
             }
             ok
         },
@@ -752,7 +781,9 @@ async fn wp2_c04_and_h2_001_14_concurrent_require_strong_benchmark() {
             let p = Arc::clone(&pool);
             let s = Arc::clone(&state);
             hs.push(tokio::spawn(async move {
-                rbac::require_strong(&s, &p, Permission::PatientsCreate).await.is_ok()
+                rbac::require_strong(&s, &p, Permission::PatientsCreate)
+                    .await
+                    .is_ok()
             }));
         }
         for h in hs {
@@ -820,7 +851,10 @@ async fn wp2_u03_rejects_invalid_token() {
         .await
         .unwrap_err();
     assert!(r.contains("Session invalidated"));
-    assert!(state.lock().unwrap().is_none(), "state must be cleared (U07)");
+    assert!(
+        state.lock().unwrap().is_none(),
+        "state must be cleared (U07)"
+    );
 }
 
 /// WP2-U04 — inactive user → Err.
@@ -831,7 +865,11 @@ async fn wp2_u04_rejects_inactive_user() {
     seed_session_row(&pool, uid, "hash_u04").await;
     let state = state_for(&pool, uid, "hash_u04").await;
     set_user_active(&pool, uid, false).await;
-    assert!(rbac::require_strong(&state, &pool, Permission::PatientsCreate).await.is_err());
+    assert!(
+        rbac::require_strong(&state, &pool, Permission::PatientsCreate)
+            .await
+            .is_err()
+    );
 }
 
 /// WP2-U05 — expired session (expires_at in the past) → Err.
@@ -840,12 +878,18 @@ async fn wp2_u05_rejects_expired_session() {
     let pool = setup().await;
     let uid = seed_user(&pool, "aerp_u05", &fixture_pw(), &["doctor"]).await;
     seed_session_row(&pool, uid, "hash_u05").await;
-    sqlx::query("UPDATE sessions SET expires_at = NOW() - INTERVAL '1 hour' WHERE token_hash = 'hash_u05'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE sessions SET expires_at = NOW() - INTERVAL '1 hour' WHERE token_hash = 'hash_u05'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let state = state_for(&pool, uid, "hash_u05").await;
-    assert!(rbac::require_strong(&state, &pool, Permission::PatientsCreate).await.is_err());
+    assert!(
+        rbac::require_strong(&state, &pool, Permission::PatientsCreate)
+            .await
+            .is_err()
+    );
 }
 
 /// WP2-U06 — valid session → Ok(Session) with the same identity.
@@ -872,7 +916,11 @@ async fn wp2_u07_state_cleared_on_failure() {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(rbac::require_strong(&state, &pool, Permission::PatientsCreate).await.is_err());
+    assert!(
+        rbac::require_strong(&state, &pool, Permission::PatientsCreate)
+            .await
+            .is_err()
+    );
     assert!(state.lock().unwrap().is_none());
 }
 
@@ -968,9 +1016,13 @@ async fn rev3_p3_7_upsert_replaces_prior_token() {
 
     let pc_a: SessionState = Arc::new(Mutex::new(None));
     let pc_b: SessionState = Arc::new(Mutex::new(None));
-    login_on(&pool, &pc_a, "aerp_user_p3_up", &fixture_pw()).await.unwrap();
+    login_on(&pool, &pc_a, "aerp_user_p3_up", &fixture_pw())
+        .await
+        .unwrap();
     let token_a = current_token_hash(&pool).await;
-    login_on(&pool, &pc_b, "aerp_user_p3_up", &fixture_pw()).await.unwrap();
+    login_on(&pool, &pc_b, "aerp_user_p3_up", &fixture_pw())
+        .await
+        .unwrap();
     let token_b = current_token_hash(&pool).await;
     assert_ne!(token_a, token_b);
 
@@ -1022,7 +1074,9 @@ async fn rev3_f2_receptionist_cannot_prescribe_command_level() {
 
     // Receptionist: denied at the permission guard, exact error.
     let err = hospital_mgmt_lib::commands::pharmacy::create_prescription_core(
-        &pool, &rx_state, rx.clone(),
+        &pool,
+        &rx_state,
+        rx.clone(),
     )
     .await
     .unwrap_err();
@@ -1036,11 +1090,10 @@ async fn rev3_f2_receptionist_cannot_prescribe_command_level() {
     // validation proves the guard let it through).
     let mut empty = rx.clone();
     empty.items = vec![];
-    let err2 = hospital_mgmt_lib::commands::pharmacy::create_prescription_core(
-        &pool, &doc_state, empty,
-    )
-    .await
-    .unwrap_err();
+    let err2 =
+        hospital_mgmt_lib::commands::pharmacy::create_prescription_core(&pool, &doc_state, empty)
+            .await
+            .unwrap_err();
     assert!(
         err2.contains("at least one medication"),
         "doctor must pass the guard and hit business validation, got: {}",
@@ -1048,11 +1101,9 @@ async fn rev3_f2_receptionist_cannot_prescribe_command_level() {
     );
 
     // Doctor with a complete payload: full success, prescription persisted.
-    let id = hospital_mgmt_lib::commands::pharmacy::create_prescription_core(
-        &pool, &doc_state, rx,
-    )
-    .await
-    .expect("doctor must be able to prescribe");
+    let id = hospital_mgmt_lib::commands::pharmacy::create_prescription_core(&pool, &doc_state, rx)
+        .await
+        .expect("doctor must be able to prescribe");
     let stored: (i32,) = sqlx::query_as("SELECT patient_id FROM prescriptions WHERE id = $1")
         .bind(id)
         .fetch_one(&pool)

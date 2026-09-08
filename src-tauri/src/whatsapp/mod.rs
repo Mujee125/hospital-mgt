@@ -1,3 +1,7 @@
+#[cfg(feature = "hms-integration-tests")]
+pub mod automation; // pub for AERP Part G consent-gate tests
+#[cfg(not(feature = "hms-integration-tests"))]
+mod automation;
 /// WhatsApp messaging module.
 ///
 /// Submodules:
@@ -15,11 +19,7 @@
 ///
 ///   Correct in lib.rs:   whatsapp::commands::send_whatsapp_notification
 ///   Wrong  in lib.rs:    whatsapp::send_whatsapp_notification   (even with pub use)
-pub mod commands;           // pub so generate_handler! can reach its macros
-#[cfg(feature = "hms-integration-tests")]
-pub mod automation;         // pub for AERP Part G consent-gate tests
-#[cfg(not(feature = "hms-integration-tests"))]
-mod automation;
+pub mod commands; // pub so generate_handler! can reach its macros
 mod log;
 mod templates;
 
@@ -42,11 +42,8 @@ pub struct WhatsAppMessage {
 // whatsapp::send_whatsapp, whatsapp::build_reminder_msg, etc. unchanged.
 pub use automation::send_whatsapp;
 pub use templates::{
-    build_appointment_booked_msg,
-    build_appointment_cancelled_msg,
-    build_appointment_confirmed_msg,
-    build_daily_digest_msg,
-    build_reminder_msg,
+    build_appointment_booked_msg, build_appointment_cancelled_msg, build_appointment_confirmed_msg,
+    build_daily_digest_msg, build_reminder_msg,
 };
 // NOTE: get_notification_log and send_whatsapp_notification are intentionally
 // NOT re-exported here. generate_handler! must use the full path

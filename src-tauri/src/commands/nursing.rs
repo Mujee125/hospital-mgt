@@ -72,7 +72,9 @@ pub struct CreateNurseNoteRequest {
     pub content: String,
 }
 
-fn default_note_type() -> String { "shift".to_string() }
+fn default_note_type() -> String {
+    "shift".to_string()
+}
 
 #[derive(Debug, serde::Serialize, sqlx::FromRow)]
 pub struct MedicationAdministration {
@@ -153,7 +155,11 @@ pub async fn record_vitals_core(
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id"#,
     )
     .bind(request.admission_id)
-    .bind(request.temperature_c.map(rust_decimal::Decimal::from_f64_retain))
+    .bind(
+        request
+            .temperature_c
+            .map(rust_decimal::Decimal::from_f64_retain),
+    )
     .bind(request.systolic_bp)
     .bind(request.diastolic_bp)
     .bind(request.pulse_bpm)
@@ -167,14 +173,18 @@ pub async fn record_vitals_core(
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(
-        pool, &s, "vitals_record", "vitals",
+        pool,
+        &s,
+        "vitals_record",
+        "vitals",
         Some(&row.0.to_string()),
         Some(serde_json::json!({
             "admission_id": request.admission_id,
             "spo2": request.spo2_pct,
             "systolic": request.systolic_bp,
         })),
-    ).await;
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -221,7 +231,10 @@ pub async fn create_nurse_note_core(
     if request.content.trim().is_empty() {
         return Err("Note content cannot be empty.".to_string());
     }
-    if request.note_type != "shift" && request.note_type != "observation" && request.note_type != "handover" {
+    if request.note_type != "shift"
+        && request.note_type != "observation"
+        && request.note_type != "handover"
+    {
         return Err("Note type must be shift, observation, or handover.".to_string());
     }
 
@@ -238,13 +251,17 @@ pub async fn create_nurse_note_core(
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(
-        pool, &s, "nurse_note_create", "nursing",
+        pool,
+        &s,
+        "nurse_note_create",
+        "nursing",
         Some(&row.0.to_string()),
         Some(serde_json::json!({
             "admission_id": request.admission_id,
             "note_type": request.note_type,
         })),
-    ).await;
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -324,14 +341,18 @@ pub async fn record_medication_administration_core(
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(
-        pool, &s, "mar_record", "nursing",
+        pool,
+        &s,
+        "mar_record",
+        "nursing",
         Some(&row.0.to_string()),
         Some(serde_json::json!({
             "admission_id": request.admission_id,
             "prescription_item_id": request.prescription_item_id,
             "status": request.status,
         })),
-    ).await;
+    )
+    .await;
     Ok(row.0)
 }
 

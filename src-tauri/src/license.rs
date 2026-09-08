@@ -31,8 +31,8 @@ use sqlx::PgPool;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use base64::Engine as _;
 use crate::rbac::{self, Permission, Session};
+use base64::Engine as _;
 
 // LIC-DOC-07: post-expiry grace period. A license that has passed its
 // `expiration_date` is allowed to remain in limited operation for this
@@ -81,10 +81,9 @@ const COMPANY_KEYS: &[EmbeddedKey] = &[EmbeddedKey {
     // Matches DEV_PRIVATE_KEY in dev_auto_license.rs (committed; safe —
     // release builds do not embed it and reject dev-flagged licenses).
     bytes: [
-        0x09, 0xbb, 0xa3, 0x04, 0x12, 0x3e, 0x7a, 0x0a,
-        0xa7, 0x81, 0xdc, 0xf1, 0x6f, 0x75, 0x59, 0x1e,
-        0x94, 0xef, 0x9f, 0x9f, 0xdd, 0xcf, 0x40, 0xd5,
-        0xaa, 0x28, 0x58, 0xc6, 0xa0, 0x4d, 0x6e, 0x8c,
+        0x09, 0xbb, 0xa3, 0x04, 0x12, 0x3e, 0x7a, 0x0a, 0xa7, 0x81, 0xdc, 0xf1, 0x6f, 0x75, 0x59,
+        0x1e, 0x94, 0xef, 0x9f, 0x9f, 0xdd, 0xcf, 0x40, 0xd5, 0xaa, 0x28, 0x58, 0xc6, 0xa0, 0x4d,
+        0x6e, 0x8c,
     ],
 }];
 
@@ -98,10 +97,9 @@ const COMPANY_KEYS: &[EmbeddedKey] = &[EmbeddedKey {
     // second EmbeddedKey entry with a new kid and keep this one until all
     // customer licenses have been re-issued.
     bytes: [
-        0x6c, 0xd2, 0x5f, 0xeb, 0xdd, 0xc1, 0x4a, 0x7a,
-        0x53, 0x6b, 0xba, 0x70, 0xe3, 0x56, 0x78, 0x94,
-        0x54, 0xe8, 0x8a, 0x27, 0x32, 0x27, 0x96, 0x11,
-        0x3f, 0xd6, 0x06, 0xb3, 0x92, 0x14, 0xbb, 0xa2,
+        0x6c, 0xd2, 0x5f, 0xeb, 0xdd, 0xc1, 0x4a, 0x7a, 0x53, 0x6b, 0xba, 0x70, 0xe3, 0x56, 0x78,
+        0x94, 0x54, 0xe8, 0x8a, 0x27, 0x32, 0x27, 0x96, 0x11, 0x3f, 0xd6, 0x06, 0xb3, 0x92, 0x14,
+        0xbb, 0xa2,
     ],
 }];
 
@@ -158,15 +156,27 @@ impl LicenseFile {
         map.insert("hospital_id", serde_json::json!(self.hospital_id));
         map.insert("hospital_name", serde_json::json!(self.hospital_name));
         map.insert("deployment_id", serde_json::json!(self.deployment_id));
-        map.insert("hardware_fingerprint", serde_json::json!(self.hardware_fingerprint));
+        map.insert(
+            "hardware_fingerprint",
+            serde_json::json!(self.hardware_fingerprint),
+        );
         map.insert("license_version", serde_json::json!(self.license_version));
         map.insert("product_edition", serde_json::json!(self.product_edition));
         map.insert("enabled_modules", serde_json::json!(self.enabled_modules));
         map.insert("issue_date", serde_json::json!(self.issue_date));
         map.insert("expiration_date", serde_json::json!(self.expiration_date));
-        map.insert("maintenance_until", serde_json::json!(self.maintenance_until));
-        map.insert("software_version_min", serde_json::json!(self.software_version_min));
-        map.insert("software_version_max", serde_json::json!(self.software_version_max));
+        map.insert(
+            "maintenance_until",
+            serde_json::json!(self.maintenance_until),
+        );
+        map.insert(
+            "software_version_min",
+            serde_json::json!(self.software_version_min),
+        );
+        map.insert(
+            "software_version_max",
+            serde_json::json!(self.software_version_max),
+        );
         map.insert("dev", serde_json::json!(self.dev));
         // P2 rotation: key_id participates in the signed bytes ONLY when
         // present. Excluding it when None keeps PRE-ROTATION licenses'
@@ -190,21 +200,22 @@ impl LicenseFile {
         let sig_bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.signature)
             .map_err(|e| format!("License signature is not valid base64: {}", e))?;
-        let signature = Signature::from_slice(&sig_bytes)
-            .map_err(|_| format!(
+        let signature = Signature::from_slice(&sig_bytes).map_err(|_| {
+            format!(
                 "License signature is wrong length ({} bytes, expected {}).",
-                sig_bytes.len(), SIGNATURE_LENGTH
-            ))?;
+                sig_bytes.len(),
+                SIGNATURE_LENGTH
+            )
+        })?;
 
         let embedded = match &self.key_id {
-            Some(kid) => COMPANY_KEYS
-                .iter()
-                .find(|k| k.kid == kid)
-                .ok_or_else(|| format!(
+            Some(kid) => COMPANY_KEYS.iter().find(|k| k.kid == kid).ok_or_else(|| {
+                format!(
                     "This license was signed by signing key '{}' (key_id), which this \
                      build does not trust. Install a license issued for this product version.",
                     kid
-                ))?,
+                )
+            })?,
             None => &COMPANY_KEYS[0],
         };
         let vk = VerifyingKey::from_bytes(&embedded.bytes)
@@ -219,9 +230,14 @@ impl LicenseFile {
             hex::encode(h.finalize())
         };
         eprintln!("[HMS LICENSE] Canonical bytes SHA-256: {}", canonical_hash);
-        eprintln!("[HMS LICENSE] Key selected: {} (license kid: {:?})", embedded.kid, self.key_id);
-        eprintln!("[HMS LICENSE] Canonical bytes (first 200): {}",
-            String::from_utf8_lossy(&canonical[..canonical.len().min(200)]));
+        eprintln!(
+            "[HMS LICENSE] Key selected: {} (license kid: {:?})",
+            embedded.kid, self.key_id
+        );
+        eprintln!(
+            "[HMS LICENSE] Canonical bytes (first 200): {}",
+            String::from_utf8_lossy(&canonical[..canonical.len().min(200)])
+        );
 
         vk.verify(&canonical, &signature)
             .map_err(|_| "License signature verification FAILED — the license is forged, corrupted, or was not issued by the software company.".to_string())
@@ -391,8 +407,7 @@ pub async fn persist_verification(
     license: &LicenseFile,
     status: &str,
 ) -> Result<(), String> {
-    let json = serde_json::to_string(license)
-        .map_err(|e| format!("License serialize: {}", e))?;
+    let json = serde_json::to_string(license).map_err(|e| format!("License serialize: {}", e))?;
     sqlx::query(
         r#"INSERT INTO license_state
               (license_json, hardware_fingerprint, installed_at, last_verified_at, verification_status)
@@ -421,9 +436,7 @@ pub async fn persist_verification(
 /// Deliberately DB-free: license verification is a precondition for opening
 /// the database connection, so it cannot itself depend on the pool.
 #[tauri::command]
-pub async fn verify_license(
-    app_handle: tauri::AppHandle,
-) -> Result<LicenseInfo, String> {
+pub async fn verify_license(app_handle: tauri::AppHandle) -> Result<LicenseInfo, String> {
     let path = license_file_path(&app_handle);
     let info = verify_license_file(&path)?;
 
@@ -438,7 +451,9 @@ pub async fn verify_license(
                  (The {}-day grace period has elapsed.)",
                 LICENSE_GRACE_PERIOD_DAYS
             ),
-            "fingerprint_mismatch" => "This license is bound to a different computer and cannot be used here.".to_string(),
+            "fingerprint_mismatch" => {
+                "This license is bound to a different computer and cannot be used here.".to_string()
+            }
             _ => "License verification failed.".to_string(),
         });
     }
@@ -489,7 +504,10 @@ pub async fn install_license(
 
     // If a session exists, require the manage permission; on first run there
     // is no session yet and the installer flow is allowed to proceed.
-    let has_session = session_state.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+    let has_session = session_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some();
     if has_session {
         let _ = rbac::require(&session_state, Permission::LicenseManage)?;
     }
@@ -501,7 +519,10 @@ pub async fn install_license(
 
     let actual_fp = compute_hardware_fingerprint()?;
     if license.hardware_fingerprint != actual_fp {
-        return Err("This license is bound to a different computer. It cannot be installed here.".to_string());
+        return Err(
+            "This license is bound to a different computer. It cannot be installed here."
+                .to_string(),
+        );
     }
 
     let path = license_file_path(&app_handle);
@@ -531,7 +552,9 @@ pub async fn install_license(
                 "license",
                 Some(&license.license_id),
                 Some(serde_json::json!({"hospital_id": license.hospital_id})),
-            ).await.ok();
+            )
+            .await
+            .ok();
         }
     }
 
@@ -613,8 +636,7 @@ pub async fn revoke_license(
         .map(|l| l.license_id);
 
     if path.exists() {
-        std::fs::remove_file(&path)
-            .map_err(|e| format!("Cannot remove license file: {}", e))?;
+        std::fs::remove_file(&path).map_err(|e| format!("Cannot remove license file: {}", e))?;
     }
 
     // Mark the persisted license_state row as revoked (if one exists).
@@ -826,13 +848,15 @@ mod tests {
     /// The committed dev private key (pairs with COMPANY_PUBLIC_KEY; see
     /// dev_auto_license.rs — debug-only, signs dev:true licenses only).
     const TEST_SIGNING_KEY: [u8; 32] = [
-        0x42, 0x34, 0xbc, 0x97, 0xec, 0xbb, 0xbc, 0x32,
-        0xa9, 0x86, 0x64, 0xec, 0xe0, 0xf2, 0x02, 0x12,
-        0xf2, 0x07, 0x19, 0x4f, 0x38, 0xf8, 0xa1, 0x6c,
-        0x46, 0xe5, 0xd9, 0x80, 0x38, 0xdb, 0x8c, 0x8d,
+        0x42, 0x34, 0xbc, 0x97, 0xec, 0xbb, 0xbc, 0x32, 0xa9, 0x86, 0x64, 0xec, 0xe0, 0xf2, 0x02,
+        0x12, 0xf2, 0x07, 0x19, 0x4f, 0x38, 0xf8, 0xa1, 0x6c, 0x46, 0xe5, 0xd9, 0x80, 0x38, 0xdb,
+        0x8c, 0x8d,
     ];
 
-    fn signed_test_license(expiration: Option<String>, fingerprint: &str) -> (LicenseFile, std::path::PathBuf) {
+    fn signed_test_license(
+        expiration: Option<String>,
+        fingerprint: &str,
+    ) -> (LicenseFile, std::path::PathBuf) {
         signed_test_license_kid(expiration, fingerprint, None)
     }
 
@@ -842,7 +866,7 @@ mod tests {
         fingerprint: &str,
         key_id: Option<&str>,
     ) -> (LicenseFile, std::path::PathBuf) {
-        use ed25519_dalek::{SigningKey, Signer};
+        use ed25519_dalek::{Signer, SigningKey};
         let mut license = LicenseFile {
             license_id: "LIC-TEST".to_string(),
             hospital_id: "H-TEST".to_string(),
@@ -867,7 +891,10 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("hms_lic_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("{}.json", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        let path = dir.join(format!(
+            "{}.json",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
         std::fs::write(&path, serde_json::to_string(&license).unwrap()).unwrap();
         (license, path)
     }
@@ -875,7 +902,10 @@ mod tests {
     #[test]
     fn lic_valid_license_accepted() {
         let fp = compute_hardware_fingerprint().expect("fingerprint");
-        let (_, path) = signed_test_license(Some((Utc::now() + chrono::Duration::days(365)).to_rfc3339()), &fp);
+        let (_, path) = signed_test_license(
+            Some((Utc::now() + chrono::Duration::days(365)).to_rfc3339()),
+            &fp,
+        );
         let info = verify_license_file(&path).expect("valid license must verify");
         assert_eq!(info.status, "valid");
         assert!(info.fingerprint_matches);
@@ -886,7 +916,10 @@ mod tests {
     fn lic_grace_window_accepted_with_warning_status() {
         let fp = compute_hardware_fingerprint().expect("fingerprint");
         // Expired 3 days ago → within the 7-day grace.
-        let (_, path) = signed_test_license(Some((Utc::now() - chrono::Duration::days(3)).to_rfc3339()), &fp);
+        let (_, path) = signed_test_license(
+            Some((Utc::now() - chrono::Duration::days(3)).to_rfc3339()),
+            &fp,
+        );
         let info = verify_license_file(&path).expect("grace license must verify");
         assert_eq!(info.status, "grace", "3 days past expiry must be grace");
         let _ = std::fs::remove_file(&path);
@@ -896,7 +929,10 @@ mod tests {
     fn lic_past_grace_rejected_as_expired() {
         let fp = compute_hardware_fingerprint().expect("fingerprint");
         // Expired 8 days ago → past the 7-day grace.
-        let (_, path) = signed_test_license(Some((Utc::now() - chrono::Duration::days(8)).to_rfc3339()), &fp);
+        let (_, path) = signed_test_license(
+            Some((Utc::now() - chrono::Duration::days(8)).to_rfc3339()),
+            &fp,
+        );
         let info = verify_license_file(&path).expect("must still parse");
         assert_eq!(info.status, "expired");
         let _ = std::fs::remove_file(&path);
@@ -927,7 +963,11 @@ mod tests {
         let fp = compute_hardware_fingerprint().expect("fingerprint");
         let (_, path) = signed_test_license(Some("not-a-date".to_string()), &fp);
         let r = verify_license_file(&path);
-        assert!(r.is_err(), "malformed expiration must fail closed, got: {:?}", r.ok().map(|i| i.status));
+        assert!(
+            r.is_err(),
+            "malformed expiration must fail closed, got: {:?}",
+            r.ok().map(|i| i.status)
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1018,7 +1058,10 @@ mod tests {
         license.signature = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
         std::fs::write(&path, serde_json::to_string(&license).unwrap()).unwrap();
         let r = verify_license_file(&path);
-        assert!(r.is_err(), "signature from a non-company key must be rejected");
+        assert!(
+            r.is_err(),
+            "signature from a non-company key must be rejected"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -11,7 +11,6 @@
 mod common;
 
 use common::*;
-use sqlx::PgPool;
 use tokio::test;
 
 /// CC-001: Two concurrent issues of the same unit — only one succeeds.
@@ -62,7 +61,10 @@ async fn test_cc001_double_issue_prevention() {
     let result_b = handle_b.await.unwrap().unwrap();
 
     // Exactly one must succeed (Some), the other must fail (None)
-    let successes = [result_a.is_some(), result_b.is_some()].iter().filter(|s| **s).count();
+    let successes = [result_a.is_some(), result_b.is_some()]
+        .iter()
+        .filter(|s| **s)
+        .count();
     assert_eq!(
         successes, 1,
         "Exactly one concurrent issue must succeed, got {}",
@@ -109,8 +111,14 @@ async fn test_cc002_double_reservation_prevention() {
     let result_a = handle_a.await.unwrap().unwrap();
     let result_b = handle_b.await.unwrap().unwrap();
 
-    let successes = [result_a.is_some(), result_b.is_some()].iter().filter(|s| **s).count();
-    assert_eq!(successes, 1, "Exactly one concurrent reservation must succeed");
+    let successes = [result_a.is_some(), result_b.is_some()]
+        .iter()
+        .filter(|s| **s)
+        .count();
+    assert_eq!(
+        successes, 1,
+        "Exactly one concurrent reservation must succeed"
+    );
 }
 
 /// CC-003: Concurrent issue + scheduler expiry — issue wins (FOR UPDATE).
@@ -129,12 +137,14 @@ async fn test_cc003_issue_vs_scheduler_expiry() {
 
     // Issue the unit (the pre-check would reject expired, but we test the
     // raw claim to verify the scheduler can't expire an issued unit)
-    sqlx::query("UPDATE blood_units SET status = 'issued', issued_to_patient_id = $1 WHERE id = $2")
-        .bind(patient_id)
-        .bind(unit_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE blood_units SET status = 'issued', issued_to_patient_id = $1 WHERE id = $2",
+    )
+    .bind(patient_id)
+    .bind(unit_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // Now run the scheduler expiry — it must NOT touch the issued unit
     sqlx::query(
@@ -170,7 +180,8 @@ async fn test_cc004_parallel_donations() {
     let pool = setup_pool().await;
     let mut handles = vec![];
 
-    for i in 0..10 { // Reduced to 10 for test speed; pattern is the same
+    for _i in 0..10 {
+        // Reduced to 10 for test speed; pattern is the same
         let pool_clone = pool.clone();
         handles.push(tokio::spawn(async move {
             let donor_id = seed_donor(&pool_clone, "O", "-").await;

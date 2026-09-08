@@ -36,13 +36,12 @@ use std::sync::{Arc, Mutex};
 
 /// Insert a ward + bed and return (ward_id, bed_id). Unique per call.
 async fn seed_ward_and_bed(pool: &PgPool, suffix: &str) -> (i32, i32) {
-    let ward: (i32,) = sqlx::query_as(
-        "INSERT INTO wards (name, code) VALUES ($1, $1) RETURNING id",
-    )
-    .bind(format!("Ward-{}", suffix))
-    .fetch_one(pool)
-    .await
-    .expect("seed ward");
+    let ward: (i32,) =
+        sqlx::query_as("INSERT INTO wards (name, code) VALUES ($1, $1) RETURNING id")
+            .bind(format!("Ward-{}", suffix))
+            .fetch_one(pool)
+            .await
+            .expect("seed ward");
     let bed: (i32,) = sqlx::query_as(
         "INSERT INTO beds (ward_id, bed_number, status) VALUES ($1, $2, 'available') RETURNING id",
     )
@@ -56,13 +55,11 @@ async fn seed_ward_and_bed(pool: &PgPool, suffix: &str) -> (i32, i32) {
 
 /// Insert an admission (default status 'admitted') and return its id.
 async fn seed_admission(pool: &PgPool, patient_id: i32, bed_id: i32, status: &str) -> i32 {
-    let ward: (i32,) = sqlx::query_as(
-        "SELECT ward_id FROM beds WHERE id = $1",
-    )
-    .bind(bed_id)
-    .fetch_one(pool)
-    .await
-    .expect("find ward for bed");
+    let ward: (i32,) = sqlx::query_as("SELECT ward_id FROM beds WHERE id = $1")
+        .bind(bed_id)
+        .fetch_one(pool)
+        .await
+        .expect("find ward for bed");
     let row: (i32,) = sqlx::query_as(
         "INSERT INTO ipd_admissions (patient_id, ward_id, bed_id, status) \
          VALUES ($1, $2, $3, $4) RETURNING id",
@@ -159,14 +156,17 @@ async fn test_ns1_receptionist_cannot_record_vitals() {
     let id = record_vitals_core(&pool, &nurse_state, req)
         .await
         .expect("nurse must be able to record vitals");
-    let stored: (Option<i32>,) = sqlx::query_as(
-        "SELECT recorded_by_user_id FROM vitals WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(stored.0, Some(nurse_id), "vitals row must be attributed to the nurse");
+    let stored: (Option<i32>,) =
+        sqlx::query_as("SELECT recorded_by_user_id FROM vitals WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored.0,
+        Some(nurse_id),
+        "vitals row must be attributed to the nurse"
+    );
 }
 
 // ── NS-2: Vitals validation ────────────────────────────────────────────────────
@@ -409,13 +409,12 @@ async fn test_ns4_note_type_and_content_validation() {
     )
     .await
     .expect("valid note must persist");
-    let stored: (String, Option<i32>) = sqlx::query_as(
-        "SELECT note_type, author_user_id FROM nurse_notes WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let stored: (String, Option<i32>) =
+        sqlx::query_as("SELECT note_type, author_user_id FROM nurse_notes WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(stored.0, "handover");
     assert_eq!(stored.1, Some(nurse_id));
 }

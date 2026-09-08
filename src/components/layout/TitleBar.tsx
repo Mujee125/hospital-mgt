@@ -109,8 +109,10 @@ export function TitleBar({ authenticated = false, onMenuClick, onRefresh, isRefr
             <span className="text-[15px] font-semibold tracking-tight text-primary">
               {hospitalName ?? (
                 <>
+                  {/* QA-2026-09-08 L5: was hardcoded text-[#014292] — near-invisible
+                      against the dark-mode card surface (#04177B navy). Theme-aware. */}
                   <span
-                    className="text-[#014292]"
+                    className="text-primary dark:text-[#619BCC] font-semibold"
                   >
                     RASHEED
                   </span>{" "}

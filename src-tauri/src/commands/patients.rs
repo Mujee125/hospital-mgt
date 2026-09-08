@@ -58,7 +58,10 @@ pub async fn get_patients(
         }
         None => {
             // CR-11: hide soft-deleted patients from the active list.
-            let q = format!("{} WHERE deleted_at IS NULL ORDER BY created_at DESC", SELECT_EHR);
+            let q = format!(
+                "{} WHERE deleted_at IS NULL ORDER BY created_at DESC",
+                SELECT_EHR
+            );
             sqlx::query_as::<_, PatientEhr>(&q)
                 .fetch_all(pool.inner())
                 .await
@@ -129,9 +132,15 @@ pub async fn create_patient_core(
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    audit::for_session(pool, &s, "patient_create", "patients",
+    audit::for_session(
+        pool,
+        &s,
+        "patient_create",
+        "patients",
         Some(&row.0.to_string()),
-        Some(serde_json::json!({"name": format!("{} {}", patient.first_name, patient.last_name)}))).await;
+        Some(serde_json::json!({"name": format!("{} {}", patient.first_name, patient.last_name)})),
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -185,8 +194,15 @@ pub async fn update_patient(
     .await
     .map_err(|e| format!("Update failed: {}", e))?;
 
-    audit::for_session(pool.inner(), &s, "patient_update", "patients",
-        Some(&patient.id.to_string()), None).await;
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "patient_update",
+        "patients",
+        Some(&patient.id.to_string()),
+        None,
+    )
+    .await;
     Ok(())
 }
 
@@ -221,9 +237,17 @@ pub async fn delete_patient(
             id
         ));
     }
-    audit::for_session(pool.inner(), &s, "patient_delete", "patients",
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "patient_delete",
+        "patients",
         Some(&id.to_string()),
-        Some(serde_json::json!({"soft_delete": true, "deleted_at": chrono::Utc::now().to_rfc3339()}))).await;
+        Some(
+            serde_json::json!({"soft_delete": true, "deleted_at": chrono::Utc::now().to_rfc3339()}),
+        ),
+    )
+    .await;
     Ok(())
 }
 
@@ -301,13 +325,19 @@ pub async fn set_patient_consent(
     .await
     .map_err(|e| format!("Failed to set patient consent: {}", e))?;
 
-    audit::for_session(pool.inner(), &s, "patient_consent_set", "patient_consent",
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "patient_consent_set",
+        "patient_consent",
         Some(&row.0.to_string()),
         Some(serde_json::json!({
             "patient_id": patient_id,
             "consent_type": ct,
             "granted": granted,
-        }))).await;
+        })),
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -342,11 +372,17 @@ pub async fn revoke_patient_consent(
     .await
     .map_err(|e| format!("Failed to revoke patient consent: {}", e))?;
 
-    audit::for_session(pool.inner(), &s, "patient_consent_revoke", "patient_consent",
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "patient_consent_revoke",
+        "patient_consent",
         None,
         Some(serde_json::json!({
             "patient_id": patient_id,
             "consent_type": ct,
-        }))).await;
+        })),
+    )
+    .await;
     Ok(())
 }

@@ -69,7 +69,11 @@ pub fn ensure_tls_material(hms_dir: &Path, local_ip: &str) -> Result<TlsMaterial
         let key_pem = std::fs::read_to_string(&k_path)
             .map_err(|e| format!("Cannot read existing TLS key: {}", e))?;
         let fingerprint_hex = fingerprint_of_pem(&cert_pem)?;
-        return Ok(TlsMaterial { cert_pem, key_pem, fingerprint_hex });
+        return Ok(TlsMaterial {
+            cert_pem,
+            key_pem,
+            fingerprint_hex,
+        });
     }
 
     std::fs::create_dir_all(crt_path.parent().unwrap())
@@ -157,7 +161,11 @@ pub fn ensure_tls_material(hms_dir: &Path, local_ip: &str) -> Result<TlsMaterial
 
     let fingerprint_hex = fingerprint_of_pem(&cert_pem)?;
 
-    Ok(TlsMaterial { cert_pem, key_pem, fingerprint_hex })
+    Ok(TlsMaterial {
+        cert_pem,
+        key_pem,
+        fingerprint_hex,
+    })
 }
 
 #[cfg(feature = "server-build")]
@@ -205,7 +213,6 @@ pub fn build_server_tls_config(
         .with_no_client_auth()
         .with_single_cert(vec![cert], key)
         .map_err(|e| format!("Failed to build TLS server config: {}", e))?;
-
 
     Ok(std::sync::Arc::new(config))
 }
@@ -271,7 +278,10 @@ impl ServerCertVerifier for TofuVerifier {
         let fp = hex_encode(&hasher.finalize());
 
         // REL-02: recover from mutex poisoning instead of panicking.
-        *self.captured_fingerprint.lock().unwrap_or_else(|e| e.into_inner()) = Some(fp);
+        *self
+            .captured_fingerprint
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(fp);
 
         Ok(ServerCertVerified::assertion())
     }
@@ -305,7 +315,9 @@ impl ServerCertVerifier for TofuVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -386,7 +398,9 @@ impl ServerCertVerifier for PinnedVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 

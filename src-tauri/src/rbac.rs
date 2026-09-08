@@ -263,46 +263,111 @@ pub fn permissions_for_role(role: &str) -> Vec<Permission> {
     match role {
         ROLE_SUPER_ADMIN => Permission::all().to_vec(),
         ROLE_DOCTOR => vec![
-            DashboardView, PatientsView, PatientsCreate, PatientsUpdate,
-            AppointmentsView, AppointmentsUpdate, QueueView,
-            DoctorsView, IpdView, IpdManage, LabView, LabOrder, LabResultManage,
+            DashboardView,
+            PatientsView,
+            PatientsCreate,
+            PatientsUpdate,
+            AppointmentsView,
+            AppointmentsUpdate,
+            QueueView,
+            DoctorsView,
+            IpdView,
+            IpdManage,
+            LabView,
+            LabOrder,
+            LabResultManage,
             LabApprove,
-            RadiologyView, RadiologyCreate, RadiologyUpdate,
-            BloodBankView, BloodBankCrossmatch, BloodBankIssue, BloodBankTransfuse,
-            BillingView, InventoryView, PatientConsentManage, AuditView, ReportsView,
-            MessagingView, MessagingSend,
-            WhatsAppSend, WhatsAppView,
+            RadiologyView,
+            RadiologyCreate,
+            RadiologyUpdate,
+            BloodBankView,
+            BloodBankCrossmatch,
+            BloodBankIssue,
+            BloodBankTransfuse,
+            BillingView,
+            InventoryView,
+            PatientConsentManage,
+            AuditView,
+            ReportsView,
+            MessagingView,
+            MessagingSend,
+            WhatsAppSend,
+            WhatsAppView,
             PrescriptionsCreate,
         ],
         ROLE_NURSE => vec![
-            DashboardView, PatientsView, PatientsUpdate, AppointmentsView,
-            QueueView, QueueManage, IpdView, IpdManage, BedsManage,
-            LabView, InventoryView, ReportsView,
-            BloodBankView, BloodBankTransfuse,
-            MessagingView, MessagingSend,
-            WhatsAppSend, WhatsAppView,
+            DashboardView,
+            PatientsView,
+            PatientsUpdate,
+            AppointmentsView,
+            QueueView,
+            QueueManage,
+            IpdView,
+            IpdManage,
+            BedsManage,
+            LabView,
+            InventoryView,
+            ReportsView,
+            BloodBankView,
+            BloodBankTransfuse,
+            MessagingView,
+            MessagingSend,
+            WhatsAppSend,
+            WhatsAppView,
         ],
         ROLE_RECEPTIONIST => vec![
-            DashboardView, PatientsView, PatientsCreate, PatientsUpdate,
-            AppointmentsView, AppointmentsCreate, AppointmentsUpdate,
-            QueueView, QueueManage, DoctorsView, BillingView, BillingCreate,
-            MessagingView, MessagingSend,
-            WhatsAppSend, WhatsAppView,
+            DashboardView,
+            PatientsView,
+            PatientsCreate,
+            PatientsUpdate,
+            AppointmentsView,
+            AppointmentsCreate,
+            AppointmentsUpdate,
+            QueueView,
+            QueueManage,
+            DoctorsView,
+            BillingView,
+            BillingCreate,
+            MessagingView,
+            MessagingSend,
+            WhatsAppSend,
+            WhatsAppView,
         ],
         ROLE_LAB_TECH => vec![
-            DashboardView, PatientsView, LabView, LabOrder, LabResultManage,
-            LabCatalogManage, LabApprove, InventoryView,
-            BloodBankView, BloodBankDonorManage, BloodBankCrossmatch,
-            MessagingView, MessagingSend,
+            DashboardView,
+            PatientsView,
+            LabView,
+            LabOrder,
+            LabResultManage,
+            LabCatalogManage,
+            LabApprove,
+            InventoryView,
+            BloodBankView,
+            BloodBankDonorManage,
+            BloodBankCrossmatch,
+            MessagingView,
+            MessagingSend,
         ],
         ROLE_PHARMACIST => vec![
-            DashboardView, InventoryView, InventoryManage, BillingView, PatientsView,
-            MessagingView, MessagingSend,
+            DashboardView,
+            InventoryView,
+            InventoryManage,
+            BillingView,
+            PatientsView,
+            MessagingView,
+            MessagingSend,
         ],
         ROLE_BILLING => vec![
-            DashboardView, BillingView, BillingCreate, BillingManage, PaymentsManage,
-            PatientsView, AppointmentsView, ReportsView,
-            MessagingView, MessagingSend,
+            DashboardView,
+            BillingView,
+            BillingCreate,
+            BillingManage,
+            PaymentsManage,
+            PatientsView,
+            AppointmentsView,
+            ReportsView,
+            MessagingView,
+            MessagingSend,
             WhatsAppView,
         ],
         ROLE_PATIENT => vec![DashboardView],
@@ -313,14 +378,20 @@ pub fn permissions_for_role(role: &str) -> Vec<Permission> {
 /// The set of role names the seeder creates.
 pub fn seed_roles() -> Vec<(&'static str, &'static str)> {
     vec![
-        (ROLE_SUPER_ADMIN,    "Full system access — break-glass only"),
-        (ROLE_DOCTOR,         "Clinical care: EHR, prescriptions, rounds, lab orders"),
-        (ROLE_NURSE,          "Ward & IPD care, queue, vitals"),
-        (ROLE_RECEPTIONIST,   "Front desk: registration, appointments, queue"),
-        (ROLE_LAB_TECH,       "Laboratory orders and results"),
-        (ROLE_PHARMACIST,     "Pharmacy inventory and dispensing"),
-        (ROLE_BILLING,        "Billing, invoices, payments"),
-        (ROLE_PATIENT,        "Patient portal — own records only"),
+        (ROLE_SUPER_ADMIN, "Full system access — break-glass only"),
+        (
+            ROLE_DOCTOR,
+            "Clinical care: EHR, prescriptions, rounds, lab orders",
+        ),
+        (ROLE_NURSE, "Ward & IPD care, queue, vitals"),
+        (
+            ROLE_RECEPTIONIST,
+            "Front desk: registration, appointments, queue",
+        ),
+        (ROLE_LAB_TECH, "Laboratory orders and results"),
+        (ROLE_PHARMACIST, "Pharmacy inventory and dispensing"),
+        (ROLE_BILLING, "Billing, invoices, payments"),
+        (ROLE_PATIENT, "Patient portal — own records only"),
     ]
 }
 
@@ -382,7 +453,6 @@ pub fn require_session(state: &SessionState) -> Result<Session, String> {
         .clone()
         .ok_or_else(|| "Access denied: you are not signed in.".to_string())
 }
-
 
 /// RCTF-IMPL-001 WP-2.2: Strong guard for high-risk commands.
 ///
@@ -507,8 +577,12 @@ pub fn require_config_mutation(
 ) -> Result<ConfigMutationGrant, String> {
     let first_run_allowed = match disk {
         ConfigDiskState::Missing => true,
-        ConfigDiskState::Active { setup_complete: false } => true,
-        ConfigDiskState::Active { setup_complete: true } => false,
+        ConfigDiskState::Active {
+            setup_complete: false,
+        } => true,
+        ConfigDiskState::Active {
+            setup_complete: true,
+        } => false,
         ConfigDiskState::Corrupt => false,
     };
     let session = state.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -606,7 +680,10 @@ mod wp1_tests {
 
     #[test]
     fn test_prescriptions_create_permission_exists() {
-        assert_eq!(Permission::PrescriptionsCreate.as_str(), "prescriptions.create");
+        assert_eq!(
+            Permission::PrescriptionsCreate.as_str(),
+            "prescriptions.create"
+        );
         assert!(Permission::all().contains(&Permission::PrescriptionsCreate));
     }
 
@@ -638,7 +715,9 @@ mod wp1_tests {
         let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(None));
         let r = require_config_mutation(
             &state,
-            ConfigDiskState::Active { setup_complete: true },
+            ConfigDiskState::Active {
+                setup_complete: true,
+            },
             Permission::SettingsManage,
         );
         assert!(r.is_err(), "no-session + setup_complete must fail closed");
@@ -650,7 +729,8 @@ mod wp1_tests {
         // treated as first-run — an unauthenticated mutation would re-open
         // the pass-2 P0 one level down, on any machine with a corrupt file.
         let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let r = require_config_mutation(&state, ConfigDiskState::Corrupt, Permission::SettingsManage);
+        let r =
+            require_config_mutation(&state, ConfigDiskState::Corrupt, Permission::SettingsManage);
         assert!(r.is_err(), "no-session + corrupt disk must fail closed");
     }
 
@@ -659,10 +739,19 @@ mod wp1_tests {
         // Genuine first-run (no file, or setup never completed): no session
         // allowed, and the grant is explicitly FirstRun.
         let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(None));
-        for disk in [ConfigDiskState::Missing, ConfigDiskState::Active { setup_complete: false }] {
+        for disk in [
+            ConfigDiskState::Missing,
+            ConfigDiskState::Active {
+                setup_complete: false,
+            },
+        ] {
             match require_config_mutation(&state, disk, Permission::SettingsManage) {
                 Ok(ConfigMutationGrant::FirstRun) => {}
-                other => panic!("expected FirstRun grant for {:?}, got {:?}", disk, other.is_ok()),
+                other => panic!(
+                    "expected FirstRun grant for {:?}, got {:?}",
+                    disk,
+                    other.is_ok()
+                ),
             }
         }
     }
@@ -674,14 +763,22 @@ mod wp1_tests {
             username: "admin".into(),
             full_name: "Admin".into(),
             roles: vec![ROLE_SUPER_ADMIN.into()],
-            permissions: [Permission::SettingsManage.as_str().to_string()].into_iter().collect(),
+            permissions: [Permission::SettingsManage.as_str().to_string()]
+                .into_iter()
+                .collect(),
             token_hash: "hash".into(),
         };
         let state: SessionState = std::sync::Arc::new(std::sync::Mutex::new(Some(admin)));
 
         // Configured + session that HOLDS the permission → Authorized.
         assert!(matches!(
-            require_config_mutation(&state, ConfigDiskState::Active { setup_complete: true }, Permission::SettingsManage),
+            require_config_mutation(
+                &state,
+                ConfigDiskState::Active {
+                    setup_complete: true
+                },
+                Permission::SettingsManage
+            ),
             Ok(ConfigMutationGrant::Authorized(_))
         ));
         // Corrupt disk + admin session → Authorized (repair is reachable).
@@ -704,8 +801,12 @@ mod wp1_tests {
         for disk in [
             ConfigDiskState::Missing,
             ConfigDiskState::Corrupt,
-            ConfigDiskState::Active { setup_complete: false },
-            ConfigDiskState::Active { setup_complete: true },
+            ConfigDiskState::Active {
+                setup_complete: false,
+            },
+            ConfigDiskState::Active {
+                setup_complete: true,
+            },
         ] {
             assert!(
                 require_config_mutation(&state2, disk, Permission::SettingsManage).is_err(),

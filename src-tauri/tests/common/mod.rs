@@ -205,14 +205,12 @@ pub fn mock_app(pool: PgPool, session: Option<Session>) -> tauri::App<tauri::tes
 pub async fn seed_user(pool: &PgPool, username: &str, password: &str, roles: &[&str]) -> i32 {
     // Reuse an existing fixture row when present; Argon2 hashing only runs
     // for genuinely new users (m=19456 hashing dominates test runtime).
-    if let Ok(row) = sqlx::query_as::<_, (i32,)>("SELECT id FROM users WHERE username = $1")
+    if let Ok(Some((id,))) = sqlx::query_as::<_, (i32,)>("SELECT id FROM users WHERE username = $1")
         .bind(username)
         .fetch_optional(pool)
         .await
     {
-        if let Some((id,)) = row {
-            return id;
-        }
+        return id;
     }
     let hash = hospital_mgmt_lib::auth::hash_password(password).expect("hash fixture password");
     let row: (i32,) = sqlx::query_as(

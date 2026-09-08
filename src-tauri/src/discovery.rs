@@ -55,12 +55,17 @@ const BROADCAST_MAX_AGE_SECS: u64 = 120;
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum Role {
-    Server { local_ip: String },
+    Server {
+        local_ip: String,
+    },
     // Constructed only in the client-build (LAN discovery path). Allow dead
     // code in server-build to avoid spurious warnings — the variant is still
     // deserialised/matched by `get_server_role` in both builds.
     #[allow(dead_code)]
-    Client { server_ip: String, db_port: u16 },
+    Client {
+        server_ip: String,
+        db_port: u16,
+    },
 }
 
 /// Listen briefly for a server broadcast. Used by clients only as a
@@ -182,9 +187,7 @@ pub fn detect_server() -> Option<(String, u16)> {
 ///
 /// Only called from client-build; allow dead code in server-build.
 #[allow(dead_code)]
-pub fn detect_server_with_fp(
-    expected_fingerprint_hex: Option<String>,
-) -> Option<(String, u16)> {
+pub fn detect_server_with_fp(expected_fingerprint_hex: Option<String>) -> Option<(String, u16)> {
     listen_for_broadcast_with_fp(
         RECOVERY_LISTEN_TIMEOUT_SECS,
         expected_fingerprint_hex.as_deref(),
@@ -376,7 +379,9 @@ pub fn is_reachable(host: &str, port: u16, timeout_ms: u64) -> bool {
     use std::net::TcpStream;
     let addr = format!("{}:{}", host, port);
     match addr.parse::<SocketAddr>() {
-        Ok(socket_addr) => TcpStream::connect_timeout(&socket_addr, Duration::from_millis(timeout_ms)).is_ok(),
+        Ok(socket_addr) => {
+            TcpStream::connect_timeout(&socket_addr, Duration::from_millis(timeout_ms)).is_ok()
+        }
         Err(_) => false,
     }
 }

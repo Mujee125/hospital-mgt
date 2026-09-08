@@ -21,7 +21,6 @@
 mod common;
 
 use common::*;
-use sqlx::PgPool;
 use tokio::test;
 
 /// IT-001: BE-02 — Expired blood cannot be issued.
@@ -55,7 +54,10 @@ async fn test_be02_expired_unit_cannot_be_issued() {
 
     assert!(result.is_none(), "Expired unit must not be issuable");
     let status = get_unit_status(&pool, unit_id).await;
-    assert_eq!(status, "available", "Unit status must remain 'available' (claim rejected)");
+    assert_eq!(
+        status, "available",
+        "Unit status must remain 'available' (claim rejected)"
+    );
 }
 
 /// IT-002: BE-03 — Unscreened blood cannot be issued.
@@ -68,7 +70,7 @@ async fn test_be02_expired_unit_cannot_be_issued() {
 async fn test_be03_unscreened_unit_cannot_be_issued() {
     let pool = setup_pool().await;
     let donor_id = seed_donor(&pool, "O", "-").await;
-    let patient_id = seed_patient(&pool, "O", "-").await;
+    let _patient_id = seed_patient(&pool, "O", "-").await;
     let (donation_id, unit_id) = seed_donation_and_unit(&pool, donor_id, "O", "-").await;
     // Unit is in 'quarantine' with screening_status='pending' (BE-06).
     // Even if we manually set it to 'available', the screening check must reject.
@@ -79,13 +81,12 @@ async fn test_be03_unscreened_unit_cannot_be_issued() {
         .unwrap();
 
     // Check screening_status — the production issue_blood does this pre-check.
-    let screening: (String,) = sqlx::query_as(
-        "SELECT screening_status FROM blood_donations WHERE id = $1",
-    )
-    .bind(donation_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let screening: (String,) =
+        sqlx::query_as("SELECT screening_status FROM blood_donations WHERE id = $1")
+            .bind(donation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
     assert_ne!(
         screening.0, "passed",
@@ -112,7 +113,10 @@ async fn test_be04_abo_compatibility_matrix() {
     .fetch_one(&pool)
     .await
     .expect("matrix lookup failed");
-    assert!(compatible, "O- must be compatible with A+ (universal donor)");
+    assert!(
+        compatible,
+        "O- must be compatible with A+ (universal donor)"
+    );
 
     // A+ donor → O- recipient: incompatible
     let compatible: bool = sqlx::query_scalar(
@@ -163,8 +167,8 @@ async fn test_be05_scheduler_auto_expiry() {
         .await
         .unwrap();
 
-    let history_before = count_history_entries(&pool, unit_id).await;
-    let movements_before = count_movement_entries(&pool, unit_id).await;
+    let _history_before = count_history_entries(&pool, unit_id).await;
+    let _movements_before = count_movement_entries(&pool, unit_id).await;
 
     // Execute the expiry UPDATE (mirrors expire_blood_units)
     let result = sqlx::query(
@@ -175,7 +179,10 @@ async fn test_be05_scheduler_auto_expiry() {
     .execute(&pool)
     .await
     .expect("expiry update failed");
-    assert!(result.rows_affected() >= 1, "At least one unit must be expired");
+    assert!(
+        result.rows_affected() >= 1,
+        "At least one unit must be expired"
+    );
 
     let status = get_unit_status(&pool, unit_id).await;
     assert_eq!(status, "expired", "Unit must transition to 'expired'");
@@ -274,15 +281,19 @@ async fn test_be09_return_clears_stale_fields() {
     .await
     .unwrap();
 
-    let row: (Option<i32>, Option<chrono::DateTime<chrono::Utc>>, Option<i32>, Option<i32>) =
-        sqlx::query_as(
-            r#"SELECT issued_to_patient_id, issued_at, reserved_for_patient_id, reservation_id
+    let row: (
+        Option<i32>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<i32>,
+        Option<i32>,
+    ) = sqlx::query_as(
+        r#"SELECT issued_to_patient_id, issued_at, reserved_for_patient_id, reservation_id
                FROM blood_units WHERE id = $1"#,
-        )
-        .bind(unit_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    )
+    .bind(unit_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     assert!(row.0.is_none(), "issued_to_patient_id must be NULL");
     assert!(row.1.is_none(), "issued_at must be NULL");
@@ -332,7 +343,11 @@ async fn test_migration_idempotency() {
     // Run migrations a second time (first time was in setup).
     // All migrations use IF NOT EXISTS, so this must not error.
     let result = hospital_mgmt_lib::db::run_migrations(&pool).await;
-    assert!(result.is_ok(), "Migrations must be idempotent: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Migrations must be idempotent: {:?}",
+        result
+    );
 }
 
 /// IT-011: CHECK constraint rejects invalid blood_group.
@@ -346,7 +361,10 @@ async fn test_check_constraint_rejects_invalid_blood_group() {
     )
     .execute(&pool)
     .await;
-    assert!(result.is_err(), "CHECK constraint must reject blood_group='X'");
+    assert!(
+        result.is_err(),
+        "CHECK constraint must reject blood_group='X'"
+    );
 }
 
 /// IT-012: FK constraint — cannot delete a donor with active units (RESTRICT).
@@ -415,5 +433,8 @@ async fn test_soft_delete_excludes_from_inventory() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(count, 0, "Soft-deleted unit must not appear in available inventory");
+    assert_eq!(
+        count, 0,
+        "Soft-deleted unit must not appear in available inventory"
+    );
 }

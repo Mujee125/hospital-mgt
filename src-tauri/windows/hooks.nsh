@@ -37,6 +37,10 @@
   ; Explicitly grant standard users modify rights on this one folder, rather
   ; than relying on default ProgramData ACL inheritance across Windows
   ; versions. (M) = modify; applies to this folder, subfolders and files.
+  ; NOTE (QA-2026-09-08 C1): pgdata is deliberately RE-locked at the END of
+  ; this hook (see pgdata_harden below) — the blanket grant here is needed
+  ; only while provisioning writes into subfolders; leaving it on pgdata
+  ; would make the entire PHI store modifiable by any local account.
   nsExec::ExecToLog 'icacls "$APPDATA\HMS" /grant *S-1-5-32-545:(OI)(CI)M /T'
 
 
@@ -224,6 +228,22 @@ skip_initdb_and_register:
     nsExec::ExecToLog 'sc start HMS-PostgreSQL'
 
   pg_setup_done:
+
+  ; ── QA-2026-09-08 C1: lock the PHI store down ─────────────────────────
+  ; The blanket Users:Modify grant above was scoped to ALL of HMS — pgdata
+  ; (the entire patient database cluster) included, so any local non-admin
+  ; account could copy or tamper with patient data. Strip pgdata back to
+  ; SYSTEM + Administrators (the HMS-PostgreSQL service runs as SYSTEM and
+  ; is unaffected) with RX for the installing user, so the non-elevated
+  ; HMS app can still read postgresql.conf / SSL markers for its boot-time
+  ; health checks. Runs on every install/repair path (fresh and
+  ; already-provisioned) so a legacy deployment is healed by re-running
+  ; the installer. The Rust app performs the same hardening on its own
+  ; first-launch SSL path (pg_provision.rs::harden_pgdata_acl) for
+  ; machines provisioned before this hook existed.
+  pgdata_harden:
+  DetailPrint "Hardening database data directory permissions..."
+  nsExec::ExecToLog 'icacls "$APPDATA\HMS\pgdata" /inheritance:r /grant:r SYSTEM:(OI)(CI)F /grant:r *S-1-5-32-544:(OI)(CI)F'
 
   ; Always (re-)apply firewall rules, on EVERY install/repair path — not
   ; just the fresh-install branch. Previously the 42011 rule lived only

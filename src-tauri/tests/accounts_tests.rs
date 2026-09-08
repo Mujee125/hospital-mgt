@@ -92,23 +92,34 @@ async fn test_ac1_expense_authority_and_amount_validation() {
     let err = create_expense_core(&pool, &clerk, expense("  ", "desc", 10.0))
         .await
         .unwrap_err();
-    assert!(err.contains("category"), "blank category rejected, got: {}", err);
+    assert!(
+        err.contains("category"),
+        "blank category rejected, got: {}",
+        err
+    );
     let err = create_expense_core(&pool, &clerk, expense("rent", "   ", 10.0))
         .await
         .unwrap_err();
-    assert!(err.contains("description"), "blank description rejected, got: {}", err);
+    assert!(
+        err.contains("description"),
+        "blank description rejected, got: {}",
+        err
+    );
 
     // Clerk happy path: persisted with attribution.
-    let id = create_expense_core(&pool, &clerk, expense("utilities", "August electricity", 2500.0))
-        .await
-        .expect("clerk records expense");
-    let stored: (String, Option<i32>) = sqlx::query_as(
-        "SELECT category, recorded_by_user_id FROM expenses WHERE id = $1",
+    let id = create_expense_core(
+        &pool,
+        &clerk,
+        expense("utilities", "August electricity", 2500.0),
     )
-    .bind(id)
-    .fetch_one(&pool)
     .await
-    .unwrap();
+    .expect("clerk records expense");
+    let stored: (String, Option<i32>) =
+        sqlx::query_as("SELECT category, recorded_by_user_id FROM expenses WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(stored.0, "utilities");
     assert_eq!(stored.1, Some(clerk_id));
 }
@@ -131,9 +142,16 @@ async fn test_ac2_void_manager_only_and_soft_delete() {
         .unwrap();
 
     // Clerk (no BillingApprove) cannot void.
-    let err = void_expense_core(&pool, &clerk, VoidExpense { id, reason: "clerk".into() })
-        .await
-        .unwrap_err();
+    let err = void_expense_core(
+        &pool,
+        &clerk,
+        VoidExpense {
+            id,
+            reason: "clerk".into(),
+        },
+    )
+    .await
+    .unwrap_err();
     assert!(
         err.contains("requires the 'billing.approve'"),
         "clerk must be denied voiding, got: {}",
@@ -141,15 +159,29 @@ async fn test_ac2_void_manager_only_and_soft_delete() {
     );
 
     // Missing reason rejected.
-    let err = void_expense_core(&pool, &admin, VoidExpense { id, reason: "  ".into() })
-        .await
-        .unwrap_err();
+    let err = void_expense_core(
+        &pool,
+        &admin,
+        VoidExpense {
+            id,
+            reason: "  ".into(),
+        },
+    )
+    .await
+    .unwrap_err();
     assert!(err.contains("reason"), "void reason required, got: {}", err);
 
     // Admin void succeeds; row SOFT-deleted (still present with attribution).
-    void_expense_core(&pool, &admin, VoidExpense { id, reason: "duplicate entry".into() })
-        .await
-        .expect("admin voids");
+    void_expense_core(
+        &pool,
+        &admin,
+        VoidExpense {
+            id,
+            reason: "duplicate entry".into(),
+        },
+    )
+    .await
+    .expect("admin voids");
     let (voided_at_set, voided_by): (bool, Option<i32>) = sqlx::query_as(
         "SELECT voided_at IS NOT NULL, voided_by_user_id FROM expenses WHERE id = $1",
     )
@@ -167,10 +199,21 @@ async fn test_ac2_void_manager_only_and_soft_delete() {
     assert_eq!(row_count, 1, "financial rows are never hard-deleted");
 
     // Double-void rejected.
-    let err = void_expense_core(&pool, &admin, VoidExpense { id, reason: "again".into() })
-        .await
-        .unwrap_err();
-    assert!(err.contains("already voided"), "double-void rejected, got: {}", err);
+    let err = void_expense_core(
+        &pool,
+        &admin,
+        VoidExpense {
+            id,
+            reason: "again".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("already voided"),
+        "double-void rejected, got: {}",
+        err
+    );
 }
 
 // ── AC-3: Summary math ────────────────────────────────────────────────────────
@@ -198,30 +241,66 @@ async fn test_ac3_summary_revenue_minus_expenses() {
 
     // Revenue: 800 collected, 100 refunded → net revenue 700.
     sqlx::query("INSERT INTO payments (bill_id, amount, payment_method) VALUES ($1, 800, 'cash')")
-        .bind(bill.0).execute(&pool).await.unwrap();
+        .bind(bill.0)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO refunds (bill_id, amount, reason) VALUES ($1, 100, 'test')")
-        .bind(bill.0).execute(&pool).await.unwrap();
+        .bind(bill.0)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Expenses: 300 salary + 200 utilities, and a 400 voided one.
-    create_expense_core(&pool, &clerk, expense("salary", "staff wage", 300.0)).await.unwrap();
-    create_expense_core(&pool, &clerk, expense("utilities", "power", 200.0)).await.unwrap();
+    create_expense_core(&pool, &clerk, expense("salary", "staff wage", 300.0))
+        .await
+        .unwrap();
+    create_expense_core(&pool, &clerk, expense("utilities", "power", 200.0))
+        .await
+        .unwrap();
     let voided = create_expense_core(&pool, &clerk, expense("other", "will be voided", 400.0))
         .await
         .unwrap();
-    void_expense_core(&pool, &admin, VoidExpense { id: voided, reason: "test".into() })
-        .await
-        .expect("admin voids the excluded expense");
+    void_expense_core(
+        &pool,
+        &admin,
+        VoidExpense {
+            id: voided,
+            reason: "test".into(),
+        },
+    )
+    .await
+    .expect("admin voids the excluded expense");
 
-    let summary = fetch_accounts_summary(&pool, today(), today()).await.unwrap();
-    assert!(summary.total_revenue >= 700.0, "revenue = payments − refunds, got {}", summary.total_revenue);
-    assert!(summary.total_expenses >= 500.0, "300 + 200 counted, voided 400 excluded, got {}", summary.total_expenses);
-    assert_eq!(summary.net_position, summary.total_revenue - summary.total_expenses);
+    let summary = fetch_accounts_summary(&pool, today(), today())
+        .await
+        .unwrap();
+    assert!(
+        summary.total_revenue >= 700.0,
+        "revenue = payments − refunds, got {}",
+        summary.total_revenue
+    );
+    assert!(
+        summary.total_expenses >= 500.0,
+        "300 + 200 counted, voided 400 excluded, got {}",
+        summary.total_expenses
+    );
+    assert_eq!(
+        summary.net_position,
+        summary.total_revenue - summary.total_expenses
+    );
     // Category grouping: salary and utilities both present, voided 'other' absent
     // from the top category list.
     assert!(summary.by_category.iter().any(|c| c.category == "salary"));
-    assert!(summary.by_category.iter().any(|c| c.category == "utilities"));
+    assert!(summary
+        .by_category
+        .iter()
+        .any(|c| c.category == "utilities"));
     assert!(
-        !summary.by_category.iter().any(|c| c.category == "other" && c.total >= 400.0),
+        !summary
+            .by_category
+            .iter()
+            .any(|c| c.category == "other" && c.total >= 400.0),
         "voided expense must not appear in category totals"
     );
 }

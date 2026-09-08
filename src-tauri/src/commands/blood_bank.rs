@@ -30,9 +30,9 @@ use sqlx::PgPool;
 use crate::audit;
 use crate::models::{
     BloodCrossmatch, BloodDiscard, BloodDonation, BloodDonor, BloodIssue, BloodMovement,
-    BloodTransfusion, BloodUnit, BloodUnitHistory, CreateBloodCrossmatch,
-    CreateBloodDiscard, CreateBloodDonation, CreateBloodDonor, CreateBloodIssue,
-    CreateBloodReservation, CreateBloodTransfusion, CreateBloodUnit,
+    BloodTransfusion, BloodUnit, BloodUnitHistory, CreateBloodCrossmatch, CreateBloodDiscard,
+    CreateBloodDonation, CreateBloodDonor, CreateBloodIssue, CreateBloodReservation,
+    CreateBloodTransfusion, CreateBloodUnit,
 };
 use crate::rbac::{self, Permission, SessionState};
 
@@ -41,17 +41,34 @@ use crate::rbac::{self, Permission, SessionState};
 const VALID_BLOOD_GROUPS: &[&str] = &["A", "B", "AB", "O"];
 const VALID_RH_FACTORS: &[&str] = &["+", "-"];
 const VALID_COMPONENT_TYPES: &[&str] = &[
-    "whole_blood", "prbc", "ffp", "platelets", "cryoprecipitate", "plasma", "granulocytes",
+    "whole_blood",
+    "prbc",
+    "ffp",
+    "platelets",
+    "cryoprecipitate",
+    "plasma",
+    "granulocytes",
 ];
 const VALID_UNIT_STATUSES: &[&str] = &[
-    "available", "reserved", "issued", "transfused", "discarded", "expired", "quarantine",
+    "available",
+    "reserved",
+    "issued",
+    "transfused",
+    "discarded",
+    "expired",
+    "quarantine",
 ];
 /// Referenced by the unit-test suite as the Rust-side contract; production
 /// donor-status validation is not yet wired (tracked in verification report).
 #[allow(dead_code)]
 const VALID_DONOR_STATUSES: &[&str] = &["active", "deferred", "blacklisted"];
-const VALID_CROSSMATCH_RESULTS: &[&str] =
-    &["pending", "compatible", "incompatible", "weak", "indeterminate"];
+const VALID_CROSSMATCH_RESULTS: &[&str] = &[
+    "pending",
+    "compatible",
+    "incompatible",
+    "weak",
+    "indeterminate",
+];
 const VALID_CROSSMATCH_METHODS: &[&str] =
     &["saline_37c", "ahg", "gel_card", "tube_ahg", "electronic"];
 /// Referenced by the unit-test suite as the Rust-side contract; production
@@ -61,11 +78,15 @@ const VALID_RESERVATION_STATUSES: &[&str] = &["active", "fulfilled", "expired", 
 const VALID_PRIORITIES: &[&str] = &["routine", "urgent", "emergency", "stat"];
 const VALID_ISSUE_TYPES: &[&str] = &["routine", "emergency", "uncrossmatched", "autologous"];
 const VALID_DISCARD_REASONS: &[&str] = &[
-    "expired", "contaminated", "hemolysed", "broken", "positive_screen", "insufficient_volume",
+    "expired",
+    "contaminated",
+    "hemolysed",
+    "broken",
+    "positive_screen",
+    "insufficient_volume",
     "other",
 ];
-const VALID_TRANSFUSION_OUTCOMES: &[&str] =
-    &["completed", "reaction", "incomplete", "cancelled"];
+const VALID_TRANSFUSION_OUTCOMES: &[&str] = &["completed", "reaction", "incomplete", "cancelled"];
 const VALID_SCREENING_STATUSES: &[&str] = &["pending", "passed", "failed", "quarantine"];
 
 fn validate_enum(value: &str, allowed: &[&str], field_name: &str) -> Result<(), String> {
@@ -322,7 +343,10 @@ pub async fn get_blood_donors(
     let ps = page_size.unwrap_or(10).clamp(1, 100);
     let offset = (pg - 1) * ps;
 
-    let search_term = search.as_deref().filter(|s| !s.trim().is_empty()).map(|s| s.trim());
+    let search_term = search
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim());
     let bg = blood_group_filter.as_deref().filter(|s| !s.is_empty());
     let st = status_filter.as_deref().filter(|s| !s.is_empty());
 
@@ -357,11 +381,17 @@ pub async fn get_blood_donors(
     if let Some(s) = st {
         count_q = count_q.bind(s);
     }
-    let total: i64 = count_q.fetch_one(pool.inner()).await.map_err(|e| sanitize_db_error(&e))?;
+    let total: i64 = count_q
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| sanitize_db_error(&e))?;
 
     let data_sql = format!(
         "{} {} ORDER BY bd.created_at DESC LIMIT ${} OFFSET ${}",
-        SELECT_DONORS, where_clause, bind_idx, bind_idx + 1
+        SELECT_DONORS,
+        where_clause,
+        bind_idx,
+        bind_idx + 1
     );
     let mut data_q = sqlx::query_as::<_, BloodDonor>(&data_sql);
     if let Some(s) = search_term {
@@ -396,7 +426,10 @@ pub async fn get_blood_donor(
     id: i32,
 ) -> Result<BloodDonor, String> {
     let _ = rbac::require(&session, Permission::BloodBankView)?;
-    let q = format!("{} WHERE bd.id = $1 AND bd.deleted_at IS NULL", SELECT_DONORS);
+    let q = format!(
+        "{} WHERE bd.id = $1 AND bd.deleted_at IS NULL",
+        SELECT_DONORS
+    );
     sqlx::query_as::<_, BloodDonor>(&q)
         .bind(id)
         .fetch_one(pool.inner())
@@ -601,11 +634,17 @@ pub async fn get_blood_donations(
     if let Some(s) = ss {
         count_q = count_q.bind(s);
     }
-    let total: i64 = count_q.fetch_one(pool.inner()).await.map_err(|e| sanitize_db_error(&e))?;
+    let total: i64 = count_q
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| sanitize_db_error(&e))?;
 
     let data_sql = format!(
         "{} {} ORDER BY bd.donation_date DESC LIMIT ${} OFFSET ${}",
-        SELECT_DONATIONS, where_clause, bind_idx, bind_idx + 1
+        SELECT_DONATIONS,
+        where_clause,
+        bind_idx,
+        bind_idx + 1
     );
     let mut data_q = sqlx::query_as::<_, BloodDonation>(&data_sql);
     if let Some(d) = donor_id {
@@ -705,10 +744,18 @@ pub async fn create_blood_donation(
     .bind(blood_group)
     .bind(rh_factor)
     .bind(donation.bag_type.as_deref().unwrap_or("single"))
-    .bind(donation.hemoglobin_level.map(rust_decimal::Decimal::from_f64_retain))
+    .bind(
+        donation
+            .hemoglobin_level
+            .map(rust_decimal::Decimal::from_f64_retain),
+    )
     .bind(donation.blood_pressure.as_deref())
     .bind(donation.pulse)
-    .bind(donation.temperature_c.map(rust_decimal::Decimal::from_f64_retain))
+    .bind(
+        donation
+            .temperature_c
+            .map(rust_decimal::Decimal::from_f64_retain),
+    )
     .bind(donation.notes.as_deref())
     .fetch_one(&mut *tx)
     .await
@@ -825,13 +872,12 @@ pub async fn update_blood_donation_screening(
 
     let mut tx = pool.begin().await.map_err(|e| sanitize_db_error(&e))?;
 
-    let current: Option<(String,)> = sqlx::query_as(
-        "SELECT screening_status FROM blood_donations WHERE id = $1 FOR UPDATE",
-    )
-    .bind(donation_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| sanitize_db_error(&e))?;
+    let current: Option<(String,)> =
+        sqlx::query_as("SELECT screening_status FROM blood_donations WHERE id = $1 FOR UPDATE")
+            .bind(donation_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| sanitize_db_error(&e))?;
 
     let _old = current
         .ok_or_else(|| format!("Donation {} not found.", donation_id))?
@@ -865,22 +911,20 @@ pub async fn update_blood_donation_screening(
     // 'failed' branch handles both the post-BE-06 case (unit already in
     // quarantine — stays there) and the defensive case (a unit that was
     // somehow already 'available' — pulled back to quarantine).
-    let unit_row: Option<(i32,)> = sqlx::query_as(
-        "SELECT id FROM blood_units WHERE donation_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(donation_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| sanitize_db_error(&e))?;
+    let unit_row: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM blood_units WHERE donation_id = $1 AND deleted_at IS NULL")
+            .bind(donation_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| sanitize_db_error(&e))?;
 
     if let Some((unit_id,)) = unit_row {
-        let unit_status: Option<(String,)> = sqlx::query_as(
-            "SELECT status FROM blood_units WHERE id = $1 FOR UPDATE",
-        )
-        .bind(unit_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| sanitize_db_error(&e))?;
+        let unit_status: Option<(String,)> =
+            sqlx::query_as("SELECT status FROM blood_units WHERE id = $1 FOR UPDATE")
+                .bind(unit_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| sanitize_db_error(&e))?;
 
         if let Some((cur,)) = unit_status {
             // Only transition non-terminal units (transfused/discarded/expired
@@ -892,10 +936,9 @@ pub async fn update_blood_donation_screening(
                         "available",
                         "Screening passed — released to available inventory",
                     ),
-                    "failed" if cur != "quarantine" => (
-                        "quarantine",
-                        "Quarantined — screening failed",
-                    ),
+                    "failed" if cur != "quarantine" => {
+                        ("quarantine", "Quarantined — screening failed")
+                    }
                     // 'quarantine' or 'pending' screening result: no status change
                     _ => ("", ""),
                 };
@@ -911,10 +954,15 @@ pub async fn update_blood_donation_screening(
                     .map_err(|e| sanitize_db_error(&e))?;
 
                     record_unit_event(
-                        &mut tx, unit_id, new_status, s.user_id,
+                        &mut tx,
+                        unit_id,
+                        new_status,
+                        s.user_id,
                         Some(event_note),
-                        Some("donation"), Some(donation_id),
-                    ).await?;
+                        Some("donation"),
+                        Some(donation_id),
+                    )
+                    .await?;
                 }
             }
         }
@@ -988,7 +1036,10 @@ pub async fn get_blood_units(
     }
     if let Some(days) = expiring_days {
         if days > 0 {
-            conditions.push(format!("bu.expiry_date <= NOW() + INTERVAL '1 day' * ${}", bind_idx));
+            conditions.push(format!(
+                "bu.expiry_date <= NOW() + INTERVAL '1 day' * ${}",
+                bind_idx
+            ));
             bind_idx += 1;
         }
     }
@@ -996,23 +1047,53 @@ pub async fn get_blood_units(
 
     let count_sql = format!("SELECT COUNT(*) FROM blood_units bu {}", where_clause);
     let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-    if let Some(s) = st { count_q = count_q.bind(s); }
-    if let Some(b) = bg { count_q = count_q.bind(b); }
-    if let Some(r) = rh { count_q = count_q.bind(r); }
-    if let Some(c) = ct { count_q = count_q.bind(c); }
-    if let Some(d) = expiring_days { if d > 0 { count_q = count_q.bind(d); } }
-    let total: i64 = count_q.fetch_one(pool.inner()).await.map_err(|e| sanitize_db_error(&e))?;
+    if let Some(s) = st {
+        count_q = count_q.bind(s);
+    }
+    if let Some(b) = bg {
+        count_q = count_q.bind(b);
+    }
+    if let Some(r) = rh {
+        count_q = count_q.bind(r);
+    }
+    if let Some(c) = ct {
+        count_q = count_q.bind(c);
+    }
+    if let Some(d) = expiring_days {
+        if d > 0 {
+            count_q = count_q.bind(d);
+        }
+    }
+    let total: i64 = count_q
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| sanitize_db_error(&e))?;
 
     let data_sql = format!(
         "{} {} ORDER BY bu.expiry_date ASC LIMIT ${} OFFSET ${}",
-        SELECT_UNITS, where_clause, bind_idx, bind_idx + 1
+        SELECT_UNITS,
+        where_clause,
+        bind_idx,
+        bind_idx + 1
     );
     let mut data_q = sqlx::query_as::<_, BloodUnit>(&data_sql);
-    if let Some(s) = st { data_q = data_q.bind(s); }
-    if let Some(b) = bg { data_q = data_q.bind(b); }
-    if let Some(r) = rh { data_q = data_q.bind(r); }
-    if let Some(c) = ct { data_q = data_q.bind(c); }
-    if let Some(d) = expiring_days { if d > 0 { data_q = data_q.bind(d); } }
+    if let Some(s) = st {
+        data_q = data_q.bind(s);
+    }
+    if let Some(b) = bg {
+        data_q = data_q.bind(b);
+    }
+    if let Some(r) = rh {
+        data_q = data_q.bind(r);
+    }
+    if let Some(c) = ct {
+        data_q = data_q.bind(c);
+    }
+    if let Some(d) = expiring_days {
+        if d > 0 {
+            data_q = data_q.bind(d);
+        }
+    }
     data_q = data_q.bind(ps).bind(offset);
     let units: Vec<BloodUnit> = data_q
         .fetch_all(pool.inner())
@@ -1046,25 +1127,49 @@ pub async fn search_blood_inventory(
     let rh = rh_factor.as_deref().filter(|s| !s.is_empty());
     let ct = component_type.as_deref().filter(|s| !s.is_empty());
 
-    if let Some(b) = bg { validate_enum(b, VALID_BLOOD_GROUPS, "blood_group")?; }
-    if let Some(r) = rh { validate_enum(r, VALID_RH_FACTORS, "rh_factor")?; }
-    if let Some(c) = ct { validate_enum(c, VALID_COMPONENT_TYPES, "component_type")?; }
+    if let Some(b) = bg {
+        validate_enum(b, VALID_BLOOD_GROUPS, "blood_group")?;
+    }
+    if let Some(r) = rh {
+        validate_enum(r, VALID_RH_FACTORS, "rh_factor")?;
+    }
+    if let Some(c) = ct {
+        validate_enum(c, VALID_COMPONENT_TYPES, "component_type")?;
+    }
 
     let mut conditions = vec![
         "bu.deleted_at IS NULL".to_string(),
         "bu.status = 'available'".to_string(),
     ];
     let mut bind_idx = 1;
-    if bg.is_some() { conditions.push(format!("bu.blood_group = ${}", bind_idx)); bind_idx += 1; }
-    if rh.is_some() { conditions.push(format!("bu.rh_factor = ${}", bind_idx)); bind_idx += 1; }
-    if ct.is_some() { conditions.push(format!("bu.component_type = ${}", bind_idx)); bind_idx += 1; }
+    if bg.is_some() {
+        conditions.push(format!("bu.blood_group = ${}", bind_idx));
+        bind_idx += 1;
+    }
+    if rh.is_some() {
+        conditions.push(format!("bu.rh_factor = ${}", bind_idx));
+        bind_idx += 1;
+    }
+    if ct.is_some() {
+        conditions.push(format!("bu.component_type = ${}", bind_idx));
+        bind_idx += 1;
+    }
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
-    let data_sql = format!("{} {} ORDER BY bu.expiry_date ASC LIMIT 100", SELECT_UNITS, where_clause);
+    let data_sql = format!(
+        "{} {} ORDER BY bu.expiry_date ASC LIMIT 100",
+        SELECT_UNITS, where_clause
+    );
     let mut data_q = sqlx::query_as::<_, BloodUnit>(&data_sql);
-    if let Some(b) = bg { data_q = data_q.bind(b); }
-    if let Some(r) = rh { data_q = data_q.bind(r); }
-    if let Some(c) = ct { data_q = data_q.bind(c); }
+    if let Some(b) = bg {
+        data_q = data_q.bind(b);
+    }
+    if let Some(r) = rh {
+        data_q = data_q.bind(r);
+    }
+    if let Some(c) = ct {
+        data_q = data_q.bind(c);
+    }
     let units: Vec<BloodUnit> = data_q
         .fetch_all(pool.inner())
         .await
@@ -1080,7 +1185,10 @@ pub async fn get_blood_unit(
     id: i32,
 ) -> Result<BloodUnit, String> {
     let _ = rbac::require(&session, Permission::BloodBankView)?;
-    let q = format!("{} WHERE bu.id = $1 AND bu.deleted_at IS NULL", SELECT_UNITS);
+    let q = format!(
+        "{} WHERE bu.id = $1 AND bu.deleted_at IS NULL",
+        SELECT_UNITS
+    );
     sqlx::query_as::<_, BloodUnit>(&q)
         .bind(id)
         .fetch_one(pool.inner())
@@ -1110,23 +1218,31 @@ pub async fn create_blood_unit(
         return Err("volume_ml must be greater than 0.".to_string());
     }
 
-    let expiry: chrono::DateTime<chrono::Utc> = chrono::DateTime::parse_from_rfc3339(unit.expiry_date.trim())
-        .map_err(|e| format!("Invalid expiry_date '{}': {}. Use ISO 8601 / RFC 3339.", unit.expiry_date, e))?
-        .with_timezone(&chrono::Utc);
+    let expiry: chrono::DateTime<chrono::Utc> =
+        chrono::DateTime::parse_from_rfc3339(unit.expiry_date.trim())
+            .map_err(|e| {
+                format!(
+                    "Invalid expiry_date '{}': {}. Use ISO 8601 / RFC 3339.",
+                    unit.expiry_date, e
+                )
+            })?
+            .with_timezone(&chrono::Utc);
 
     let mut tx = pool.begin().await.map_err(|e| sanitize_db_error(&e))?;
 
     // Verify donor exists.
-    let donor_exists: Option<(i32,)> = sqlx::query_as(
-        "SELECT id FROM blood_donors WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(unit.donor_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| sanitize_db_error(&e))?;
+    let donor_exists: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM blood_donors WHERE id = $1 AND deleted_at IS NULL")
+            .bind(unit.donor_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| sanitize_db_error(&e))?;
 
     if donor_exists.is_none() {
-        return Err(format!("Blood donor {} not found or deleted.", unit.donor_id));
+        return Err(format!(
+            "Blood donor {} not found or deleted.",
+            unit.donor_id
+        ));
     }
 
     let unit_number_row: (String,) = sqlx::query_as(
@@ -1162,13 +1278,27 @@ pub async fn create_blood_unit(
     let unit_id = row.0;
 
     record_unit_event(
-        &mut tx, unit_id, "available", s.user_id,
-        Some("Unit created manually"), None, None,
-    ).await?;
+        &mut tx,
+        unit_id,
+        "available",
+        s.user_id,
+        Some("Unit created manually"),
+        None,
+        None,
+    )
+    .await?;
     record_movement(
-        &mut tx, unit_id, "received", None, Some("Blood Bank Storage"),
-        s.user_id, Some("Manual unit creation"), None, None,
-    ).await?;
+        &mut tx,
+        unit_id,
+        "received",
+        None,
+        Some("Blood Bank Storage"),
+        s.user_id,
+        Some("Manual unit creation"),
+        None,
+        None,
+    )
+    .await?;
 
     tx.commit().await.map_err(|e| sanitize_db_error(&e))?;
 
@@ -1221,7 +1351,9 @@ pub async fn update_blood_unit_status(
         return Err(format!(
             "Invalid status transition: '{}' → '{}'. \
              Allowed transitions from '{}' are: {}.",
-            current_status, new_status, current_status,
+            current_status,
+            new_status,
+            current_status,
             allowed_unit_transitions_from(&current_status)
         ));
     }
@@ -1242,7 +1374,16 @@ pub async fn update_blood_unit_status(
         .await
         .map_err(|e| sanitize_db_error(&e))?;
 
-    record_unit_event(&mut tx, id, new_status, s.user_id, notes.as_deref(), None, None).await?;
+    record_unit_event(
+        &mut tx,
+        id,
+        new_status,
+        s.user_id,
+        notes.as_deref(),
+        None,
+        None,
+    )
+    .await?;
 
     tx.commit().await.map_err(|e| sanitize_db_error(&e))?;
 
@@ -1365,21 +1506,42 @@ pub async fn get_blood_crossmatches(
         format!("WHERE {}", conditions.join(" AND "))
     };
 
-    let count_sql = format!("SELECT COUNT(*) FROM blood_crossmatch_results bc {}", where_clause);
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM blood_crossmatch_results bc {}",
+        where_clause
+    );
     let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-    if let Some(p) = patient_id { count_q = count_q.bind(p); }
-    if let Some(u) = unit_id { count_q = count_q.bind(u); }
-    if let Some(r) = rf { count_q = count_q.bind(r); }
-    let total: i64 = count_q.fetch_one(pool.inner()).await.map_err(|e| sanitize_db_error(&e))?;
+    if let Some(p) = patient_id {
+        count_q = count_q.bind(p);
+    }
+    if let Some(u) = unit_id {
+        count_q = count_q.bind(u);
+    }
+    if let Some(r) = rf {
+        count_q = count_q.bind(r);
+    }
+    let total: i64 = count_q
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| sanitize_db_error(&e))?;
 
     let data_sql = format!(
         "{} {} ORDER BY bc.crossmatch_date DESC LIMIT ${} OFFSET ${}",
-        SELECT_CROSSMATCHES, where_clause, bind_idx, bind_idx + 1
+        SELECT_CROSSMATCHES,
+        where_clause,
+        bind_idx,
+        bind_idx + 1
     );
     let mut data_q = sqlx::query_as::<_, BloodCrossmatch>(&data_sql);
-    if let Some(p) = patient_id { data_q = data_q.bind(p); }
-    if let Some(u) = unit_id { data_q = data_q.bind(u); }
-    if let Some(r) = rf { data_q = data_q.bind(r); }
+    if let Some(p) = patient_id {
+        data_q = data_q.bind(p);
+    }
+    if let Some(u) = unit_id {
+        data_q = data_q.bind(u);
+    }
+    if let Some(r) = rf {
+        data_q = data_q.bind(r);
+    }
     data_q = data_q.bind(ps).bind(offset);
     let rows: Vec<BloodCrossmatch> = data_q
         .fetch_all(pool.inner())
@@ -1416,20 +1578,19 @@ pub async fn check_blood_compatibility(
     .await
     .map_err(|e| sanitize_db_error(&e))?;
 
-    let (donor_group, donor_rh) = row
-        .ok_or_else(|| format!("Blood unit {} not found or deleted.", unit_id))?;
+    let (donor_group, donor_rh) =
+        row.ok_or_else(|| format!("Blood unit {} not found or deleted.", unit_id))?;
 
     // Patient blood group — stored in patients.blood_group (if present).
-    let patient_row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT blood_group, rh_factor FROM patients WHERE id = $1",
-    )
-    .bind(patient_id)
-    .fetch_optional(pool.inner())
-    .await
-    .map_err(|e| sanitize_db_error(&e))?;
+    let patient_row: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT blood_group, rh_factor FROM patients WHERE id = $1")
+            .bind(patient_id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| sanitize_db_error(&e))?;
 
-    let (patient_group_opt, patient_rh_opt) = patient_row
-        .ok_or_else(|| format!("Patient {} not found.", patient_id))?;
+    let (patient_group_opt, patient_rh_opt) =
+        patient_row.ok_or_else(|| format!("Patient {} not found.", patient_id))?;
 
     let patient_group = patient_group_opt.unwrap_or_else(|| "".to_string());
     let patient_rh = patient_rh_opt.unwrap_or_else(|| "".to_string());
@@ -1634,13 +1795,12 @@ pub async fn create_blood_reservation(
     .map_err(|e| sanitize_db_error(&e))?;
 
     if claim.is_none() {
-        let cur: Option<(String,)> = sqlx::query_as(
-            "SELECT status FROM blood_units WHERE id = $1 AND deleted_at IS NULL",
-        )
-        .bind(reservation.unit_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| sanitize_db_error(&e))?;
+        let cur: Option<(String,)> =
+            sqlx::query_as("SELECT status FROM blood_units WHERE id = $1 AND deleted_at IS NULL")
+                .bind(reservation.unit_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| sanitize_db_error(&e))?;
         return Err(match cur {
             None => format!("Blood unit {} not found or deleted.", reservation.unit_id),
             Some((status,)) => format!(
@@ -1690,10 +1850,15 @@ pub async fn create_blood_reservation(
         .map_err(|e| sanitize_db_error(&e))?;
 
     record_unit_event(
-        &mut tx, reservation.unit_id, "reserved", s.user_id,
+        &mut tx,
+        reservation.unit_id,
+        "reserved",
+        s.user_id,
         Some(&format!("Reserved for patient {}", reservation.patient_id)),
-        Some("reservation"), Some(reservation_id),
-    ).await?;
+        Some("reservation"),
+        Some(reservation_id),
+    )
+    .await?;
 
     tx.commit().await.map_err(|e| sanitize_db_error(&e))?;
 
@@ -1727,16 +1892,15 @@ pub async fn cancel_blood_reservation(
 
     let mut tx = pool.begin().await.map_err(|e| sanitize_db_error(&e))?;
 
-    let res_row: Option<(i32, String)> = sqlx::query_as(
-        "SELECT unit_id, status FROM blood_reservations WHERE id = $1 FOR UPDATE",
-    )
-    .bind(reservation_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| sanitize_db_error(&e))?;
+    let res_row: Option<(i32, String)> =
+        sqlx::query_as("SELECT unit_id, status FROM blood_reservations WHERE id = $1 FOR UPDATE")
+            .bind(reservation_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| sanitize_db_error(&e))?;
 
-    let (unit_id, res_status) = res_row
-        .ok_or_else(|| format!("Reservation {} not found.", reservation_id))?;
+    let (unit_id, res_status) =
+        res_row.ok_or_else(|| format!("Reservation {} not found.", reservation_id))?;
 
     if res_status != "active" {
         return Err(format!(
@@ -1770,10 +1934,15 @@ pub async fn cancel_blood_reservation(
     .map_err(|e| sanitize_db_error(&e))?;
 
     record_unit_event(
-        &mut tx, unit_id, "available", s.user_id,
+        &mut tx,
+        unit_id,
+        "available",
+        s.user_id,
         Some(&format!("Reservation {} cancelled", reservation_id)),
-        Some("reservation"), Some(reservation_id),
-    ).await?;
+        Some("reservation"),
+        Some(reservation_id),
+    )
+    .await?;
 
     tx.commit().await.map_err(|e| sanitize_db_error(&e))?;
 
@@ -1829,17 +1998,31 @@ pub async fn get_blood_issues(
 
     let count_sql = format!("SELECT COUNT(*) FROM blood_issues bi {}", where_clause);
     let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-    if let Some(p) = patient_id { count_q = count_q.bind(p); }
-    if let Some(i) = it { count_q = count_q.bind(i); }
-    let total: i64 = count_q.fetch_one(pool.inner()).await.map_err(|e| sanitize_db_error(&e))?;
+    if let Some(p) = patient_id {
+        count_q = count_q.bind(p);
+    }
+    if let Some(i) = it {
+        count_q = count_q.bind(i);
+    }
+    let total: i64 = count_q
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| sanitize_db_error(&e))?;
 
     let data_sql = format!(
         "{} {} ORDER BY bi.issued_at DESC LIMIT ${} OFFSET ${}",
-        SELECT_ISSUES, where_clause, bind_idx, bind_idx + 1
+        SELECT_ISSUES,
+        where_clause,
+        bind_idx,
+        bind_idx + 1
     );
     let mut data_q = sqlx::query_as::<_, BloodIssue>(&data_sql);
-    if let Some(p) = patient_id { data_q = data_q.bind(p); }
-    if let Some(i) = it { data_q = data_q.bind(i); }
+    if let Some(p) = patient_id {
+        data_q = data_q.bind(p);
+    }
+    if let Some(i) = it {
+        data_q = data_q.bind(i);
+    }
     data_q = data_q.bind(ps).bind(offset);
     let rows: Vec<BloodIssue> = data_q
         .fetch_all(pool.inner())
@@ -1878,19 +2061,20 @@ pub async fn issue_blood(
     // only return a generic "cannot be issued" if we folded these into the
     // claim predicate). Doing it as a pre-check gives the operator a clear
     // reason ("expired", "screening pending") rather than a bare status error.
-    let precheck: Option<(String, Option<chrono::DateTime<chrono::Utc>>, Option<i32>)> = sqlx::query_as(
-        r#"SELECT bu.status, bu.expiry_date, bu.donation_id
+    let precheck: Option<(String, Option<chrono::DateTime<chrono::Utc>>, Option<i32>)> =
+        sqlx::query_as(
+            r#"SELECT bu.status, bu.expiry_date, bu.donation_id
            FROM blood_units bu
            WHERE bu.id = $1 AND bu.deleted_at IS NULL
            FOR UPDATE"#,
-    )
-    .bind(issue.unit_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| sanitize_db_error(&e))?;
+        )
+        .bind(issue.unit_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| sanitize_db_error(&e))?;
 
-    let (unit_status, unit_expiry, unit_donation_id) = precheck
-        .ok_or_else(|| format!("Blood unit {} not found or deleted.", issue.unit_id))?;
+    let (unit_status, unit_expiry, unit_donation_id) =
+        precheck.ok_or_else(|| format!("Blood unit {} not found or deleted.", issue.unit_id))?;
 
     // BE-02: Reject expired units.
     if unit_expiry.map(|e| e <= chrono::Utc::now()).unwrap_or(true) {
@@ -1898,7 +2082,9 @@ pub async fn issue_blood(
             "Blood unit {} cannot be issued: it has expired (expiry date: {}). \
              Expired blood must be discarded, never transfused.",
             issue.unit_id,
-            unit_expiry.map(|e| e.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "unknown".to_string())
+            unit_expiry
+                .map(|e| e.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "unknown".to_string())
         ));
     }
 
@@ -1915,16 +2101,20 @@ pub async fn issue_blood(
     // been screened by the blood-bank technician at creation time, and the
     // BloodBankManage permission required to create them is the control.
     if let Some(did) = unit_donation_id {
-        let screening: Option<(String,)> = sqlx::query_as(
-            "SELECT screening_status FROM blood_donations WHERE id = $1",
-        )
-        .bind(did)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| sanitize_db_error(&e))?;
+        let screening: Option<(String,)> =
+            sqlx::query_as("SELECT screening_status FROM blood_donations WHERE id = $1")
+                .bind(did)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| sanitize_db_error(&e))?;
 
         let ss = screening
-            .ok_or_else(|| format!("Blood unit {} references donation {} which does not exist.", issue.unit_id, did))?
+            .ok_or_else(|| {
+                format!(
+                    "Blood unit {} references donation {} which does not exist.",
+                    issue.unit_id, did
+                )
+            })?
             .0;
 
         if ss != "passed" {
@@ -1986,24 +2176,22 @@ pub async fn issue_blood(
     // For 'autologous' issues: the donor is the patient themselves, so ABO
     //   is inherently compatible — skip the matrix check.
     if issue_type != "autologous" {
-        let unit_bt: (String, String) = sqlx::query_as(
-            "SELECT blood_group, rh_factor FROM blood_units WHERE id = $1",
-        )
-        .bind(issue.unit_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| sanitize_db_error(&e))?;
+        let unit_bt: (String, String) =
+            sqlx::query_as("SELECT blood_group, rh_factor FROM blood_units WHERE id = $1")
+                .bind(issue.unit_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| sanitize_db_error(&e))?;
 
-        let patient_bt: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT blood_group, rh_factor FROM patients WHERE id = $1",
-        )
-        .bind(issue.patient_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| sanitize_db_error(&e))?;
+        let patient_bt: Option<(Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT blood_group, rh_factor FROM patients WHERE id = $1")
+                .bind(issue.patient_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| sanitize_db_error(&e))?;
 
-        let (p_group_opt, p_rh_opt) = patient_bt
-            .ok_or_else(|| format!("Patient {} not found.", issue.patient_id))?;
+        let (p_group_opt, p_rh_opt) =
+            patient_bt.ok_or_else(|| format!("Patient {} not found.", issue.patient_id))?;
         let p_group = p_group_opt.unwrap_or_default();
         let p_rh = p_rh_opt.unwrap_or_default();
 
@@ -2028,7 +2216,11 @@ pub async fn issue_blood(
         if !compatible {
             // Determine if an emergency override is permitted.
             let is_emergency_override = issue_type == "emergency" || issue_type == "uncrossmatched";
-            let has_indication = issue.clinical_indication.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+            let has_indication = issue
+                .clinical_indication
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
 
             if !is_emergency_override {
                 let reason = if p_group.is_empty() || p_rh.is_empty() {
@@ -2043,8 +2235,7 @@ pub async fn issue_blood(
                          Incompatible transfusion can cause acute hemolytic reaction (fatal). \
                          Use issue_type='emergency' with a clinical_indication only for \
                          life-threatening massive hemorrhage where typing is not yet available.",
-                        issue.unit_id, unit_bt.0, unit_bt.1,
-                        issue.patient_id, p_group, p_rh
+                        issue.unit_id, unit_bt.0, unit_bt.1, issue.patient_id, p_group, p_rh
                     )
                 };
                 return Err(reason);
@@ -2055,9 +2246,20 @@ pub async fn issue_blood(
                     "Emergency issue of potentially incompatible blood requires a non-empty \
                      clinical_indication documenting the life-threatening reason (e.g. 'massive \
                      hemorrhage, O- not available'). Unit {} is {}{}, patient {} is {}{}.",
-                    issue.unit_id, unit_bt.0, unit_bt.1,
-                    issue.patient_id, if p_group.is_empty() { "untyped".to_string() } else { p_group.clone() },
-                    if p_rh.is_empty() { "".to_string() } else { p_rh.clone() }
+                    issue.unit_id,
+                    unit_bt.0,
+                    unit_bt.1,
+                    issue.patient_id,
+                    if p_group.is_empty() {
+                        "untyped".to_string()
+                    } else {
+                        p_group.clone()
+                    },
+                    if p_rh.is_empty() {
+                        "".to_string()
+                    } else {
+                        p_rh.clone()
+                    }
                 ));
             }
             // Emergency override with documented indication — proceed.
@@ -2145,18 +2347,30 @@ pub async fn issue_blood(
     }
 
     record_unit_event(
-        &mut tx, issue.unit_id, "issued", s.user_id,
-        Some(&format!("Issued to patient {} ({})", issue.patient_id, issue_type)),
-        Some("issue"), Some(issue_id),
-    ).await?;
+        &mut tx,
+        issue.unit_id,
+        "issued",
+        s.user_id,
+        Some(&format!(
+            "Issued to patient {} ({})",
+            issue.patient_id, issue_type
+        )),
+        Some("issue"),
+        Some(issue_id),
+    )
+    .await?;
     record_movement(
-        &mut tx, issue.unit_id, "issued",
+        &mut tx,
+        issue.unit_id,
+        "issued",
         Some("Blood Bank Storage"),
         issue.issued_to_location.as_deref(),
         s.user_id,
         Some(&format!("Issued ({})", issue_type)),
-        Some("issue"), Some(issue_id),
-    ).await?;
+        Some("issue"),
+        Some(issue_id),
+    )
+    .await?;
 
     tx.commit().await.map_err(|e| sanitize_db_error(&e))?;
 
@@ -2190,13 +2404,12 @@ pub async fn return_blood_unit(
 
     let mut tx = pool.begin().await.map_err(|e| sanitize_db_error(&e))?;
 
-    let issue_row: Option<(i32,)> = sqlx::query_as(
-        "SELECT unit_id FROM blood_issues WHERE id = $1 FOR UPDATE",
-    )
-    .bind(issue_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| sanitize_db_error(&e))?;
+    let issue_row: Option<(i32,)> =
+        sqlx::query_as("SELECT unit_id FROM blood_issues WHERE id = $1 FOR UPDATE")
+            .bind(issue_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| sanitize_db_error(&e))?;
 
     let unit_id = issue_row
         .ok_or_else(|| format!("Blood issue {} not found.", issue_id))?
@@ -2249,16 +2462,31 @@ pub async fn return_blood_unit(
     .map_err(|e| sanitize_db_error(&e))?;
 
     record_unit_event(
-        &mut tx, unit_id, "available", s.user_id,
-        Some(&format!("Returned from issue {} ({})", issue_id, reason.as_deref().unwrap_or("no reason"))),
-        Some("issue"), Some(issue_id),
-    ).await?;
+        &mut tx,
+        unit_id,
+        "available",
+        s.user_id,
+        Some(&format!(
+            "Returned from issue {} ({})",
+            issue_id,
+            reason.as_deref().unwrap_or("no reason")
+        )),
+        Some("issue"),
+        Some(issue_id),
+    )
+    .await?;
     record_movement(
-        &mut tx, unit_id, "returned",
-        Some("Ward"), Some("Blood Bank Storage"),
-        s.user_id, reason.as_deref(),
-        Some("issue"), Some(issue_id),
-    ).await?;
+        &mut tx,
+        unit_id,
+        "returned",
+        Some("Ward"),
+        Some("Blood Bank Storage"),
+        s.user_id,
+        reason.as_deref(),
+        Some("issue"),
+        Some(issue_id),
+    )
+    .await?;
 
     tx.commit().await.map_err(|e| sanitize_db_error(&e))?;
 
@@ -2294,18 +2522,31 @@ pub async fn get_blood_transfusions(
         None => ("", false),
     };
 
-    let count_sql = format!("SELECT COUNT(*) FROM blood_transfusions bt {}", where_clause);
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM blood_transfusions bt {}",
+        where_clause
+    );
     let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-    if has_patient { count_q = count_q.bind(patient_id.unwrap()); }
-    let total: i64 = count_q.fetch_one(pool.inner()).await.map_err(|e| sanitize_db_error(&e))?;
+    if has_patient {
+        count_q = count_q.bind(patient_id.unwrap());
+    }
+    let total: i64 = count_q
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| sanitize_db_error(&e))?;
 
     let bind_idx = if has_patient { 2 } else { 1 };
     let data_sql = format!(
         "{} {} ORDER BY bt.started_at DESC LIMIT ${} OFFSET ${}",
-        SELECT_TRANSFUSIONS, where_clause, bind_idx, bind_idx + 1
+        SELECT_TRANSFUSIONS,
+        where_clause,
+        bind_idx,
+        bind_idx + 1
     );
     let mut data_q = sqlx::query_as::<_, BloodTransfusion>(&data_sql);
-    if has_patient { data_q = data_q.bind(patient_id.unwrap()); }
+    if has_patient {
+        data_q = data_q.bind(patient_id.unwrap());
+    }
     data_q = data_q.bind(ps).bind(offset);
     let rows: Vec<BloodTransfusion> = data_q
         .fetch_all(pool.inner())
@@ -2338,7 +2579,12 @@ pub async fn create_blood_transfusion(
         }
     }
 
-    let outcome = if transfusion.outcome.as_deref().unwrap_or("completed").is_empty() {
+    let outcome = if transfusion
+        .outcome
+        .as_deref()
+        .unwrap_or("completed")
+        .is_empty()
+    {
         "completed"
     } else {
         transfusion.outcome.as_deref().unwrap_or("completed")
@@ -2351,16 +2597,15 @@ pub async fn create_blood_transfusion(
     // for the SAME patient the blood was issued to. Without this check, a
     // transfusion could be recorded against patient B under an issue record
     // for patient A — a wrong-patient transfusion never-event.
-    let issue_row: Option<(i32, i32)> = sqlx::query_as(
-        "SELECT unit_id, patient_id FROM blood_issues WHERE id = $1 FOR UPDATE",
-    )
-    .bind(transfusion.issue_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| sanitize_db_error(&e))?;
+    let issue_row: Option<(i32, i32)> =
+        sqlx::query_as("SELECT unit_id, patient_id FROM blood_issues WHERE id = $1 FOR UPDATE")
+            .bind(transfusion.issue_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| sanitize_db_error(&e))?;
 
-    let (issue_unit_id, issue_patient_id) = issue_row
-        .ok_or_else(|| format!("Blood issue {} not found.", transfusion.issue_id))?;
+    let (issue_unit_id, issue_patient_id) =
+        issue_row.ok_or_else(|| format!("Blood issue {} not found.", transfusion.issue_id))?;
 
     if issue_unit_id != transfusion.unit_id {
         return Err(format!(
@@ -2429,8 +2674,16 @@ pub async fn create_blood_transfusion(
     .bind(transfusion.volume_transfused_ml)
     .bind(transfusion.pre_transfusion_bp.as_deref())
     .bind(transfusion.post_transfusion_bp.as_deref())
-    .bind(transfusion.pre_transfusion_temp.map(rust_decimal::Decimal::from_f64_retain))
-    .bind(transfusion.post_transfusion_temp.map(rust_decimal::Decimal::from_f64_retain))
+    .bind(
+        transfusion
+            .pre_transfusion_temp
+            .map(rust_decimal::Decimal::from_f64_retain),
+    )
+    .bind(
+        transfusion
+            .post_transfusion_temp
+            .map(rust_decimal::Decimal::from_f64_retain),
+    )
     .bind(transfusion.pre_transfusion_pulse)
     .bind(transfusion.post_transfusion_pulse)
     .bind(transfusion.reaction_observed)
@@ -2461,16 +2714,27 @@ pub async fn create_blood_transfusion(
         .map_err(|e| sanitize_db_error(&e))?;
 
         record_unit_event(
-            &mut tx, transfusion.unit_id, "transfused", s.user_id,
+            &mut tx,
+            transfusion.unit_id,
+            "transfused",
+            s.user_id,
             Some(&format!("Transfused to patient {}", transfusion.patient_id)),
-            Some("transfusion"), Some(transfusion_id),
-        ).await?;
+            Some("transfusion"),
+            Some(transfusion_id),
+        )
+        .await?;
         record_movement(
-            &mut tx, transfusion.unit_id, "transfused",
-            Some("Blood Bank Storage"), Some("Patient"),
-            s.user_id, Some("Transfused"),
-            Some("transfusion"), Some(transfusion_id),
-        ).await?;
+            &mut tx,
+            transfusion.unit_id,
+            "transfused",
+            Some("Blood Bank Storage"),
+            Some("Patient"),
+            s.user_id,
+            Some("Transfused"),
+            Some("transfusion"),
+            Some(transfusion_id),
+        )
+        .await?;
     }
 
     tx.commit().await.map_err(|e| sanitize_db_error(&e))?;
@@ -2572,16 +2836,27 @@ pub async fn discard_blood_unit(
     .map_err(|e| sanitize_db_error(&e))?;
 
     record_unit_event(
-        &mut tx, discard.unit_id, "discarded", s.user_id,
+        &mut tx,
+        discard.unit_id,
+        "discarded",
+        s.user_id,
         Some(&format!("Discarded: {}", reason)),
-        Some("discard"), Some(discard_id),
-    ).await?;
+        Some("discard"),
+        Some(discard_id),
+    )
+    .await?;
     record_movement(
-        &mut tx, discard.unit_id, "discarded",
-        Some("Blood Bank Storage"), Some("Biohazard Disposal"),
-        s.user_id, Some(&format!("Discarded: {}", reason)),
-        Some("discard"), Some(discard_id),
-    ).await?;
+        &mut tx,
+        discard.unit_id,
+        "discarded",
+        Some("Blood Bank Storage"),
+        Some("Biohazard Disposal"),
+        s.user_id,
+        Some(&format!("Discarded: {}", reason)),
+        Some("discard"),
+        Some(discard_id),
+    )
+    .await?;
 
     tx.commit().await.map_err(|e| sanitize_db_error(&e))?;
 
@@ -3426,7 +3701,9 @@ mod tests {
 
     #[test]
     fn test_ev_reservation_status_invalid() {
-        assert!(validate_enum("pending", VALID_RESERVATION_STATUSES, "reservation_status").is_err());
+        assert!(
+            validate_enum("pending", VALID_RESERVATION_STATUSES, "reservation_status").is_err()
+        );
     }
 
     #[test]

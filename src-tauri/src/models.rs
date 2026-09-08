@@ -255,7 +255,9 @@ pub struct PatientEhr {
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreatePatientEhr {

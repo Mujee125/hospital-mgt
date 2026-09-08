@@ -47,8 +47,15 @@ pub async fn create_lab_test(
     .fetch_one(pool.inner())
     .await
     .map_err(|e| format!("Create lab test: {}", e))?;
-    audit::for_session(pool.inner(), &s, "lab_test_create", "lab_test_catalog",
-        Some(&row.0.to_string()), Some(serde_json::json!({"code": code}))).await;
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "lab_test_create",
+        "lab_test_catalog",
+        Some(&row.0.to_string()),
+        Some(serde_json::json!({"code": code})),
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -74,14 +81,18 @@ pub async fn get_lab_orders(
 ) -> Result<Vec<LabOrder>, String> {
     let _ = rbac::require(&session, Permission::LabView)?;
     let q = match status_filter.as_deref() {
-        Some(s) if !s.is_empty() => format!("{} WHERE lo.status = $1 ORDER BY lo.ordered_at DESC", SELECT_ORDERS),
+        Some(s) if !s.is_empty() => format!(
+            "{} WHERE lo.status = $1 ORDER BY lo.ordered_at DESC",
+            SELECT_ORDERS
+        ),
         _ => format!("{} ORDER BY lo.ordered_at DESC", SELECT_ORDERS),
     };
     let mut query = sqlx::query_as::<_, LabOrder>(&q);
     if let Some(s) = status_filter.filter(|s| !s.is_empty()) {
         query = query.bind(s);
     }
-    query.fetch_all(pool.inner())
+    query
+        .fetch_all(pool.inner())
         .await
         .map_err(|e| format!("Get lab orders: {}", e))
 }
@@ -97,7 +108,10 @@ pub async fn create_lab_order(
         return Err("At least one test must be selected.".to_string());
     }
 
-    let mut tx = pool.begin().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     let row: (i32,) = sqlx::query_as(
         r#"INSERT INTO lab_orders (patient_id, encounter_id, ordered_by_doctor_id, ordered_by_user_id, status)
@@ -113,17 +127,26 @@ pub async fn create_lab_order(
 
     for tc_id in &order.test_catalog_ids {
         sqlx::query("INSERT INTO lab_order_tests (lab_order_id, test_catalog_id) VALUES ($1,$2)")
-            .bind(row.0).bind(tc_id)
+            .bind(row.0)
+            .bind(tc_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| crate::db::sanitize_db_error(&e))?;
     }
 
-    tx.commit().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    audit::for_session(pool.inner(), &s, "lab_order_create", "lab_orders",
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "lab_order_create",
+        "lab_orders",
         Some(&row.0.to_string()),
-        Some(serde_json::json!({"patient_id": order.patient_id, "tests": order.test_catalog_ids}))).await;
+        Some(serde_json::json!({"patient_id": order.patient_id, "tests": order.test_catalog_ids})),
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -215,21 +238,24 @@ pub async fn update_lab_result_core(
     // and the alert is surfaced in-app immediately via the result row the
     // worklist polls. Audited with the flag so the escalation is traceable.
     if result.result_abnormal_flag.as_deref() == Some("critical") {
-        let order: Option<(i32,)> = sqlx::query_as(
-            "SELECT lab_order_id FROM lab_order_tests WHERE id = $1",
-        )
-        .bind(result.id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| format!("Lookup lab order: {}", e))?;
+        let order: Option<(i32,)> =
+            sqlx::query_as("SELECT lab_order_id FROM lab_order_tests WHERE id = $1")
+                .bind(result.id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| format!("Lookup lab order: {}", e))?;
         audit::for_session(
-            pool, &s, "lab_critical_value_entered", "lab_order_tests",
+            pool,
+            &s,
+            "lab_critical_value_entered",
+            "lab_order_tests",
             Some(&result.id.to_string()),
             Some(serde_json::json!({
                 "lab_order_id": order.map(|o| o.0),
                 "flag": "critical",
             })),
-        ).await;
+        )
+        .await;
 
         // Phase 9: push to the in-app notification center so every doctor
         // sees the escalation without opening the lab worklist. Broadcast
@@ -257,26 +283,35 @@ pub async fn update_lab_result_core(
                     "A CRITICAL result was entered for {} (order #{}). Contact the ordering doctor immediately.",
                     patient, order_id
                 );
-            if let Err(e) = crate::commands::notifications::emit(
-                pool,
-                crate::commands::notifications::NotificationOut {
-                    user_id: None,
-                    role_target: Some("doctor".into()),
-                    kind: "lab_critical".into(),
-                    title,
-                    body,
-                    entity_type: Some("lab_order".into()),
-                    entity_id: Some(order_id),
-                },
-            ).await {
-                eprintln!("[HMS Lab] notification emit failed (non-fatal): {}", e);
-            }
+                if let Err(e) = crate::commands::notifications::emit(
+                    pool,
+                    crate::commands::notifications::NotificationOut {
+                        user_id: None,
+                        role_target: Some("doctor".into()),
+                        kind: "lab_critical".into(),
+                        title,
+                        body,
+                        entity_type: Some("lab_order".into()),
+                        entity_id: Some(order_id),
+                    },
+                )
+                .await
+                {
+                    eprintln!("[HMS Lab] notification emit failed (non-fatal): {}", e);
+                }
             }
         }
     }
 
-    audit::for_session(pool, &s, "lab_result_update", "lab_order_tests",
-        Some(&result.id.to_string()), None).await;
+    audit::for_session(
+        pool,
+        &s,
+        "lab_result_update",
+        "lab_order_tests",
+        Some(&result.id.to_string()),
+        None,
+    )
+    .await;
     Ok(())
 }
 
@@ -323,12 +358,20 @@ pub async fn collect_lab_sample_core(
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
     let barcode: String = row
-        .ok_or_else(|| "No lab order awaiting sample collection (status must be 'ordered').".to_string())?
+        .ok_or_else(|| {
+            "No lab order awaiting sample collection (status must be 'ordered').".to_string()
+        })?
         .0;
 
-    audit::for_session(pool, &s, "lab_sample_collected", "lab_orders",
+    audit::for_session(
+        pool,
+        &s,
+        "lab_sample_collected",
+        "lab_orders",
         Some(&lab_order_id.to_string()),
-        Some(serde_json::json!({"barcode": barcode}))).await;
+        Some(serde_json::json!({"barcode": barcode})),
+    )
+    .await;
     Ok(barcode)
 }
 
@@ -347,7 +390,13 @@ pub async fn approve_lab_result(
     lab_order_test_id: i32,
     critical_acknowledged: bool,
 ) -> Result<(), String> {
-    approve_lab_result_core(pool.inner(), &session, lab_order_test_id, critical_acknowledged).await
+    approve_lab_result_core(
+        pool.inner(),
+        &session,
+        lab_order_test_id,
+        critical_acknowledged,
+    )
+    .await
 }
 
 /// Result-approval logic core (AERP Part G extraction pattern) — see
@@ -367,8 +416,7 @@ pub async fn approve_lab_result_core(
     .fetch_optional(pool)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
-    let (status, flag) = row
-        .ok_or_else(|| "Lab result row not found.".to_string())?;
+    let (status, flag) = row.ok_or_else(|| "Lab result row not found.".to_string())?;
 
     if status != "entered" && status != "amended" {
         return Err(format!("This result is not awaiting approval (status: {}). Only entered results can be approved.", status));
@@ -445,17 +493,25 @@ pub async fn approve_lab_result_core(
                     entity_type: Some("lab_order".into()),
                     entity_id: Some(order_id),
                 },
-            ).await {
+            )
+            .await
+            {
                 eprintln!("[HMS Lab] notification emit failed (non-fatal): {}", e);
             }
         }
     }
 
-    audit::for_session(pool, &s, "lab_result_approved", "lab_order_tests",
+    audit::for_session(
+        pool,
+        &s,
+        "lab_result_approved",
+        "lab_order_tests",
         Some(&lab_order_test_id.to_string()),
         Some(serde_json::json!({
             "critical": flag.as_deref() == Some("critical"),
             "acknowledged": critical_acknowledged,
-        }))).await;
+        })),
+    )
+    .await;
     Ok(())
 }

@@ -151,7 +151,10 @@ pub async fn fetch_feed(
     .await
     .map_err(|e| format!("Count unread: {}", e))?;
 
-    Ok(AppNotificationFeed { notifications, unread_count })
+    Ok(AppNotificationFeed {
+        notifications,
+        unread_count,
+    })
 }
 
 #[tauri::command]

@@ -29,11 +29,12 @@ mod common;
 
 use common::*;
 use hospital_mgmt_lib::commands::billing::{
-    apply_advance_core, cancel_bill_core, create_bill_core,
-    create_insurance_claim_core, record_advance_core, record_refund_core,
-    update_insurance_claim_status_core,
+    apply_advance_core, cancel_bill_core, create_bill_core, create_insurance_claim_core,
+    record_advance_core, record_refund_core, update_insurance_claim_status_core,
 };
-use hospital_mgmt_lib::models::{BillItemInput, CreateAdvance, CreateBill, CreateInsuranceClaim, CreateRefund, UpdateClaimStatus};
+use hospital_mgmt_lib::models::{
+    BillItemInput, CreateAdvance, CreateBill, CreateInsuranceClaim, CreateRefund, UpdateClaimStatus,
+};
 use hospital_mgmt_lib::rbac::SessionState;
 use sqlx::PgPool;
 use std::sync::{Arc, Mutex};
@@ -68,13 +69,12 @@ fn bill_for(patient_id: i32, qty: f64, price: f64, discount: f64) -> CreateBill 
 async fn pay_bill(pool: &PgPool, bill_id: i32, amount: f64) -> Result<(), String> {
     let db_err = |e: sqlx::Error| format!("db: {}", e);
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let live: Option<(i32,)> = sqlx::query_as(
-        "SELECT id FROM bills WHERE id = $1 AND status <> 'cancelled' FOR UPDATE",
-    )
-    .bind(bill_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(db_err)?;
+    let live: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM bills WHERE id = $1 AND status <> 'cancelled' FOR UPDATE")
+            .bind(bill_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
     if live.is_none() {
         return Err("This bill is cancelled — payments are closed on it.".into());
     }
@@ -141,7 +141,12 @@ async fn test_bl1_invoice_numbers_sequential_from_sequence() {
     fn tail(n: &str) -> &str {
         n.rsplit('-').next().unwrap_or("")
     }
-    assert_eq!(tail(&n1).len(), 6, "number must be zero-padded to 6: {}", n1);
+    assert_eq!(
+        tail(&n1).len(),
+        6,
+        "number must be zero-padded to 6: {}",
+        n1
+    );
     assert!(
         tail(&n2) > tail(&n1),
         "sequence must be strictly increasing: {} vs {}",
@@ -174,8 +179,14 @@ async fn test_bl2_refund_manager_only_and_overrefund_guard() {
 
     // Clerk (no BillingApprove) cannot refund.
     let err = record_refund_core(
-        &pool, &clerk,
-        CreateRefund { bill_id, amount: 10.0, reason: "clerk attempt".into(), payment_id: None },
+        &pool,
+        &clerk,
+        CreateRefund {
+            bill_id,
+            amount: 10.0,
+            reason: "clerk attempt".into(),
+            payment_id: None,
+        },
     )
     .await
     .unwrap_err();
@@ -187,8 +198,14 @@ async fn test_bl2_refund_manager_only_and_overrefund_guard() {
 
     // Missing reason rejected.
     let err = record_refund_core(
-        &pool, &admin,
-        CreateRefund { bill_id, amount: 10.0, reason: "  ".into(), payment_id: None },
+        &pool,
+        &admin,
+        CreateRefund {
+            bill_id,
+            amount: 10.0,
+            reason: "  ".into(),
+            payment_id: None,
+        },
     )
     .await
     .unwrap_err();
@@ -196,17 +213,33 @@ async fn test_bl2_refund_manager_only_and_overrefund_guard() {
 
     // Over-refund blocked (paid 100 → refund of 150 rejected).
     let err = record_refund_core(
-        &pool, &admin,
-        CreateRefund { bill_id, amount: 150.0, reason: "too much".into(), payment_id: None },
+        &pool,
+        &admin,
+        CreateRefund {
+            bill_id,
+            amount: 150.0,
+            reason: "too much".into(),
+            payment_id: None,
+        },
     )
     .await
     .unwrap_err();
-    assert!(err.contains("exceeds the amount actually paid"), "over-refund blocked, got: {}", err);
+    assert!(
+        err.contains("exceeds the amount actually paid"),
+        "over-refund blocked, got: {}",
+        err
+    );
 
     // Valid refund by admin: row appended, payment row intact, status re-rolled.
     record_refund_core(
-        &pool, &admin,
-        CreateRefund { bill_id, amount: 40.0, reason: "partial service refund".into(), payment_id: None },
+        &pool,
+        &admin,
+        CreateRefund {
+            bill_id,
+            amount: 40.0,
+            reason: "partial service refund".into(),
+            payment_id: None,
+        },
     )
     .await
     .expect("admin refund");
@@ -223,7 +256,10 @@ async fn test_bl2_refund_manager_only_and_overrefund_guard() {
     .unwrap();
     assert_eq!(payments, 1, "payment row must never be deleted");
     assert_eq!(refunds, 1, "refund appended");
-    assert_eq!(status, "partial", "40 of 100 refunded → bill back to partial");
+    assert_eq!(
+        status, "partial",
+        "40 of 100 refunded → bill back to partial"
+    );
 }
 
 // ── BL-3: Credit-note cancellation ───────────────────────────────────────────
@@ -247,30 +283,45 @@ async fn test_bl3_cancel_issues_credit_note_and_closes_payments() {
     let err = cancel_bill_core(&pool, &admin, bill_id, "  ".into())
         .await
         .unwrap_err();
-    assert!(err.contains("reason"), "cancel reason required, got: {}", err);
+    assert!(
+        err.contains("reason"),
+        "cancel reason required, got: {}",
+        err
+    );
 
     let credit_note = cancel_bill_core(&pool, &admin, bill_id, "billed in error".into())
         .await
         .expect("cancel");
-    assert!(credit_note.starts_with("CN-"), "credit note number, got: {}", credit_note);
+    assert!(
+        credit_note.starts_with("CN-"),
+        "credit note number, got: {}",
+        credit_note
+    );
 
     // Payments on the cancelled bill are closed (guarded insert).
     let err = pay_bill(&pool, bill_id, 10.0).await.unwrap_err();
-    assert!(err.contains("cancelled"), "payment on cancelled bill blocked, got: {}", err);
+    assert!(
+        err.contains("cancelled"),
+        "payment on cancelled bill blocked, got: {}",
+        err
+    );
 
     // Repeat cancellation rejected.
     let err = cancel_bill_core(&pool, &admin, bill_id, "again".into())
         .await
         .unwrap_err();
-    assert!(err.contains("already cancelled"), "double-cancel rejected, got: {}", err);
+    assert!(
+        err.contains("already cancelled"),
+        "double-cancel rejected, got: {}",
+        err
+    );
 
-    let (status, cn): (String, Option<String>) = sqlx::query_as(
-        "SELECT status, credit_note_number FROM bills WHERE id = $1",
-    )
-    .bind(bill_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (status, cn): (String, Option<String>) =
+        sqlx::query_as("SELECT status, credit_note_number FROM bills WHERE id = $1")
+            .bind(bill_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(status, "cancelled");
     assert_eq!(cn.as_deref(), Some(credit_note.as_str()));
 }
@@ -294,14 +345,24 @@ async fn test_bl4_large_discount_requires_manager_approval() {
     let patient_id = seed_patient_with_phone(&pool, "Bil", "Disc", "+92300bl4a").await;
 
     // Clerk, small discount (4%): fine.
-    create_bill_core(&pool, &clerk, bill_for(patient_id, 1.0, 1000.0, 40.0), false)
-        .await
-        .expect("clerk small discount passes");
+    create_bill_core(
+        &pool,
+        &clerk,
+        bill_for(patient_id, 1.0, 1000.0, 40.0),
+        false,
+    )
+    .await
+    .expect("clerk small discount passes");
 
     // Clerk, big discount (10%): rejected.
-    let err = create_bill_core(&pool, &clerk, bill_for(patient_id, 1.0, 1000.0, 100.0), false)
-        .await
-        .unwrap_err();
+    let err = create_bill_core(
+        &pool,
+        &clerk,
+        bill_for(patient_id, 1.0, 1000.0, 100.0),
+        false,
+    )
+    .await
+    .unwrap_err();
     assert!(
         err.contains("manager approval"),
         "clerk big discount must be rejected, got: {}",
@@ -309,15 +370,29 @@ async fn test_bl4_large_discount_requires_manager_approval() {
     );
 
     // Admin, big discount without the confirm flag: rejected (belt+braces).
-    let err = create_bill_core(&pool, &admin, bill_for(patient_id, 1.0, 1000.0, 100.0), false)
-        .await
-        .unwrap_err();
-    assert!(err.contains("not confirmed"), "confirm flag required, got: {}", err);
+    let err = create_bill_core(
+        &pool,
+        &admin,
+        bill_for(patient_id, 1.0, 1000.0, 100.0),
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("not confirmed"),
+        "confirm flag required, got: {}",
+        err
+    );
 
     // Admin + confirm: passes and the discount is stored.
-    let id = create_bill_core(&pool, &admin, bill_for(patient_id, 1.0, 1000.0, 100.0), true)
-        .await
-        .expect("admin approves big discount");
+    let id = create_bill_core(
+        &pool,
+        &admin,
+        bill_for(patient_id, 1.0, 1000.0, 100.0),
+        true,
+    )
+    .await
+    .expect("admin approves big discount");
     let (discount,): (rust_decimal::Decimal,) =
         sqlx::query_as("SELECT discount FROM bills WHERE id = $1")
             .bind(id)
@@ -343,26 +418,45 @@ async fn test_bl5_advance_apply_overdraft_and_crosspatient_guards() {
     let p2 = seed_patient_with_phone(&pool, "Bil", "Adv2", "+92300bl5b").await;
 
     let adv_id = record_advance_core(
-        &pool, &clerk,
-        CreateAdvance { patient_id: p1, amount: 500.0, method: Some("cash".into()), reference_number: None, notes: Some("IPD deposit".into()) },
+        &pool,
+        &clerk,
+        CreateAdvance {
+            patient_id: p1,
+            amount: 500.0,
+            method: Some("cash".into()),
+            reference_number: None,
+            notes: Some("IPD deposit".into()),
+        },
     )
     .await
     .expect("advance received");
 
-    let bill1 = create_bill_core(&pool, &clerk, bill_for(p1, 1.0, 800.0, 0.0), false).await.unwrap();
-    let bill2 = create_bill_core(&pool, &clerk, bill_for(p2, 1.0, 100.0, 0.0), false).await.unwrap();
+    let bill1 = create_bill_core(&pool, &clerk, bill_for(p1, 1.0, 800.0, 0.0), false)
+        .await
+        .unwrap();
+    let bill2 = create_bill_core(&pool, &clerk, bill_for(p2, 1.0, 100.0, 0.0), false)
+        .await
+        .unwrap();
 
     // Cross-patient: p1's advance on p2's bill is rejected.
     let err = apply_advance_core(&pool, &clerk, adv_id, bill2, 50.0)
         .await
         .unwrap_err();
-    assert!(err.contains("does not belong to this patient"), "cross-patient apply blocked, got: {}", err);
+    assert!(
+        err.contains("does not belong to this patient"),
+        "cross-patient apply blocked, got: {}",
+        err
+    );
 
     // Over-draft: 600 > 500 remaining.
     let err = apply_advance_core(&pool, &clerk, adv_id, bill1, 600.0)
         .await
         .unwrap_err();
-    assert!(err.contains("exceeds the advance balance"), "overdraft blocked, got: {}", err);
+    assert!(
+        err.contains("exceeds the advance balance"),
+        "overdraft blocked, got: {}",
+        err
+    );
 
     // Valid apply: payment row created, remaining decremented, status still active.
     apply_advance_core(&pool, &clerk, adv_id, bill1, 300.0)
@@ -386,13 +480,12 @@ async fn test_bl5_advance_apply_overdraft_and_crosspatient_guards() {
     apply_advance_core(&pool, &clerk, adv_id, bill1, 200.0)
         .await
         .expect("apply remaining 200");
-    let (remaining, status): (rust_decimal::Decimal, String) = sqlx::query_as(
-        "SELECT remaining, status FROM patient_advances WHERE id = $1",
-    )
-    .bind(adv_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (remaining, status): (rust_decimal::Decimal, String) =
+        sqlx::query_as("SELECT remaining, status FROM patient_advances WHERE id = $1")
+            .bind(adv_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(remaining.normalize().to_string(), "0");
     assert_eq!(status, "applied", "fully applied advance flips status");
 
@@ -400,7 +493,11 @@ async fn test_bl5_advance_apply_overdraft_and_crosspatient_guards() {
     let err = apply_advance_core(&pool, &clerk, adv_id, bill1, 10.0)
         .await
         .unwrap_err();
-    assert!(err.contains("applied — only active"), "exhausted advance blocked, got: {}", err);
+    assert!(
+        err.contains("applied — only active"),
+        "exhausted advance blocked, got: {}",
+        err
+    );
 }
 
 // ── BL-6: Insurance claims ────────────────────────────────────────────────────
@@ -424,7 +521,8 @@ async fn test_bl6_claim_state_machine_and_uniqueness() {
         .unwrap();
 
     let claim_id = create_insurance_claim_core(
-        &pool, &clerk,
+        &pool,
+        &clerk,
         CreateInsuranceClaim {
             bill_id,
             insurer: "Jubilee TPA".into(),
@@ -439,7 +537,8 @@ async fn test_bl6_claim_state_machine_and_uniqueness() {
     // UNIQUE (bill_id, insurer): same insurer again maps to the same claim row
     // (upsert), not a duplicate.
     let claim_id2 = create_insurance_claim_core(
-        &pool, &clerk,
+        &pool,
+        &clerk,
         CreateInsuranceClaim {
             bill_id,
             insurer: "Jubilee TPA".into(),
@@ -450,42 +549,83 @@ async fn test_bl6_claim_state_machine_and_uniqueness() {
     )
     .await
     .expect("upsert same insurer");
-    assert_eq!(claim_id, claim_id2, "same (bill, insurer) must reuse the claim row");
+    assert_eq!(
+        claim_id, claim_id2,
+        "same (bill, insurer) must reuse the claim row"
+    );
 
     // Illegal transition: draft → settled.
     let err = update_insurance_claim_status_core(
-        &pool, &clerk,
-        UpdateClaimStatus { id: claim_id, status: "settled".into(), approved_amount: None, notes: None },
+        &pool,
+        &clerk,
+        UpdateClaimStatus {
+            id: claim_id,
+            status: "settled".into(),
+            approved_amount: None,
+            notes: None,
+        },
     )
     .await
     .unwrap_err();
-    assert!(err.contains("Invalid claim transition"), "illegal jump rejected, got: {}", err);
+    assert!(
+        err.contains("Invalid claim transition"),
+        "illegal jump rejected, got: {}",
+        err
+    );
 
     // draft → submitted → partially_approved (amount required) → settled.
     update_insurance_claim_status_core(
-        &pool, &clerk,
-        UpdateClaimStatus { id: claim_id, status: "submitted".into(), approved_amount: None, notes: None },
+        &pool,
+        &clerk,
+        UpdateClaimStatus {
+            id: claim_id,
+            status: "submitted".into(),
+            approved_amount: None,
+            notes: None,
+        },
     )
     .await
     .expect("submit");
 
     let err = update_insurance_claim_status_core(
-        &pool, &clerk,
-        UpdateClaimStatus { id: claim_id, status: "partially_approved".into(), approved_amount: None, notes: None },
+        &pool,
+        &clerk,
+        UpdateClaimStatus {
+            id: claim_id,
+            status: "partially_approved".into(),
+            approved_amount: None,
+            notes: None,
+        },
     )
     .await
     .unwrap_err();
-    assert!(err.contains("approved amount is required"), "partial approval needs amount, got: {}", err);
+    assert!(
+        err.contains("approved amount is required"),
+        "partial approval needs amount, got: {}",
+        err
+    );
 
     update_insurance_claim_status_core(
-        &pool, &clerk,
-        UpdateClaimStatus { id: claim_id, status: "partially_approved".into(), approved_amount: Some(3500.0), notes: None },
+        &pool,
+        &clerk,
+        UpdateClaimStatus {
+            id: claim_id,
+            status: "partially_approved".into(),
+            approved_amount: Some(3500.0),
+            notes: None,
+        },
     )
     .await
     .expect("partial approval");
     update_insurance_claim_status_core(
-        &pool, &clerk,
-        UpdateClaimStatus { id: claim_id, status: "settled".into(), approved_amount: None, notes: None },
+        &pool,
+        &clerk,
+        UpdateClaimStatus {
+            id: claim_id,
+            status: "settled".into(),
+            approved_amount: None,
+            notes: None,
+        },
     )
     .await
     .expect("settle");
@@ -505,16 +645,30 @@ async fn test_bl6_claim_state_machine_and_uniqueness() {
     assert!(settled_at_is_set);
 
     // Claims on cancelled bills are rejected.
-    let cancelled_bill = create_bill_core(&pool, &clerk, bill_for(patient_id, 1.0, 300.0, 0.0), false)
+    let cancelled_bill =
+        create_bill_core(&pool, &clerk, bill_for(patient_id, 1.0, 300.0, 0.0), false)
+            .await
+            .unwrap();
+    // Cancellation needs the manager.
+    cancel_bill_core(&pool, &admin, cancelled_bill, "test".into())
         .await
         .unwrap();
-    // Cancellation needs the manager.
-    cancel_bill_core(&pool, &admin, cancelled_bill, "test".into()).await.unwrap();
     let err = create_insurance_claim_core(
-        &pool, &clerk,
-        CreateInsuranceClaim { bill_id: cancelled_bill, insurer: "State Life".into(), policy_number: None, claim_amount: 100.0, notes: None },
+        &pool,
+        &clerk,
+        CreateInsuranceClaim {
+            bill_id: cancelled_bill,
+            insurer: "State Life".into(),
+            policy_number: None,
+            claim_amount: 100.0,
+            notes: None,
+        },
     )
     .await
     .unwrap_err();
-    assert!(err.contains("cancelled"), "claim on cancelled bill rejected, got: {}", err);
+    assert!(
+        err.contains("cancelled"),
+        "claim on cancelled bill rejected, got: {}",
+        err
+    );
 }

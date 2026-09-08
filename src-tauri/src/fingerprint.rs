@@ -67,11 +67,7 @@ fn usable(value: &str) -> bool {
 /// Exposed separately so tests can exercise the degenerate-identifier
 /// matrix without owning the hardware that produces it.
 fn effective_fingerprint(cpu_id: &str, board_sn: &str, bios_sn: &str) -> Result<String, String> {
-    let components = [
-        ("cpu", cpu_id),
-        ("baseboard", board_sn),
-        ("bios", bios_sn),
-    ];
+    let components = [("cpu", cpu_id), ("baseboard", board_sn), ("bios", bios_sn)];
     let usable_count = components.iter().filter(|(_, v)| usable(v)).count();
     if usable_count < 2 {
         return Err(format!(
@@ -119,10 +115,8 @@ fn compute_windows() -> Result<String, String> {
         serial_number: Option<String>,
     }
 
-    let com = COMLibrary::new()
-        .map_err(|e| format!("WMI COM init failed: {}", e))?;
-    let wmi = WMIConnection::new(com)
-        .map_err(|e| format!("WMI connection failed: {}", e))?;
+    let com = COMLibrary::new().map_err(|e| format!("WMI COM init failed: {}", e))?;
+    let wmi = WMIConnection::new(com).map_err(|e| format!("WMI connection failed: {}", e))?;
 
     // CPU
     let cpu_results: Vec<Win32Processor> = wmi

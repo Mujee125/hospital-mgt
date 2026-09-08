@@ -14,6 +14,10 @@ pub mod auth;
 #[cfg(not(feature = "hms-integration-tests"))]
 mod auth;
 #[cfg(feature = "hms-integration-tests")]
+pub mod commands;
+#[cfg(not(feature = "hms-integration-tests"))]
+mod commands;
+#[cfg(feature = "hms-integration-tests")]
 pub mod config;
 #[cfg(not(feature = "hms-integration-tests"))]
 mod config;
@@ -22,37 +26,33 @@ pub mod db;
 #[cfg(not(feature = "hms-integration-tests"))]
 mod db;
 mod discovery;
-pub mod fingerprint;   // pub so the dev_auto_license binary can use it
+pub mod fingerprint; // pub so the dev_auto_license binary can use it
+mod license;
+mod messaging;
 #[cfg(feature = "hms-integration-tests")]
 pub mod models;
 #[cfg(not(feature = "hms-integration-tests"))]
 mod models;
+mod pairing;
+#[cfg(feature = "server-build")]
+mod pg_provision;
 #[cfg(feature = "hms-integration-tests")]
 pub mod rbac;
 #[cfg(not(feature = "hms-integration-tests"))]
 mod rbac;
+mod scheduler;
 #[cfg(feature = "hms-integration-tests")]
 pub mod secrets;
 #[cfg(not(feature = "hms-integration-tests"))]
 mod secrets;
+mod tls_provision;
 #[cfg(feature = "hms-integration-tests")]
 pub mod whatsapp;
 #[cfg(not(feature = "hms-integration-tests"))]
 mod whatsapp;
-mod license;
-mod messaging;
-mod pairing;
-mod scheduler;
-#[cfg(feature = "server-build")]
-mod pg_provision;
-mod tls_provision;
-#[cfg(feature = "hms-integration-tests")]
-pub mod commands;
-#[cfg(not(feature = "hms-integration-tests"))]
-mod commands;
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 // ── Import only NON-command items from submodules ─────────────────────────────
 //
@@ -66,12 +66,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // (e.g. pairing::redeem_pairing_code) — never imported with `use` here.
 // Non-command helpers (types, structs) are still imported normally.
 
-use config::AppConfig;          // struct — not a command
-use discovery::Role;            // enum  — not a command
-use pairing::PairingService;    // struct — not a command
+use config::AppConfig; // struct — not a command
+use discovery::Role; // enum  — not a command
+use pairing::PairingService; // struct — not a command
 
-use tauri::Manager;
 use tauri::Emitter;
+use tauri::Manager;
 
 static BROADCAST_RUNNING: AtomicBool = AtomicBool::new(false);
 // Only used by the server-side pairing listener (start_pairing_listener).
@@ -173,7 +173,10 @@ pub fn log(app_handle: &tauri::AppHandle, level: &str, msg: &str) {
             if let Ok(content) = std::fs::read(&path) {
                 let start = content.len().saturating_sub(400_000);
                 let trimmed = &content[start..];
-                let offset = trimmed.iter().position(|&b| b == b'\n').map_or(0, |p| p + 1);
+                let offset = trimmed
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(0, |p| p + 1);
                 let _ = std::fs::write(&path, &trimmed[offset..]);
             }
         }
@@ -182,7 +185,11 @@ pub fn log(app_handle: &tauri::AppHandle, level: &str, msg: &str) {
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
     let line = format!("[{}] [{}] {}\n", timestamp, level, msg);
 
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
     eprint!("{}", line);
@@ -267,13 +274,7 @@ async fn get_log(
 ///     also, the auth.rs failed-login audit row no longer records the
 ///     attempted username — see SEC-05 step 3).
 pub fn redact_log(line: &str) -> String {
-    const KEYS: &[&str] = &[
-        "password",
-        "db_password",
-        "db_user",
-        "user",
-        "username",
-    ];
+    const KEYS: &[&str] = &["password", "db_password", "db_user", "user", "username"];
     if line.is_empty() {
         return String::new();
     }
@@ -354,20 +355,24 @@ async fn initialize_database(app_handle: tauri::AppHandle) -> Result<String, Str
     #[cfg(not(any(feature = "server-build", feature = "client-build")))]
     let role = {
         log_info!(&app_handle, "Build type: dev/fallback");
-        initialize_as_server_fallback(&app_handle).await.map_err(|e| {
-            log_error!(&app_handle, "initialize_as_server_fallback failed: {}", e);
-            e
-        })?
+        initialize_as_server_fallback(&app_handle)
+            .await
+            .map_err(|e| {
+                log_error!(&app_handle, "initialize_as_server_fallback failed: {}", e);
+                e
+            })?
     };
 
     // REL-02: recover from mutex poisoning instead of panicking.
     *role_state.lock().unwrap_or_else(|e| e.into_inner()) = Some(role.clone());
 
-    app_handle.emit("init_status", "Connecting to the hospital database").ok();
+    app_handle
+        .emit("init_status", "Connecting to the hospital database")
+        .ok();
 
     let cfg = AppConfig::load(&app_handle).unwrap_or_default();
     let (host, port) = match &role {
-        Role::Server { .. }                 => (cfg.db_host.clone(), cfg.db_port),
+        Role::Server { .. } => (cfg.db_host.clone(), cfg.db_port),
         Role::Client { server_ip, db_port } => (server_ip.clone(), *db_port),
     };
 
@@ -375,20 +380,38 @@ async fn initialize_database(app_handle: tauri::AppHandle) -> Result<String, Str
     log_info!(&app_handle, "DB user              : {}", cfg.db_user);
     log_info!(&app_handle, "DB name              : {}", cfg.db_name);
     log_info!(&app_handle, "setup_complete       : {}", cfg.setup_complete);
-    log_info!(&app_handle, "password set         : {}", !cfg.db_password.is_empty());
-    log_info!(&app_handle, "pinned cert present  : {}", !cfg.pinned_server_cert_pem.is_empty());
-    log_info!(&app_handle, "pinned fingerprint   : {}", cfg.pinned_server_fingerprint);
+    log_info!(
+        &app_handle,
+        "password set         : {}",
+        !cfg.db_password.is_empty()
+    );
+    log_info!(
+        &app_handle,
+        "pinned cert present  : {}",
+        !cfg.pinned_server_cert_pem.is_empty()
+    );
+    log_info!(
+        &app_handle,
+        "pinned fingerprint   : {}",
+        cfg.pinned_server_fingerprint
+    );
 
     let sslrootcert_path = cfg.materialize_pinned_cert(&app_handle);
     match &sslrootcert_path {
         Some(p) => log_info!(&app_handle, "SSL root cert path   : {}", p.display()),
-        None    => log_info!(&app_handle, "No pinned cert — sslmode=disable (dev) / sslmode=require (prod)"),
+        None => log_info!(
+            &app_handle,
+            "No pinned cert — sslmode=disable (dev) / sslmode=require (prod)"
+        ),
     }
 
     log_info!(&app_handle, "Calling db::initialize...");
     let pool = db::initialize(
-        &host, port,
-        &cfg.db_user, &cfg.db_password, &cfg.db_name,
+        &host,
+        port,
+        &cfg.db_user,
+        &cfg.db_password,
+        &cfg.db_name,
         sslrootcert_path.as_deref(),
     )
     .await
@@ -398,19 +421,42 @@ async fn initialize_database(app_handle: tauri::AppHandle) -> Result<String, Str
         if !hint.is_empty() {
             log_error!(&app_handle, "Diagnosis            : {}", hint);
         }
-        if hint.is_empty() { e } else { format!("{}\n\nHint: {}", e, hint) }
+        if hint.is_empty() {
+            e
+        } else {
+            format!("{}\n\nHint: {}", e, hint)
+        }
     })?;
 
     log_info!(&app_handle, "db::initialize OK — pool acquired");
 
     let pool = Arc::new(pool);
-    app_handle.manage(pool.as_ref().clone());
+    // QA-2026-09-08 H4: initialize_database can run again (re-pair, retry,
+    // StrictMode double-effect) — `manage` silently REPLACES the previous
+    // pool without closing it, leaking its connections until idle_timeout
+    // (added in db.rs) eventually reaps them. Close the old pool explicitly:
+    // graceful pool.close() drains active queries first, so in-flight work
+    // finishes instead of getting yanked.
+    {
+        let existing = app_handle.try_state::<sqlx::PgPool>();
+        app_handle.manage(pool.as_ref().clone());
+        if let Some(old) = existing {
+            if !old.is_closed() {
+                log_info!(&app_handle, "Closing superseded DB pool (re-initialize)");
+                let _ = old.close().await;
+            }
+        }
+    }
 
-    app_handle.emit("init_status", "Verifying tables are up to date").ok();
+    app_handle
+        .emit("init_status", "Verifying tables are up to date")
+        .ok();
     log_info!(&app_handle, "Migrations applied successfully");
 
     if matches!(role, Role::Server { .. }) {
-        app_handle.emit("init_status", "Starting notification scheduler").ok();
+        app_handle
+            .emit("init_status", "Starting notification scheduler")
+            .ok();
         log_info!(&app_handle, "Starting background scheduler");
         // REL-03: pass the scheduler running flag from `ShutdownFlags` so
         // the RunEvent::ExitRequested handler can flip it to false on app
@@ -431,8 +477,8 @@ async fn initialize_database(app_handle: tauri::AppHandle) -> Result<String, Str
     app_handle.emit("init_status", "Ready!").ok();
 
     let result = match &role {
-        Role::Server { local_ip }       => format!("server:{}", local_ip),
-        Role::Client { server_ip, .. }  => format!("client:{}", server_ip),
+        Role::Server { local_ip } => format!("server:{}", local_ip),
+        Role::Client { server_ip, .. } => format!("client:{}", server_ip),
     };
     log_info!(&app_handle, "initialize_database complete → {}", result);
     Ok(result)
@@ -444,20 +490,27 @@ pub fn diagnose_db_error(err: &str) -> String {
     let e = err.to_lowercase();
     if e.contains("certificate fingerprint mismatch") || e.contains("fingerprint") {
         return "The server TLS certificate changed since pairing. \
-                Go to Setup → Re-pair with the server.".to_string();
+                Go to Setup → Re-pair with the server."
+            .to_string();
     }
     if e.contains("server does not support tls") || e.contains("does not support ssl") {
         return "The server PostgreSQL is not SSL-enabled yet. \
-                Restart HMS Server on the reception PC, then try again.".to_string();
+                Restart HMS Server on the reception PC, then try again."
+            .to_string();
     }
     if e.contains("sslrootcert") || e.contains("certificate verify") || e.contains("verify-ca") {
         return "SSL certificate verification failed. \
-                The pinned cert file may be missing. Re-pair from Setup.".to_string();
+                The pinned cert file may be missing. Re-pair from Setup."
+            .to_string();
     }
     if e.contains("password authentication failed") || e.contains("authentication failed") {
         return "Wrong database password. Re-pair from Setup to refresh credentials.".to_string();
     }
-    if e.contains("connection refused") || e.contains("timed out") || e.contains("no route") || e.contains("pool timed out") {
+    if e.contains("connection refused")
+        || e.contains("timed out")
+        || e.contains("no route")
+        || e.contains("pool timed out")
+    {
         // Dev mode: PostgreSQL isn't running locally. Give a dev-specific hint.
         #[cfg(not(any(feature = "server-build", feature = "client-build")))]
         {
@@ -474,7 +527,8 @@ pub fn diagnose_db_error(err: &str) -> String {
         {
             return "Cannot reach the PostgreSQL port. Check: (1) reception PC is on and \
                     HMS Server is running, (2) Windows Firewall allows port 5432, \
-                    (3) both PCs are on the same network.".to_string();
+                    (3) both PCs are on the same network."
+                .to_string();
         }
     }
     if e.contains("database") && e.contains("does not exist") {
@@ -490,32 +544,39 @@ pub fn diagnose_db_error(err: &str) -> String {
 
 #[cfg(feature = "server-build")]
 async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, String> {
-    app_handle.emit("init_status", "Checking PostgreSQL service...").ok();
+    app_handle
+        .emit("init_status", "Checking PostgreSQL service...")
+        .ok();
     log_info!(app_handle, "--- initialize_as_server ---");
 
     let cfg = match AppConfig::load(app_handle) {
         Some(c) => {
-            log_info!(app_handle, "Config loaded — setup_complete={}, password_set={}",
-                c.setup_complete, !c.db_password.is_empty());
+            log_info!(
+                app_handle,
+                "Config loaded — setup_complete={}, password_set={}",
+                c.setup_complete,
+                !c.db_password.is_empty()
+            );
             c
         }
         None => {
-            log_error!(app_handle, "config.json missing — writing default, redirecting to repair");
-            let _ = AppConfig::default().save(app_handle);
-            return Err(
-                "HMS configuration file is missing. \
-                 Please use the Setup screen to enter your PostgreSQL password, \
-                 or reinstall the HMS Server application.".to_string(),
+            log_error!(
+                app_handle,
+                "config.json missing — writing default, redirecting to repair"
             );
+            let _ = AppConfig::default().save(app_handle);
+            return Err("HMS configuration file is missing. \
+                 Please use the Setup screen to enter your PostgreSQL password, \
+                 or reinstall the HMS Server application."
+                .to_string());
         }
     };
 
     if !cfg.setup_complete || cfg.db_password.is_empty() {
         log_error!(app_handle, "Setup not complete or password empty");
-        return Err(
-            "HMS Server setup is not complete. \
-             Please use the Setup screen to finish configuration.".to_string(),
-        );
+        return Err("HMS Server setup is not complete. \
+             Please use the Setup screen to finish configuration."
+            .to_string());
     }
 
     let port = cfg.db_port;
@@ -529,24 +590,28 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
     .await
     .map_err(|e| format!("Health check task panicked: {}", e))??;
 
-    log_info!(app_handle, "Health: service_running={}, accepting={}",
-        health.service_running, health.accepting_connections);
+    log_info!(
+        app_handle,
+        "Health: service_running={}, accepting={}",
+        health.service_running,
+        health.accepting_connections
+    );
 
     if !health.service_running {
-        return Err(
-            "The HMS PostgreSQL service is not running. \
+        return Err("The HMS PostgreSQL service is not running. \
              Please restart your PC. If the problem persists, \
-             reinstall the HMS Server application.".to_string(),
-        );
+             reinstall the HMS Server application."
+            .to_string());
     }
     if !health.accepting_connections {
-        return Err(
-            "PostgreSQL is starting up but not ready yet. \
-             Please wait 30 seconds and try again.".to_string(),
-        );
+        return Err("PostgreSQL is starting up but not ready yet. \
+             Please wait 30 seconds and try again."
+            .to_string());
     }
 
-    app_handle.emit("init_status", "PostgreSQL is running.").ok();
+    app_handle
+        .emit("init_status", "PostgreSQL is running.")
+        .ok();
 
     let local_ip = discovery::local_lan_ip();
     log_info!(app_handle, "Local LAN IP: {}", local_ip);
@@ -584,7 +649,11 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
             .await
             .map_err(|e| format!("TLS setup task panicked: {}", e))??;
 
-            log_info!(app_handle, "TLS fingerprint: {}", tls_material.fingerprint_hex);
+            log_info!(
+                app_handle,
+                "TLS fingerprint: {}",
+                tls_material.fingerprint_hex
+            );
 
             // SEC-08: stash the fingerprint so we can return it from this
             // async block and pass it to `start_broadcast` for HMAC-signing
@@ -592,61 +661,89 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
             // moved into `start_pairing_listener` below.
             let fingerprint_for_broadcast = tls_material.fingerprint_hex.clone();
 
-            app_handle.emit("init_status", "Configuring encrypted connections...").ok();
+            app_handle
+                .emit("init_status", "Configuring encrypted connections...")
+                .ok();
 
             let pgdata_dir = hms_dir.join("pgdata");
-            let cert_path  = hms_dir.join("tls").join("server.crt");
-            let key_path   = hms_dir.join("tls").join("server.key");
+            let cert_path = hms_dir.join("tls").join("server.crt");
+            let key_path = hms_dir.join("tls").join("server.key");
 
-            log_info!(app_handle, "pgdata: {} | cert exists: {} | key exists: {}",
-                pgdata_dir.display(), cert_path.exists(), key_path.exists());
+            log_info!(
+                app_handle,
+                "pgdata: {} | cert exists: {} | key exists: {}",
+                pgdata_dir.display(),
+                cert_path.exists(),
+                key_path.exists()
+            );
 
             let pgdata_c = pgdata_dir.clone();
             let marker_exists = tauri::async_runtime::spawn_blocking(move || {
                 pg_provision::ssl_marker_exists(&pgdata_c)
-            }).await.unwrap_or(false);
+            })
+            .await
+            .unwrap_or(false);
 
             let pgdata_c = pgdata_dir.clone();
             let ssl_in_conf = tauri::async_runtime::spawn_blocking(move || {
                 pg_provision::ssl_is_configured_in_conf(&pgdata_c)
-            }).await.unwrap_or(false);
+            })
+            .await
+            .unwrap_or(false);
 
             let pgdata_c = pgdata_dir.clone();
             let hba_ssl = tauri::async_runtime::spawn_blocking(move || {
                 pg_provision::hba_requires_ssl(&pgdata_c)
-            }).await.unwrap_or(false);
+            })
+            .await
+            .unwrap_or(false);
 
-            log_info!(app_handle, "SSL state: marker={} ssl_conf={} hba={}",
-                marker_exists, ssl_in_conf, hba_ssl);
+            log_info!(
+                app_handle,
+                "SSL state: marker={} ssl_conf={} hba={}",
+                marker_exists,
+                ssl_in_conf,
+                hba_ssl
+            );
 
             let needs_repair = marker_exists && (!ssl_in_conf || !hba_ssl);
-            let needs_setup  = !marker_exists;
+            let needs_setup = !marker_exists;
 
             if needs_repair {
                 log_warn!(app_handle, "SSL broken — repairing");
-                app_handle.emit("init_status", "Repairing SSL configuration...").ok();
+                app_handle
+                    .emit("init_status", "Repairing SSL configuration...")
+                    .ok();
                 let (pd, cp, kp) = (pgdata_dir.clone(), cert_path.clone(), key_path.clone());
                 // SEC-15: pass the configured app DB user so the LAN-side
                 // pg_hba rules can be restricted to that user only.
                 let app_db_user = cfg.db_user.clone();
                 tauri::async_runtime::spawn_blocking(move || {
                     pg_provision::repair_ssl_config(&pd, &cp, &kp, &app_db_user)
-                }).await.map_err(|e| format!("SSL repair panicked: {}", e))??;
+                })
+                .await
+                .map_err(|e| format!("SSL repair panicked: {}", e))??;
 
                 log_info!(app_handle, "SSL repair done — re-checking health");
                 let port_r = cfg.db_port;
                 let health_r = tauri::async_runtime::spawn_blocking(move || {
-                    let bin_dir = pg_provision::default_pg_bin_dir()
-                        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData\HMS\pgsql\bin"));
+                    let bin_dir = pg_provision::default_pg_bin_dir().unwrap_or_else(|| {
+                        std::path::PathBuf::from(r"C:\ProgramData\HMS\pgsql\bin")
+                    });
                     pg_provision::check_postgres_health(&bin_dir, port_r)
-                }).await.map_err(|e| format!("Post-repair health check panicked: {}", e))??;
+                })
+                .await
+                .map_err(|e| format!("Post-repair health check panicked: {}", e))??;
 
-                log_info!(app_handle, "Post-repair accepting: {}", health_r.accepting_connections);
+                log_info!(
+                    app_handle,
+                    "Post-repair accepting: {}",
+                    health_r.accepting_connections
+                );
                 if !health_r.accepting_connections {
-                    return Err(
-                        "PostgreSQL did not recover after SSL repair. \
-                         Please restart this PC and try again.".to_string(),
-                    );
+                    return Err("PostgreSQL did not recover after SSL repair. \
+                         Please restart this PC and try again."
+                        .to_string());
                 }
             } else if needs_setup {
                 log_info!(app_handle, "First-time SSL setup");
@@ -656,52 +753,65 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
                 let app_db_user = cfg.db_user.clone();
                 let ssl_just_enabled = tauri::async_runtime::spawn_blocking(move || {
                     pg_provision::ensure_postgres_ssl_enabled(&pd, &cp, &kp, &app_db_user)
-                }).await.map_err(|e| format!("SSL setup panicked: {}", e))??;
+                })
+                .await
+                .map_err(|e| format!("SSL setup panicked: {}", e))??;
 
                 log_info!(app_handle, "SSL just enabled: {}", ssl_just_enabled);
 
                 if ssl_just_enabled {
-                    app_handle.emit("init_status", "Waiting for PostgreSQL to restart with SSL...").ok();
+                    app_handle
+                        .emit(
+                            "init_status",
+                            "Waiting for PostgreSQL to restart with SSL...",
+                        )
+                        .ok();
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
                     let port_s = cfg.db_port;
                     let health_s = tauri::async_runtime::spawn_blocking(move || {
-                        let bin_dir = pg_provision::default_pg_bin_dir()
-                            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData\HMS\pgsql\bin"));
+                        let bin_dir = pg_provision::default_pg_bin_dir().unwrap_or_else(|| {
+                            std::path::PathBuf::from(r"C:\ProgramData\HMS\pgsql\bin")
+                        });
                         pg_provision::check_postgres_health(&bin_dir, port_s)
-                    }).await.map_err(|e| format!("Post-SSL health check panicked: {}", e))??;
+                    })
+                    .await
+                    .map_err(|e| format!("Post-SSL health check panicked: {}", e))??;
 
-                    log_info!(app_handle, "Post-SSL accepting: {}", health_s.accepting_connections);
+                    log_info!(
+                        app_handle,
+                        "Post-SSL accepting: {}",
+                        health_s.accepting_connections
+                    );
                     if !health_s.accepting_connections {
-                        return Err(
-                            "PostgreSQL did not come back after enabling SSL. \
-                             Please restart this PC and try again.".to_string(),
-                        );
+                        return Err("PostgreSQL did not come back after enabling SSL. \
+                             Please restart this PC and try again."
+                            .to_string());
                     }
                 }
             } else {
                 log_info!(app_handle, "SSL already fully configured — nothing to do");
             }
 
-            log_info!(app_handle, "Starting TLS pairing listener on port {}", pairing::PAIRING_PORT);
+            log_info!(
+                app_handle,
+                "Starting TLS pairing listener on port {}",
+                pairing::PAIRING_PORT
+            );
             let pairing_service = app_handle.state::<PairingService>().inner().clone();
             // REL-03: pass the pairing running flag from `ShutdownFlags` so
             // the RunEvent::ExitRequested handler can flip it to false on
             // app shutdown. The listener's accept loop is wrapped in a
             // 1-second tokio::time::timeout so the flag is observed within
             // ~1 s.
-            let pairing_flag = app_handle
-                .state::<ShutdownFlags>()
-                .inner()
-                .pairing
-                .clone();
+            let pairing_flag = app_handle.state::<ShutdownFlags>().inner().pairing.clone();
             pairing::start_pairing_listener(
                 pairing_service,
                 pairing::PairingCreds {
-                    db_user:     cfg.db_user.clone(),
+                    db_user: cfg.db_user.clone(),
                     db_password: cfg.db_password.clone(),
-                    db_name:     cfg.db_name.clone(),
-                    db_port:     cfg.db_port,
+                    db_name: cfg.db_name.clone(),
+                    db_port: cfg.db_port,
                 },
                 tls_material,
                 pairing_flag,
@@ -752,7 +862,11 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
         // broadcast payload can be HMAC-signed. Paired clients verify the
         // HMAC against their pinned fingerprint before accepting the
         // broadcast, defeating spoofed-broadcast redirection attacks.
-        log_info!(app_handle, "Starting LAN broadcast on port {}", discovery::DISCOVERY_PORT);
+        log_info!(
+            app_handle,
+            "Starting LAN broadcast on port {}",
+            discovery::DISCOVERY_PORT
+        );
         let broadcast_flag = app_handle
             .state::<ShutdownFlags>()
             .inner()
@@ -768,7 +882,11 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
         log_info!(app_handle, "LAN broadcast already running — skipping");
     }
 
-    log_info!(app_handle, "initialize_as_server complete — local_ip={}", local_ip);
+    log_info!(
+        app_handle,
+        "initialize_as_server complete — local_ip={}",
+        local_ip
+    );
     Ok(Role::Server { local_ip })
 }
 
@@ -780,39 +898,77 @@ async fn initialize_as_client(app_handle: &tauri::AppHandle) -> Result<Role, Str
 
     let mut cfg = AppConfig::load(app_handle).unwrap_or_default();
 
-    log_info!(app_handle, "Config: host={} port={} user={} db={} setup_complete={}",
-        cfg.db_host, cfg.db_port, cfg.db_user, cfg.db_name, cfg.setup_complete);
-    log_info!(app_handle, "password set: {} | pinned cert: {} | fingerprint: '{}'",
-        !cfg.db_password.is_empty(), !cfg.pinned_server_cert_pem.is_empty(),
-        cfg.pinned_server_fingerprint);
+    log_info!(
+        app_handle,
+        "Config: host={} port={} user={} db={} setup_complete={}",
+        cfg.db_host,
+        cfg.db_port,
+        cfg.db_user,
+        cfg.db_name,
+        cfg.setup_complete
+    );
+    log_info!(
+        app_handle,
+        "password set: {} | pinned cert: {} | fingerprint: '{}'",
+        !cfg.db_password.is_empty(),
+        !cfg.pinned_server_cert_pem.is_empty(),
+        cfg.pinned_server_fingerprint
+    );
 
     if cfg.db_host.is_empty() || !cfg.setup_complete {
-        log_error!(app_handle, "Client not paired (host empty or setup_complete=false)");
-        return Err(
-            "This PC has not been paired with the hospital server yet. \
-             Please complete first-time setup.".to_string(),
+        log_error!(
+            app_handle,
+            "Client not paired (host empty or setup_complete=false)"
         );
+        return Err("This PC has not been paired with the hospital server yet. \
+             Please complete first-time setup."
+            .to_string());
     }
 
     let saved_host = cfg.db_host.clone();
     let saved_port = cfg.db_port;
-    log_info!(app_handle, "Probing {}:{} (TCP 2500ms)...", saved_host, saved_port);
-    app_handle.emit("init_status", format!("Connecting to {}...", saved_host)).ok();
+    log_info!(
+        app_handle,
+        "Probing {}:{} (TCP 2500ms)...",
+        saved_host,
+        saved_port
+    );
+    app_handle
+        .emit("init_status", format!("Connecting to {}...", saved_host))
+        .ok();
 
     let reachable = tauri::async_runtime::spawn_blocking({
         let host = saved_host.clone();
         move || discovery::is_reachable(&host, saved_port, 2500)
-    }).await.unwrap_or(false);
+    })
+    .await
+    .unwrap_or(false);
 
     log_info!(app_handle, "TCP probe: reachable={}", reachable);
 
     if reachable {
-        log_info!(app_handle, "Fast path: {}:{} reachable", saved_host, saved_port);
-        return Ok(Role::Client { server_ip: cfg.db_host.clone(), db_port: cfg.db_port });
+        log_info!(
+            app_handle,
+            "Fast path: {}:{} reachable",
+            saved_host,
+            saved_port
+        );
+        return Ok(Role::Client {
+            server_ip: cfg.db_host.clone(),
+            db_port: cfg.db_port,
+        });
     }
 
-    log_warn!(app_handle, "Saved address unreachable — trying LAN broadcast discovery");
-    app_handle.emit("init_status", "Server unreachable at saved address — searching LAN...").ok();
+    log_warn!(
+        app_handle,
+        "Saved address unreachable — trying LAN broadcast discovery"
+    );
+    app_handle
+        .emit(
+            "init_status",
+            "Server unreachable at saved address — searching LAN...",
+        )
+        .ok();
 
     // SEC-08: if the client has a pinned TLS fingerprint (post-pairing),
     // pass it to `detect_server_with_fp` so only HMAC-verified broadcasts
@@ -822,20 +978,22 @@ async fn initialize_as_client(app_handle: &tauri::AppHandle) -> Result<Role, Str
     } else {
         Some(cfg.pinned_server_fingerprint.clone())
     };
-    let found = tauri::async_runtime::spawn_blocking(move || {
-        discovery::detect_server_with_fp(pinned_fp)
-    })
-    .await
-    .unwrap_or(None);
+    let found =
+        tauri::async_runtime::spawn_blocking(move || discovery::detect_server_with_fp(pinned_fp))
+            .await
+            .unwrap_or(None);
 
     match found {
         Some((server_ip, db_port)) => {
             log_info!(app_handle, "LAN discovery found: {}:{}", server_ip, db_port);
             if server_ip != saved_host {
-                log_warn!(app_handle,
+                log_warn!(
+                    app_handle,
                     "Server IP changed {} → {} — updating config. \
                      If DB fails with fingerprint error, re-pair.",
-                    saved_host, server_ip);
+                    saved_host,
+                    server_ip
+                );
             }
             cfg.db_host = server_ip.clone();
             cfg.db_port = db_port;
@@ -861,7 +1019,9 @@ async fn initialize_as_client(app_handle: &tauri::AppHandle) -> Result<Role, Str
 #[cfg(not(any(feature = "server-build", feature = "client-build")))]
 async fn initialize_as_server_fallback(app_handle: &tauri::AppHandle) -> Result<Role, String> {
     log_warn!(app_handle, "--- dev/fallback mode (no feature flag) ---");
-    app_handle.emit("init_status", "Dev mode: starting PostgreSQL...").ok();
+    app_handle
+        .emit("init_status", "Dev mode: starting PostgreSQL...")
+        .ok();
     let cfg = AppConfig::load(app_handle).unwrap_or_default();
     let local_ip = discovery::local_lan_ip();
     log_info!(app_handle, "Dev local IP: {}", local_ip);
@@ -904,7 +1064,10 @@ async fn initialize_as_server_fallback(app_handle: &tauri::AppHandle) -> Result<
                 .unwrap_or(false);
 
             if !running {
-                log_warn!(app_handle, "HMS-PostgreSQL service exists but stopped — starting...");
+                log_warn!(
+                    app_handle,
+                    "HMS-PostgreSQL service exists but stopped — starting..."
+                );
                 let _ = std::process::Command::new("sc")
                     .args(["start", "HMS-PostgreSQL"])
                     .stdout(std::process::Stdio::null())
@@ -956,7 +1119,9 @@ async fn initialize_as_server_fallback(app_handle: &tauri::AppHandle) -> Result<
                 hms_dir.join("pgsql").join("bin"),
                 // Dev workspace: src-tauri/resources/pgsql/bin relative to CARGO_MANIFEST_DIR
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("resources").join("pgsql").join("bin"),
+                    .join("resources")
+                    .join("pgsql")
+                    .join("bin"),
             ];
 
             let pg_bin = bin_candidates
@@ -965,11 +1130,19 @@ async fn initialize_as_server_fallback(app_handle: &tauri::AppHandle) -> Result<
                 .map(|d| d.join("postgres.exe"));
 
             if let Some(ref postgres_exe) = pg_bin {
-                log_info!(app_handle, "Found PostgreSQL binary: {}", postgres_exe.display());
+                log_info!(
+                    app_handle,
+                    "Found PostgreSQL binary: {}",
+                    postgres_exe.display()
+                );
 
                 if pgdata_dir.exists() {
-                    log_info!(app_handle, "Starting PostgreSQL from: {} with data dir: {}",
-                        postgres_exe.display(), pgdata_dir.display());
+                    log_info!(
+                        app_handle,
+                        "Starting PostgreSQL from: {} with data dir: {}",
+                        postgres_exe.display(),
+                        pgdata_dir.display()
+                    );
 
                     // Start postgres.exe in the background (detached)
                     let port_str = cfg.db_port.to_string();
@@ -983,21 +1156,34 @@ async fn initialize_as_server_fallback(app_handle: &tauri::AppHandle) -> Result<
 
                     match child {
                         Ok(c) => {
-                            log_info!(app_handle, "PostgreSQL started (PID: {}) — waiting for connections...", c.id());
-                            app_handle.emit("init_status", "Waiting for PostgreSQL to start...").ok();
+                            log_info!(
+                                app_handle,
+                                "PostgreSQL started (PID: {}) — waiting for connections...",
+                                c.id()
+                            );
+                            app_handle
+                                .emit("init_status", "Waiting for PostgreSQL to start...")
+                                .ok();
                             // Wait up to 15 seconds for PostgreSQL to accept connections
                             for i in 1..=30 {
                                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                 // Try a TCP connection to check if the port is open
-                                let reachable = tokio::net::TcpStream::connect(
-                                    format!("127.0.0.1:{}", cfg.db_port)
-                                ).await.is_ok();
+                                let reachable = tokio::net::TcpStream::connect(format!(
+                                    "127.0.0.1:{}",
+                                    cfg.db_port
+                                ))
+                                .await
+                                .is_ok();
                                 if reachable {
                                     log_info!(app_handle, "PostgreSQL is now accepting connections (after {} retries)", i);
                                     break;
                                 }
                                 if i % 4 == 0 {
-                                    log_info!(app_handle, "Still waiting for PostgreSQL... ({}s)", i as u64 / 2);
+                                    log_info!(
+                                        app_handle,
+                                        "Still waiting for PostgreSQL... ({}s)",
+                                        i as u64 / 2
+                                    );
                                 }
                             }
                         }
@@ -1011,12 +1197,19 @@ async fn initialize_as_server_fallback(app_handle: &tauri::AppHandle) -> Result<
                         pgdata_dir.display());
                 }
             } else {
-                log_warn!(app_handle, "PostgreSQL binary (postgres.exe) not found. \
+                log_warn!(
+                    app_handle,
+                    "PostgreSQL binary (postgres.exe) not found. \
                          Looked in: {} and {}",
-                    bin_candidates[0].display(), bin_candidates[1].display());
-                log_warn!(app_handle, "To fix: either (1) install the HMS Server build, or \
+                    bin_candidates[0].display(),
+                    bin_candidates[1].display()
+                );
+                log_warn!(
+                    app_handle,
+                    "To fix: either (1) install the HMS Server build, or \
                          (2) install standalone PostgreSQL on port 5432, or \
-                         (3) download PostgreSQL binaries to src-tauri/resources/pgsql/");
+                         (3) download PostgreSQL binaries to src-tauri/resources/pgsql/"
+                );
             }
         }
     }
@@ -1027,12 +1220,7 @@ async fn initialize_as_server_fallback(app_handle: &tauri::AppHandle) -> Result<
             .inner()
             .broadcast
             .clone();
-        discovery::start_broadcast(
-            local_ip.clone(),
-            cfg.db_port,
-            String::new(),
-            broadcast_flag,
-        );
+        discovery::start_broadcast(local_ip.clone(), cfg.db_port, String::new(), broadcast_flag);
     }
     Ok(Role::Server { local_ip })
 }
@@ -1047,20 +1235,47 @@ async fn check_db_connection(
     user: String,
     password: String,
 ) -> Result<String, String> {
-    log_info!(&app_handle, "check_db_connection → {}:{} user={}", host, port, user);
-    // In dev mode use sslmode=prefer; in production use sslmode=require.
-    #[cfg(not(any(feature = "server-build", feature = "client-build")))]
-    let sslmode = "prefer";
-    #[cfg(any(feature = "server-build", feature = "client-build"))]
-    let sslmode = "require";
-    let url = format!(
-        "postgresql://{}:{}@{}:{}/postgres?sslmode={}",
-        user, password, host, port, sslmode
+    log_info!(
+        &app_handle,
+        "check_db_connection → {}:{} user={}",
+        host,
+        port,
+        user
     );
+
+    // QA-2026-09-08 M9 (3.2-1 / 3.2-11): the previous format!()-built URL
+    // interpolated the password verbatim — a password containing @ : / ? #
+    // misparsed the URL (failing auth or pointing at a different host) and
+    // could inject query params (e.g. "?sslmode=disable"). PgConnectOptions
+    // takes each component as a typed field, so no metacharacter in the
+    // password can escape its slot. Host must be an IP or DNS name.
+    let host_trim = host.trim();
+    if host_trim.is_empty() || host_trim.contains('@') || host_trim.contains('/') {
+        return Err("Invalid host. Enter the server's IP address (e.g. 192.168.1.10).".to_string());
+    }
+    if user.trim().is_empty() {
+        return Err("Database user cannot be empty.".to_string());
+    }
+
+    // In dev mode use sslmode=prefer; in production use sslmode=require.
+    // With PgConnectOptions, ssl_mode is a field — there is no URL string
+    // for a password to escape from or inject into.
+    #[cfg(not(any(feature = "server-build", feature = "client-build")))]
+    let ssl_mode = sqlx::postgres::PgSslMode::Prefer;
+    #[cfg(any(feature = "server-build", feature = "client-build"))]
+    let ssl_mode = sqlx::postgres::PgSslMode::Require;
+
+    let options = sqlx::postgres::PgConnectOptions::new()
+        .host(host_trim)
+        .port(port)
+        .username(&user)
+        .password(&password)
+        .database("postgres")
+        .ssl_mode(ssl_mode);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect(&url)
+        .connect_with(options)
         .await
         .map_err(|e| {
             let msg = format!("Connection failed: {}", e);
@@ -1088,7 +1303,10 @@ async fn complete_pairing_and_connect(
     app_handle: tauri::AppHandle,
     session_state: tauri::State<'_, std::sync::Arc<std::sync::Mutex<Option<crate::rbac::Session>>>>,
 ) -> Result<String, String> {
-    log_info!(&app_handle, "complete_pairing_and_connect called (Save & continue)");
+    log_info!(
+        &app_handle,
+        "complete_pairing_and_connect called (Save & continue)"
+    );
 
     pairing::verify_pairing(app_handle.clone(), session_state)
         .await
@@ -1097,7 +1315,10 @@ async fn complete_pairing_and_connect(
             e
         })?;
 
-    log_info!(&app_handle, "verify_pairing OK — calling initialize_database");
+    log_info!(
+        &app_handle,
+        "verify_pairing OK — calling initialize_database"
+    );
     initialize_database(app_handle).await
 }
 

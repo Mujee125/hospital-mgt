@@ -41,7 +41,15 @@ pub async fn create_ward(
     .fetch_one(pool.inner())
     .await
     .map_err(|e| format!("Create ward: {}", e))?;
-    audit::for_session(pool.inner(), &s, "ward_create", "wards", Some(&row.0.to_string()), None).await;
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "ward_create",
+        "wards",
+        Some(&row.0.to_string()),
+        None,
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -55,10 +63,17 @@ pub async fn get_beds(
 ) -> Result<Vec<Bed>, String> {
     let _ = rbac::require(&session, Permission::IpdView)?;
     match ward_id {
-        Some(w) => sqlx::query_as("SELECT * FROM beds WHERE ward_id = $1 ORDER BY bed_number")
-            .bind(w).fetch_all(pool.inner()).await,
-        None => sqlx::query_as("SELECT * FROM beds ORDER BY ward_id, bed_number")
-            .fetch_all(pool.inner()).await,
+        Some(w) => {
+            sqlx::query_as("SELECT * FROM beds WHERE ward_id = $1 ORDER BY bed_number")
+                .bind(w)
+                .fetch_all(pool.inner())
+                .await
+        }
+        None => {
+            sqlx::query_as("SELECT * FROM beds ORDER BY ward_id, bed_number")
+                .fetch_all(pool.inner())
+                .await
+        }
     }
     .map_err(|e| format!("Get beds: {}", e))
 }
@@ -82,7 +97,15 @@ pub async fn create_bed(
     .fetch_one(pool.inner())
     .await
     .map_err(|e| format!("Create bed: {}", e))?;
-    audit::for_session(pool.inner(), &s, "bed_create", "beds", Some(&row.0.to_string()), None).await;
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "bed_create",
+        "beds",
+        Some(&row.0.to_string()),
+        None,
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -111,14 +134,18 @@ pub async fn get_admissions(
 ) -> Result<Vec<IpdAdmission>, String> {
     let _ = rbac::require(&session, Permission::IpdView)?;
     let q = match status_filter.as_deref() {
-        Some(s) if !s.is_empty() => format!("{} WHERE a.status = $1 ORDER BY a.admission_date DESC", SELECT_ADMISSIONS),
+        Some(s) if !s.is_empty() => format!(
+            "{} WHERE a.status = $1 ORDER BY a.admission_date DESC",
+            SELECT_ADMISSIONS
+        ),
         _ => format!("{} ORDER BY a.admission_date DESC", SELECT_ADMISSIONS),
     };
     let mut query = sqlx::query_as::<_, IpdAdmission>(&q);
     if let Some(s) = status_filter.filter(|s| !s.is_empty()) {
         query = query.bind(s);
     }
-    query.fetch_all(pool.inner())
+    query
+        .fetch_all(pool.inner())
         .await
         .map_err(|e| format!("Get admissions: {}", e))
 }
@@ -187,9 +214,15 @@ pub async fn admit_patient(
 
     tx.commit().await.map_err(|e| format!("Commit: {}", e))?;
 
-    audit::for_session(pool.inner(), &s, "ipd_admit", "ipd_admissions",
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "ipd_admit",
+        "ipd_admissions",
         Some(&row.0.to_string()),
-        Some(serde_json::json!({"patient_id": admission.patient_id, "bed_id": admission.bed_id}))).await;
+        Some(serde_json::json!({"patient_id": admission.patient_id, "bed_id": admission.bed_id})),
+    )
+    .await;
     Ok(row.0)
 }
 
@@ -213,8 +246,8 @@ pub async fn discharge_patient(
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    let (patient_id, bed_id) = row
-        .ok_or_else(|| "Admission not found or already discharged.".to_string())?;
+    let (patient_id, bed_id) =
+        row.ok_or_else(|| "Admission not found or already discharged.".to_string())?;
 
     // FUN-09: discharge-billing check. Refuse to discharge a patient who
     // has outstanding unpaid or partially-paid bills — this prevents the
@@ -264,7 +297,10 @@ pub async fn discharge_patient(
         ));
     }
 
-    let mut tx = pool.begin().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     sqlx::query(
         "UPDATE ipd_admissions SET status='discharged', discharge_date=NOW(),
@@ -282,9 +318,18 @@ pub async fn discharge_patient(
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    tx.commit().await.map_err(|e| crate::db::sanitize_db_error(&e))?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    audit::for_session(pool.inner(), &s, "ipd_discharge", "ipd_admissions",
-        Some(&discharge.id.to_string()), None).await;
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "ipd_discharge",
+        "ipd_admissions",
+        Some(&discharge.id.to_string()),
+        None,
+    )
+    .await;
     Ok(())
 }
