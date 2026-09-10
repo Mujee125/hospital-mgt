@@ -572,6 +572,13 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
         }
     };
 
+    // RCTF-FULL-SYSTEM-2026-09-09 F-01: one-shot boot migration. If the
+    // on-disk config is still v1/v2 (plaintext / no-entropy DPAPI), re-save
+    // it as v3 (per-install entropy) NOW — the lazy in-load upgrade alone
+    // would leave the weak blob on disk until someone edits Settings.
+    // Failure-tolerant: logs and boots with the existing file on error.
+    AppConfig::maybe_migrate_to_v3(app_handle);
+
     if !cfg.setup_complete || cfg.db_password.is_empty() {
         log_error!(app_handle, "Setup not complete or password empty");
         return Err("HMS Server setup is not complete. \
@@ -898,6 +905,10 @@ async fn initialize_as_client(app_handle: &tauri::AppHandle) -> Result<Role, Str
 
     let mut cfg = AppConfig::load(app_handle).unwrap_or_default();
 
+    // RCTF F-01: client configs carry the DB password too — migrate the
+    // same v1/v2 → v3 (per-install entropy) one-shot at boot.
+    AppConfig::maybe_migrate_to_v3(app_handle);
+
     log_info!(
         app_handle,
         "Config: host={} port={} user={} db={} setup_complete={}",
@@ -978,10 +989,19 @@ async fn initialize_as_client(app_handle: &tauri::AppHandle) -> Result<Role, Str
     } else {
         Some(cfg.pinned_server_fingerprint.clone())
     };
-    let found =
-        tauri::async_runtime::spawn_blocking(move || discovery::detect_server_with_fp(pinned_fp))
-            .await
-            .unwrap_or(None);
+    // F-19: the pinned broadcast secret verifies V2 (secret-keyed)
+    // broadcasts — the preferred trust chain. Absent on pre-F-19 pairings;
+    // V1 keeps working in that window.
+    let pinned_secret = if cfg.pinned_broadcast_secret_hex.is_empty() {
+        None
+    } else {
+        hex::decode(&cfg.pinned_broadcast_secret_hex).ok()
+    };
+    let found = tauri::async_runtime::spawn_blocking(move || {
+        discovery::detect_server_with_fp_secret(pinned_fp, pinned_secret)
+    })
+    .await
+    .unwrap_or(None);
 
     match found {
         Some((server_ip, db_port)) => {
@@ -1023,6 +1043,8 @@ async fn initialize_as_server_fallback(app_handle: &tauri::AppHandle) -> Result<
         .emit("init_status", "Dev mode: starting PostgreSQL...")
         .ok();
     let cfg = AppConfig::load(app_handle).unwrap_or_default();
+    // RCTF F-01: same one-shot v1/v2 → v3 migration for the dev boot path.
+    AppConfig::maybe_migrate_to_v3(app_handle);
     let local_ip = discovery::local_lan_ip();
     log_info!(app_handle, "Dev local IP: {}", local_ip);
 

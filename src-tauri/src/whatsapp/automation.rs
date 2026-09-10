@@ -159,11 +159,50 @@ pub async fn load_whatsapp_config(pool: &sqlx::PgPool) -> Option<WhatsAppBusines
 
     let (token, phone_id, enabled, preferred_method) = row;
     Some(WhatsAppBusinessConfig {
-        access_token: token.unwrap_or_default(),
+        // F-11: decrypt the `encv1:` envelope; legacy plaintext (no prefix)
+        // passes through unchanged so pre-upgrade rows keep working until
+        // the next save re-encrypts them.
+        access_token: decrypt_token_from_storage(&token.unwrap_or_default()).unwrap_or_default(),
         phone_number_id: phone_id.unwrap_or_default(),
         enabled,
         preferred_method,
     })
+}
+
+// ── RCTF-FULL-SYSTEM-2026-09-08 F-11: token encryption at rest ───────────────
+
+/// Marker prefix for the encrypted-at-rest token envelope.
+pub const ENC_TOKEN_PREFIX: &str = "encv1:";
+
+/// Encrypt an access token for DB storage: DPAPI machine scope + the
+/// per-install entropy key (the config.json v3 envelope), base64, with
+/// the `encv1:` marker. Returns the input unchanged when empty (an empty
+/// token must stay visibly empty, not become an encrypted empty string).
+/// Non-Windows (dev/CI): plaintext pass-through — the DPAPI functions are
+/// no-ops there by design (see secrets.rs).
+pub fn encrypt_token_for_storage(token: &str) -> Result<String, String> {
+    if token.is_empty() {
+        return Ok(token.to_string());
+    }
+    // Already encrypted (a save where the frontend echoes the masked
+    // value is rejected separately; a re-save of the stored envelope
+    // must not double-encrypt).
+    if token.starts_with(ENC_TOKEN_PREFIX) {
+        return Ok(token.to_string());
+    }
+    let entropy = crate::config::AppConfig::load_or_create_entropy_for_secrets()?;
+    let enc = crate::secrets::encrypt_with_entropy(token, &entropy)?;
+    Ok(format!("{}{}", ENC_TOKEN_PREFIX, enc))
+}
+
+/// Decrypt an `encv1:` token envelope; anything without the prefix is
+/// legacy plaintext and returns as-is.
+pub fn decrypt_token_from_storage(stored: &str) -> Result<String, String> {
+    let Some(enc) = stored.strip_prefix(ENC_TOKEN_PREFIX) else {
+        return Ok(stored.to_string());
+    };
+    let entropy = crate::config::AppConfig::load_or_create_entropy_for_secrets()?;
+    crate::secrets::decrypt_with_entropy(enc, &entropy)
 }
 
 /// Returns true if the Business API is fully configured AND the user selected
@@ -268,9 +307,17 @@ pub async fn send_whatsapp(
 
     // ── CR-12 consent gate ───────────────────────────────────────────────
     // Refuse patient-facing sends without explicit opt-in consent. The gate
-    // is a no-op for group sends and for connectivity tests.
+    // is a no-op for group sends and for connectivity tests. F-05: consent
+    // is resolved by patient_id (exact) when the caller knows it; the
+    // phone-suffix fallback only serves manual ad-hoc sends.
     if !msg.is_group && msg.notification_type != "test" {
-        check_patient_consent(pool, &msg.recipient, clinic_default_cc.as_deref()).await?;
+        check_patient_consent(
+            pool,
+            &msg.recipient,
+            clinic_default_cc.as_deref(),
+            msg.patient_id,
+        )
+        .await?;
     }
 
     // ── Strategy 1: Business API (user selected "api") ──
@@ -358,24 +405,77 @@ pub async fn send_whatsapp(
 
 // ── Patient consent gate (CR-12, SRS FR-0035) ──────────────────────────────
 
-/// Refuse the send if the recipient phone matches a patient in the DB and
-/// that patient has not granted WhatsApp consent. Returns `Ok(())` if:
-///   • the recipient phone does not match any patient (the recipient is not
-///     a patient, so HIPAA consent does not apply — e.g. a doctor's phone
-///     used for a manual ad-hoc send), OR
-///   • the patient has a `patient_consent` row with `consent_type = 'whatsapp'`
-///     and `granted = true`.
+/// Refuse the send if the message's patient has not granted WhatsApp
+/// consent. Returns `Ok(())` if:
+///   • the identified patient has a `patient_consent` row with
+///     `consent_type = 'whatsapp'` and `granted = true`, OR
+///   • no patient can be identified (the recipient is not a patient, so
+///     HIPAA consent does not apply — e.g. a doctor's phone used for a
+///     manual ad-hoc send).
 ///
 /// Returns `Err` with a clear, user-facing message otherwise.
 ///
-/// Lookup is by phone-digit suffix (last 9 digits) to tolerate the various
-/// local / international formats stored in `patients.phone` vs the
-/// normalized `WhatsAppMessage.recipient`.
+/// RCTF-FULL-SYSTEM-2026-09-08 F-05: identity resolution order —
+///   1. `patient_id` (primary key) when the caller knows it. Every
+///      scheduler/appointment path knows the patient id at the call site;
+///      this is exact and cannot mis-attribute consent between two
+///      patients.
+///   2. Legacy fallback: last-9-digit phone-suffix lookup, for the manual
+///      ad-hoc send path (`send_whatsapp_to_patient`) where the operator
+///      supplies only a phone number. The suffix match keeps its
+///      fail-closed semantics, but it is no longer used where identity is
+///      already known.
+///
+/// The fallback remains because refusing every manual send without an id
+/// would break a legitimate operator workflow (sending to a number that
+/// is not a registered patient at all); where the suffix DOES match a
+/// patient, that patient's own consent still gates the send.
 pub async fn check_patient_consent(
     pool: &sqlx::PgPool,
     raw_recipient: &str,
     default_country: Option<&str>,
+    patient_id: Option<i32>,
 ) -> Result<(), String> {
+    let resolved_id = match patient_id {
+        Some(id) => Some(id),
+        None => lookup_patient_by_phone_suffix(pool, raw_recipient, default_country).await?,
+    };
+    let patient_id = match resolved_id {
+        Some(id) => id,
+        None => return Ok(()), // Recipient is not a registered patient.
+    };
+
+    // Look up the patient's `whatsapp` consent record. (patient_id,
+    // consent_type) is UNIQUE, so LIMIT 1 is defensive.
+    let row: Option<(bool,)> = sqlx::query_as(
+        r#"SELECT granted FROM patient_consent
+           WHERE patient_id = $1 AND consent_type = 'whatsapp'
+           LIMIT 1"#,
+    )
+    .bind(patient_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Consent check failed: {}", e))?;
+
+    match row {
+        Some((granted,)) if granted => Ok(()),
+        _ => Err("Patient has not consented to WhatsApp notifications. \
+             Update consent in the patient record first."
+            .to_string()),
+    }
+}
+
+/// Legacy identity fallback (F-05): resolve a patient by the recipient
+/// phone's last 9 digits. Returns Ok(None) when the number matches no
+/// active patient (the gate does not apply). Ambiguity between two
+/// patients sharing a suffix is resolved to the NEWEST patient — the same
+/// limitation this fallback always had; callers who know the patient id
+/// bypass this entirely (see `check_patient_consent`).
+async fn lookup_patient_by_phone_suffix(
+    pool: &sqlx::PgPool,
+    raw_recipient: &str,
+    default_country: Option<&str>,
+) -> Result<Option<i32>, String> {
     // Normalize the recipient the same way `send_whatsapp` does, so the
     // suffix we match on is comparable to the digits in `patients.phone`.
     // If normalization fails (e.g. group name slipped through), fail CLOSED
@@ -405,28 +505,5 @@ pub async fn check_patient_consent(
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("Consent check (patient lookup) failed: {}", e))?;
-
-    let patient_id = match patient {
-        Some((id,)) => id,
-        None => return Ok(()), // Recipient is not a registered patient.
-    };
-
-    // Look up the patient's `whatsapp` consent record. (patient_id,
-    // consent_type) is UNIQUE, so LIMIT 1 is defensive.
-    let row: Option<(bool,)> = sqlx::query_as(
-        r#"SELECT granted FROM patient_consent
-           WHERE patient_id = $1 AND consent_type = 'whatsapp'
-           LIMIT 1"#,
-    )
-    .bind(patient_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Consent check failed: {}", e))?;
-
-    match row {
-        Some((granted,)) if granted => Ok(()),
-        _ => Err("Patient has not consented to WhatsApp notifications. \
-             Update consent in the patient record first."
-            .to_string()),
-    }
+    Ok(patient.map(|(id,)| id))
 }

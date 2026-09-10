@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 #[cfg(feature = "server-build")]
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 #[cfg(feature = "server-build")]
 use sqlx::PgPool;
 
@@ -46,6 +46,18 @@ use crate::models::BackupInfo;
 use crate::rbac::{self, Permission, SessionState};
 
 // ── Helpers (server-build only) ─────────────────────────────────────────────
+
+/// Resolve the backups directory WITHOUT the ACL-hardening side effect of
+/// `backups_dir()` — used by the scheduler's due-check (every 5-minute
+/// tick), where spawning icacls each tick would be pure overhead. Does not
+/// create the directory either: a missing dir simply means "no auto backups
+/// yet" for the due-check.
+#[cfg(feature = "server-build")]
+pub fn backups_dir_path() -> Result<PathBuf, String> {
+    let program_data = std::env::var_os("ProgramData")
+        .ok_or_else(|| "ProgramData env var is not set.".to_string())?;
+    Ok(PathBuf::from(program_data).join("HMS").join("backups"))
+}
 
 /// Backups directory: `%ProgramData%\HMS\backups\` on Windows.
 ///
@@ -136,10 +148,10 @@ fn pg_bin(binary: &str) -> Result<PathBuf, String> {
 }
 
 /// Validates that a user-supplied `backup_filename` is a plain filename (no
-/// path separators, not `.` or `..`, must end in `.sql`). This is the
-/// path-traversal guard that prevents `restore_backup`/`delete_backup` from
-/// being misused to overwrite or delete arbitrary files outside the backups
-/// directory.
+/// path separators, not `.` or `..`, ends in `.sql` or the F-11 encrypted
+/// extension `.sql.enc`). This is the path-traversal guard that prevents
+/// `restore_backup`/`delete_backup` from being misused to overwrite or
+/// delete arbitrary files outside the backups directory.
 #[cfg(feature = "server-build")]
 fn validate_filename(name: &str) -> Result<(), String> {
     if name.is_empty() {
@@ -151,10 +163,11 @@ fn validate_filename(name: &str) -> Result<(), String> {
     if name == "." || name == ".." {
         return Err("Backup filename must not be a path-traversal sequence.".to_string());
     }
-    // Defense in depth: only `.sql` files are listed/created here, so any
-    // other extension is rejected up front.
-    if !name.ends_with(".sql") {
-        return Err("Backup filename must end in '.sql'.".to_string());
+    // Defense in depth: only `.sql` (legacy plaintext) and `.sql.enc`
+    // (F-11 encrypted) files are listed/created here, so any other
+    // extension is rejected up front.
+    if !(name.ends_with(".sql.enc") || name.ends_with(".sql")) {
+        return Err("Backup filename must end in '.sql' or '.sql.enc'.".to_string());
     }
     Ok(())
 }
@@ -165,6 +178,14 @@ pub fn validate_filename_for_tests(name: &str) -> Result<(), String> {
     validate_filename(name)
 }
 
+/// F-11: a backup archive filename — legacy plaintext (`.sql`) or encrypted
+/// (`.sql.enc`). Shared by every scan/filter site so the two formats stay
+/// in step.
+#[cfg(feature = "server-build")]
+fn is_backup_archive(name: &str) -> bool {
+    name.ends_with(".sql.enc") || name.ends_with(".sql")
+}
+
 /// Formats a `SystemTime` as a stable, ISO-ish UTC string for display in the
 /// frontend (`YYYY-MM-DD HH:MM:SS UTC`). We use UTC rather than local time so
 /// the timestamp is unambiguous across hospital timezones and DST changes.
@@ -172,6 +193,138 @@ pub fn validate_filename_for_tests(name: &str) -> Result<(), String> {
 fn format_timestamp(t: SystemTime) -> String {
     let dt: chrono::DateTime<Utc> = t.into();
     dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+}
+
+// ── RCTF-FULL-SYSTEM-2026-09-08 F-11: backup encryption at rest ─────────────
+//
+// A pg_dump archive IS the entire PHI store in readable form — the code's
+// own comment has said so since 2026-09-05. Every archive is now
+// AES-256-GCM encrypted immediately after the pg_restore -l verification:
+//   magic   "HMSE1"       (5 bytes — distinguishes from legacy plaintext)
+//   nonce   12 bytes      (CSPRNG, unique per archive)
+//   ct||tag ciphertext    (AES-256-GCM over the archive bytes)
+// The key is SHA-256(entropy.key || b"hms-backup-v1") — derived from the
+// same per-install secret that protects the DB password (config v3), so a
+// stolen archive (or the whole USB stick) decrypts only on the install
+// that made it, for the principals that can read entropy.key. Restore
+// decrypts to a temp file, runs pg_restore, and deletes the plaintext
+// immediately — encrypted archives are NEVER left lying in %TEMP% beyond
+// the restore itself. Legacy `.sql` archives made before this change
+// remain restorable (detected by the missing magic).
+//
+// All server-build gated (the backup module itself is server-only).
+
+/// File magic for the encrypted-backup envelope.
+#[cfg(feature = "server-build")]
+pub const ENC_BACKUP_MAGIC: &str = "HMSE1";
+
+/// Derive the backup key from the install entropy + a domain-separation
+/// constant (the same entropy never reused raw for two purposes).
+#[cfg(feature = "server-build")]
+fn backup_key() -> Result<aes_gcm::Key<aes_gcm::Aes256Gcm>, String> {
+    use sha2::Digest;
+    let entropy = crate::config::AppConfig::load_or_create_entropy_for_secrets()?;
+    let mut h = sha2::Sha256::new();
+    h.update(&entropy);
+    h.update(b"hms-backup-v1");
+    // Digest → [u8; 32] key for Aes256Gcm (Key::clone_from_slice accepts
+    // any AsRef<[u8]>; the digest's GenericArray converts losslessly).
+    let hash = h.finalize();
+    Ok(aes_gcm::Key::<aes_gcm::Aes256Gcm>::clone_from_slice(&hash))
+}
+
+/// Encrypt a finished backup archive in place: `name.sql` → `name.sql.enc`.
+/// Returns the new filename. Idempotence: never re-encrypts (the magic
+/// check); a missing source is an error (the verification step above must
+/// have succeeded before we got here).
+#[cfg(feature = "server-build")]
+pub fn encrypt_backup_file(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let plaintext = fs::read(path).map_err(|e| format!("Read archive for encryption: {}", e))?;
+    if plaintext.starts_with(ENC_BACKUP_MAGIC.as_bytes()) {
+        // Already encrypted — nothing to do (defense against double calls).
+        return Ok(path.to_path_buf());
+    }
+    use aes_gcm::AeadInPlace;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+    use rand::RngCore;
+    let key = backup_key()?;
+    let cipher = Aes256Gcm::new(&key);
+    let mut nonce_bytes = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let mut buffer = plaintext; // encrypt in place: buffer = ct || tag
+    cipher
+        .encrypt_in_place(nonce, b"", &mut buffer)
+        .map_err(|_| "AES-GCM encryption of the archive failed".to_string())?;
+    let mut out = Vec::with_capacity(5 + 12 + buffer.len());
+    out.extend_from_slice(ENC_BACKUP_MAGIC.as_bytes());
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&buffer);
+    let enc_path = path.with_extension("sql.enc");
+    fs::write(&enc_path, &out).map_err(|e| format!("Write encrypted archive: {}", e))?;
+    // Replace the plaintext archive with the encrypted one — the plaintext
+    // copy must not remain on disk.
+    fs::remove_file(path).map_err(|e| format!("Remove plaintext archive: {}", e))?;
+    Ok(enc_path)
+}
+
+/// Decrypt an encrypted archive to a TEMP file for restore. Returns the
+/// temp path (caller must delete it after use). Plaintext-format archives
+/// return the original path unchanged — restore stays compatible with
+/// pre-F-11 archives.
+#[cfg(feature = "server-build")]
+pub fn decrypt_backup_for_restore(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let head = read_prefix(path, ENC_BACKUP_MAGIC.len() + 1)?;
+    if !head.starts_with(ENC_BACKUP_MAGIC.as_bytes()) {
+        return Ok(path.to_path_buf()); // legacy plaintext archive
+    }
+    let blob = fs::read(path).map_err(|e| format!("Read encrypted archive: {}", e))?;
+    if blob.len() < 5 + 12 + 16 {
+        return Err("Encrypted archive is truncated/corrupt.".to_string());
+    }
+    use aes_gcm::AeadInPlace;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+    let key = backup_key()?;
+    let cipher = Aes256Gcm::new(&key);
+    let nonce = Nonce::from_slice(&blob[5..17]);
+    let mut buffer = blob[17..].to_vec();
+    cipher
+        .decrypt_in_place(nonce, b"", &mut buffer)
+        .map_err(|_| {
+            "Backup decryption FAILED (wrong key or corrupt archive). This archive was \
+             encrypted on a different install, or entropy.key has changed."
+                .to_string()
+        })?;
+    let tmp = std::env::temp_dir().join(format!(
+        "hms_restore_{}_{}.sql.enc.tmp",
+        std::process::id(),
+        {
+            use rand::RngCore;
+            rand::rngs::OsRng.next_u32()
+        }
+    ));
+    fs::write(&tmp, &buffer).map_err(|e| format!("Write decrypted temp archive: {}", e))?;
+    Ok(tmp)
+}
+
+/// Read at most `n` bytes of a file (prefix probe) without loading it all.
+#[cfg(feature = "server-build")]
+fn read_prefix(path: &std::path::Path, n: usize) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut f = fs::File::open(path).map_err(|e| format!("Open archive: {}", e))?;
+    let mut buf = vec![0u8; n];
+    let mut read = 0;
+    while read < n {
+        let got = f
+            .read(&mut buf[read..])
+            .map_err(|e| format!("Read archive head: {}", e))?;
+        if got == 0 {
+            break;
+        }
+        read += got;
+    }
+    buf.truncate(read);
+    Ok(buf)
 }
 
 // ── Phase 7: backup core (shared by the manual command and the nightly
@@ -263,10 +416,36 @@ pub fn run_backup_core(cfg: &AppConfig, tag: &str) -> Result<BackupInfo, String>
         .created()
         .map(format_timestamp)
         .unwrap_or_else(|_| format_timestamp(SystemTime::now()));
+    let size_bytes = meta.len();
+
+    // F-11: encrypt the verified archive at rest. Failure to ENCRYPT is
+    // NOT tolerable (that would leave the PHI archive plaintext on disk
+    // after this fix shipped) — but the backup itself already succeeded,
+    // so on encryption failure we DELETE the plaintext archive and
+    // surface the error rather than keeping an unprotected PHI file.
+    let (filename, path) = match encrypt_backup_file(&path) {
+        Ok(enc_path) => {
+            let name = enc_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&filename)
+                .to_string();
+            (name, enc_path)
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&path);
+            return Err(format!(
+                "Backup created and verified, but encryption FAILED — the plaintext \
+                 archive was deleted rather than left unprotected: {}",
+                e
+            ));
+        }
+    };
+
     Ok(BackupInfo {
         filename,
         path: path.to_string_lossy().to_string(),
-        size_bytes: meta.len(),
+        size_bytes,
         created_at,
     })
 }
@@ -307,6 +486,86 @@ pub fn prune_backups(keep: usize) -> Result<usize, String> {
     prune_backups_in(&backups_dir()?, keep)
 }
 
+/// RCTF-FULL-SYSTEM-2026-09-09 F-08: should the nightly auto-backup run NOW?
+///
+/// The previous scheduler condition fired only when
+/// `now.hour() == auto_backup_hour` — a machine that was asleep (or the app
+/// closed) during that one-hour window simply NEVER backed up, with no
+/// error and no signal (observed live on the 2026-09-09 deployment: armed
+/// for 00:00, never executed). The window is widened to "missed the
+/// scheduled moment and has not backed up since" via the mtime of the
+/// newest `auto_db_*` archive:
+///   • normal night: the first tick at/after the configured hour runs it;
+///   • slept-through night: the first tick after wake sees the newest auto
+///     archive is older than ~24h and runs it immediately (catch-up);
+///   • app closed for days: same — first boot after reopening backs up.
+/// The 24h+ threshold (not exactly 24h) tolerates a backup that ran a few
+/// minutes late the previous night. Manual `hospital_db_*` archives do NOT
+/// count — an operator's manual snapshot is not the scheduled regime.
+#[cfg(feature = "server-build")]
+pub fn auto_backup_due(
+    dir: &std::path::Path,
+    now: chrono::DateTime<chrono::Local>,
+    auto_backup_hour: u32,
+    enabled: bool,
+) -> bool {
+    if !enabled {
+        return false;
+    }
+    let hour = auto_backup_hour.min(23);
+    // Before the scheduled hour today (and we already have a recent auto
+    // backup from yesterday's window) → not due yet.
+    let newest_auto = newest_auto_backup_mtime(dir);
+    let last_run_or_dawn = match newest_auto {
+        Some(t) => t,
+        None => {
+            // Never ran: due immediately — a fresh install (or auto-backup
+            // newly enabled) must not wait for the next window when there
+            // is not a single auto archive at all.
+            return true;
+        }
+    };
+    if now.hour() < hour {
+        // Not yet the window today; due only if the last auto backup is
+        // already > 24h stale (machine was asleep through yesterday too).
+        let stale = now.signed_duration_since(last_run_or_dawn).num_hours() >= 24;
+        return stale;
+    }
+    // At/after the scheduled hour: due unless an auto backup already ran
+    // within this calendar day's window (i.e. within the last 24h AND after
+    // the most recent scheduled-hour boundary).
+    let today_window_start = now
+        .date_naive()
+        .and_hms_opt(hour, 0, 0)
+        .and_then(|naive| naive.and_local_timezone(chrono::Local).single())
+        .unwrap_or(now);
+    let already_ran_today = last_run_or_dawn >= today_window_start;
+    !already_ran_today
+}
+
+/// mtime of the newest `auto_db_*.sql` archive in `dir` (None if none).
+#[cfg(feature = "server-build")]
+fn newest_auto_backup_mtime(dir: &std::path::Path) -> Option<chrono::DateTime<chrono::Local>> {
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(is_backup_archive)
+                    .unwrap_or(false)
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("auto_db_"))
+                    .unwrap_or(false)
+        })
+        .filter_map(|p| fs::metadata(&p).ok()?.modified().ok())
+        .map(|t| -> chrono::DateTime<chrono::Local> { t.into() })
+        .max()
+}
+
 /// The retention core over an explicit directory — testable against a temp
 /// dir (the real backups directory must never be touched by tests).
 #[cfg(feature = "server-build")]
@@ -318,7 +577,13 @@ pub fn prune_backups_in(dir: &std::path::Path, keep: usize) -> Result<usize, Str
         .map_err(|e| format!("Read backups dir: {}", e))?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().map(|x| x == "sql").unwrap_or(false))
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(is_backup_archive)
+                    .unwrap_or(false)
+        })
         .filter_map(|p| {
             let mtime = fs::metadata(&p).ok()?.modified().ok()?;
             Some((mtime, p))
@@ -436,7 +701,7 @@ pub async fn list_backups(
             continue;
         }
         let filename = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) if n.ends_with(".sql") => n.to_string(),
+            Some(n) if is_backup_archive(n) => n.to_string(),
             _ => continue,
         };
         let meta = match fs::metadata(&path) {
@@ -537,15 +802,37 @@ pub async fn restore_backup(
             .await;
         match safety {
             Ok(o) if o.status.success() => {
-                audit::for_session(
-                    pool.inner(),
-                    &s,
-                    "backup_pre_restore_safety",
-                    "backup",
-                    Some(&safety_name),
-                    Some(serde_json::json!({"restoring": backup_filename})),
-                )
-                .await;
+                // F-11: the safety dump is as much PHI as any archive —
+                // encrypt it too (best-effort: a failed encryption removes
+                // the plaintext file and logs; the RESTORE proceeds as the
+                // operator requested, exactly like a failed safety dump).
+                let safety_name_enc = match encrypt_backup_file(&safety_path) {
+                    Ok(enc) => enc
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&safety_name)
+                        .to_string(),
+                    Err(e) => {
+                        let _ = fs::remove_file(&safety_path);
+                        eprintln!(
+                            "[HMS BACKUP] Warning: safety-dump encryption failed, plaintext \
+                             removed ({}); continuing the restore as requested.",
+                            e
+                        );
+                        String::new()
+                    }
+                };
+                if !safety_name_enc.is_empty() {
+                    audit::for_session(
+                        pool.inner(),
+                        &s,
+                        "backup_pre_restore_safety",
+                        "backup",
+                        Some(&safety_name_enc),
+                        Some(serde_json::json!({"restoring": backup_filename})),
+                    )
+                    .await;
+                }
             }
             _ => {
                 let _ = fs::remove_file(&safety_path);
@@ -563,24 +850,42 @@ pub async fn restore_backup(
     // should be restored.
     //
     // PGPASSWORD is set on the child process only — never on the parent env.
-    let output = tokio::process::Command::new(&pg_restore)
-        .arg("-h")
-        .arg(&cfg.db_host)
-        .arg("-p")
-        .arg(cfg.db_port.to_string())
-        .arg("-U")
-        .arg(&cfg.db_user)
-        .arg("--clean")
-        .arg("--if-exists")
-        .arg("-d")
-        .arg(&cfg.db_name)
-        .arg(&path)
-        .env("PGPASSWORD", &cfg.db_password)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| format!("Failed to spawn pg_restore: {}", e))?;
+    //
+    // F-11: encrypted archives are decrypted to a TEMP file first; the
+    // plaintext temp is deleted after the restore regardless of outcome
+    // (it must never outlive the operation). Legacy `.sql` archives pass
+    // through `decrypt_backup_for_restore` unchanged.
+    let restore_source = decrypt_backup_for_restore(&path)?;
+    let temp_to_clean: Option<&std::path::Path> = if restore_source != path {
+        Some(&restore_source)
+    } else {
+        None
+    };
+    let restore_result: Result<std::process::Output, String> =
+        tokio::process::Command::new(&pg_restore)
+            .arg("-h")
+            .arg(&cfg.db_host)
+            .arg("-p")
+            .arg(cfg.db_port.to_string())
+            .arg("-U")
+            .arg(&cfg.db_user)
+            .arg("--clean")
+            .arg("--if-exists")
+            .arg("-d")
+            .arg(&cfg.db_name)
+            .arg(&restore_source)
+            .env("PGPASSWORD", &cfg.db_password)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| format!("Failed to spawn pg_restore: {}", e));
+    // The decrypted temp (if any) is removed IMMEDIATELY — success or
+    // failure — so no plaintext PHI archive is left in %TEMP%.
+    if let Some(tmp) = temp_to_clean {
+        let _ = fs::remove_file(tmp);
+    }
+    let output = restore_result?;
 
     let code = output.status.code().unwrap_or(-1);
     if code > 1 {

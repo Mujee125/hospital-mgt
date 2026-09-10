@@ -70,6 +70,10 @@ interface PatientFormProps {
   patient?: Patient | PatientEhr | PatientFormValue;
   onSuccess: () => void;
   onCancel: () => void;
+  /** RCTF-FULL-SYSTEM-2026-09-08 F-21: the dialog uses this to guard
+   *  Esc/overlay-click discards with a confirmation while the operator
+   *  has unsaved edits. */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"] as const;
@@ -78,7 +82,7 @@ const GENDERS = ["Male", "Female", "Other"] as const;
 /** Convert a `null | ""` to `null` so the backend gets a clean Option<String>. */
 const nullable = (s: string): string | null => (s.trim() === "" ? null : s);
 
-export function PatientForm({ patient, onSuccess, onCancel }: PatientFormProps) {
+export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: PatientFormProps) {
   const isEdit = !!patient?.id;
   const createPatient = useCreatePatientEhr();
   const updatePatient = useUpdatePatientEhr();
@@ -132,6 +136,47 @@ export function PatientForm({ patient, onSuccess, onCancel }: PatientFormProps) 
     setInsuranceProvider(ehrRecord.insurance_provider ?? "");
     setInsurancePolicyNumber(ehrRecord.insurance_policy_number ?? "");
   }, [ehrRecord]);
+
+  // F-21: dirty = any field differing from the (loaded) seed. In create
+  // mode any non-empty field counts. Reported up so the dialog can guard
+  // Esc/overlay-click discards.
+  const isDirty = (() => {
+    if (isEdit) {
+      return (
+        firstName !== (seed.first_name ?? "") ||
+        lastName !== (seed.last_name ?? "") ||
+        email !== (seed.email ?? "") ||
+        phone !== (seed.phone ?? "") ||
+        dob !== (seed.date_of_birth ?? "") ||
+        address !== (seed.address ?? "") ||
+        mrn !== (seed.mrn ?? "") ||
+        allergies !== (seed.allergies ?? "") ||
+        chronicConditions !== (seed.chronic_conditions ?? "") ||
+        emergencyName !== (seed.emergency_contact_name ?? "") ||
+        emergencyPhone !== (seed.emergency_contact_phone ?? "") ||
+        insuranceProvider !== (seed.insurance_provider ?? "") ||
+        insurancePolicyNumber !== (seed.insurance_policy_number ?? "")
+      );
+    }
+    return (
+      firstName.trim() !== "" ||
+      lastName.trim() !== "" ||
+      email.trim() !== "" ||
+      phone.trim() !== "" ||
+      dob !== "" ||
+      address.trim() !== "" ||
+      mrn.trim() !== "" ||
+      allergies.trim() !== "" ||
+      chronicConditions.trim() !== "" ||
+      emergencyName.trim() !== "" ||
+      emergencyPhone.trim() !== "" ||
+      insuranceProvider.trim() !== "" ||
+      insurancePolicyNumber.trim() !== ""
+    );
+  })();
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

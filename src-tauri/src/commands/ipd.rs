@@ -233,16 +233,38 @@ pub async fn discharge_patient(
     discharge: DischargeIpd,
 ) -> Result<(), String> {
     let s = rbac::require_strong(&session, pool.inner(), Permission::IpdManage).await?;
+    discharge_patient_core(pool.inner(), &s, discharge).await
+}
 
+/// Discharge logic core (AERP Part G extraction pattern) — testable
+/// without an AppHandle. See the transaction diagram in the body for the
+/// RCTF-FULL-SYSTEM-2026-09-08 F-15 in-transaction guards.
+pub async fn discharge_patient_core(
+    pool: &PgPool,
+    s: &crate::rbac::Session,
+    discharge: DischargeIpd,
+) -> Result<(), String> {
     // FUN-09: fetch BOTH patient_id and bed_id in the same query — we need
     // patient_id to run the unpaid-bills guard below, and bed_id to free
     // the bed on successful discharge. The previous query only fetched
     // bed_id, so the billing check would have needed a second round-trip.
+    // RCTF-FULL-SYSTEM-2026-09-08 F-15: ALL discharge checks run inside ONE
+    // transaction, with the admission row locked FOR UPDATE. Previously
+    // the status and unpaid-bill checks ran on the pool BEFORE pool.begin()
+    // — a discharge racing another discharge both passed the pre-check
+    // (duplicate audits, double bed-free), and a bill created in the
+    // check-to-commit window let the patient leave with an unpaid bill.
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
     let row: Option<(i32, i32)> = sqlx::query_as(
-        "SELECT patient_id, bed_id FROM ipd_admissions WHERE id = $1 AND status = 'admitted'",
+        "SELECT patient_id, bed_id FROM ipd_admissions WHERE id = $1 AND status = 'admitted' \
+         FOR UPDATE",
     )
     .bind(discharge.id)
-    .fetch_optional(pool.inner())
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
@@ -269,7 +291,7 @@ pub async fn discharge_patient(
         "SELECT COUNT(*) FROM bills WHERE patient_id = $1 AND status IN ('unpaid', 'partial')",
     )
     .bind(patient_id)
-    .fetch_one(pool.inner())
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
@@ -277,10 +299,11 @@ pub async fn discharge_patient(
         // Audit the blocked discharge so there's a trace of why the
         // discharge was refused (the operator may need to chase payment
         // or write off the balance, and the audit row is the evidence
-        // that the control fired).
+        // that the control fired). The tx is dropped uncommitted — the
+        // FOR UPDATE lock releases, nothing was written.
         audit::for_session(
-            pool.inner(),
-            &s,
+            pool,
+            s,
             "ipd_discharge_blocked_unpaid_bills",
             "ipd_admissions",
             Some(&discharge.id.to_string()),
@@ -297,20 +320,24 @@ pub async fn discharge_patient(
         ));
     }
 
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| crate::db::sanitize_db_error(&e))?;
-
-    sqlx::query(
+    // Conditional discharge: the status filter inside the UPDATE is the
+    // atomic second gate — even if the row changed between the locked
+    // read and this statement, a non-'admitted' row matches 0 rows and
+    // the transaction aborts with a clear error instead of double
+    // discharging.
+    let discharged = sqlx::query(
         "UPDATE ipd_admissions SET status='discharged', discharge_date=NOW(),
-                                    discharge_summary=$1, updated_at=NOW() WHERE id=$2",
+                                    discharge_summary=$1, updated_at=NOW()
+         WHERE id=$2 AND status='admitted'",
     )
     .bind(&discharge.discharge_summary)
     .bind(discharge.id)
     .execute(&mut *tx)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    if discharged.rows_affected() == 0 {
+        return Err("Admission not found or already discharged.".to_string());
+    }
 
     sqlx::query("UPDATE beds SET status='available' WHERE id=$1")
         .bind(bed_id)
@@ -323,8 +350,8 @@ pub async fn discharge_patient(
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(
-        pool.inner(),
-        &s,
+        pool,
+        s,
         "ipd_discharge",
         "ipd_admissions",
         Some(&discharge.id.to_string()),

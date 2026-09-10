@@ -125,11 +125,14 @@ pub async fn get_rooms(
     session_state: tauri::State<'_, SessionState>,
 ) -> Result<Vec<String>, String> {
     let _ = rbac::require(&session_state, Permission::MessagingView)?;
+    // F-24: a DB failure previously rendered as "no rooms" via
+    // unwrap_or_default — the same false-empty-state class as F-09. The
+    // error now propagates so the frontend can surface it.
     let db_rooms: Vec<String> =
         sqlx::query_scalar("SELECT DISTINCT room FROM messages ORDER BY room")
             .fetch_all(pool.inner())
             .await
-            .unwrap_or_default();
+            .map_err(|e| format!("Load rooms: {}", e))?;
 
     let mut rooms = vec![
         "general".to_string(),

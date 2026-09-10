@@ -25,7 +25,7 @@ import { Search, Calendar, Trash2, Edit, Receipt as ReceiptIcon, CalendarX, Cale
 import { toast } from "sonner";
 import {
   useAppointments,
-  usePatients,
+  usePatientsEhr,
   useDoctors,
   useDeleteAppointment,
   useUpdateAppointmentStatus,
@@ -36,6 +36,7 @@ import {
   PageHeader,
   SectionCard,
   EmptyState,
+  ErrorState,
   StatusBadge,
   LoadingState,
   PageToolbar,
@@ -60,8 +61,8 @@ type EditableAppointment = Pick<
 export function Appointments() {
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const { data: appointments = [], isLoading } = useAppointments();
-  const { data: patients = [] } = usePatients();
+  const { data: appointments = [], isLoading, isError, refetch, isFetching } = useAppointments();
+  const { data: patients = [] } = usePatientsEhr();
   const { data: doctors = [] } = useDoctors();
   const deleteAppointment = useDeleteAppointment();
   const updateStatus = useUpdateAppointmentStatus();
@@ -212,6 +213,8 @@ export function Appointments() {
       <SectionCard>
         {isLoading ? (
           <LoadingState rows={6} />
+        ) : isError ? (
+          <ErrorState onRetry={() => void refetch()} retrying={isFetching} />
         ) : filteredAppointments.length === 0 ? (
           <EmptyState
             icon={CalendarX}

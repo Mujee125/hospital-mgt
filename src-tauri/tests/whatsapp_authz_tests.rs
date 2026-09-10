@@ -344,6 +344,7 @@ async fn wp1_n04_consent_gate_still_applies() {
         &pool,
         "+923001112233",
         None,
+        None,
     )
     .await
     .unwrap_err();
@@ -351,9 +352,14 @@ async fn wp1_n04_consent_gate_still_applies() {
 
     // Consent granted → allow.
     set_consent(&pool, patient_id, true).await;
-    hospital_mgmt_lib::whatsapp::automation::check_patient_consent(&pool, "+923001112233", None)
-        .await
-        .expect("consented patient must pass the gate");
+    hospital_mgmt_lib::whatsapp::automation::check_patient_consent(
+        &pool,
+        "+923001112233",
+        None,
+        None,
+    )
+    .await
+    .expect("consented patient must pass the gate");
 
     // Consent revoked → refuse again.
     set_consent(&pool, patient_id, false).await;
@@ -361,6 +367,7 @@ async fn wp1_n04_consent_gate_still_applies() {
         hospital_mgmt_lib::whatsapp::automation::check_patient_consent(
             &pool,
             "+923001112233",
+            None,
             None
         )
         .await
@@ -621,4 +628,114 @@ async fn wp1_l02_role_sync_post_seed() {
     let session = load_session_for(&pool, uid, "hash_l02").await;
     assert!(session.permissions.contains("whatsapp.send"));
     assert!(session.permissions.contains("whatsapp.view"));
+}
+
+// ── RCTF-FULL-SYSTEM-2026-09-09 F-03: consent-gate "test" bypass ─────────────
+
+/// RCTF-F03-1 — a patient-directed send MUST NOT be able to adopt the
+/// consent-exempt `notification_type = "test"` label. The label exempts a
+/// send from the consent gate inside `automation::send_whatsapp`, so
+/// `send_whatsapp_to_patient` must refuse it up front (only the
+/// Settings-managed `send_whatsapp_test`, which targets the operator's own
+/// phone, may carry it). Pinned the same way the guard-conformance tests pin
+/// require_strong: the command source must contain the label rejection
+/// inside send_whatsapp_to_patient, and both H8/F-03 refusals must stay.
+#[tokio::test]
+async fn rctf_f03_consent_test_label_bypass_refused() {
+    let pool = setup().await;
+    let patient_id = seed_patient_with_phone(&pool, "Consent", "Target", "+923009998880").await;
+    let _ = patient_id;
+
+    let src = include_str!("../src/whatsapp/commands.rs");
+    let cmd_start = src
+        .find("pub async fn send_whatsapp_to_patient")
+        .expect("send_whatsapp_to_patient must exist");
+    // The command ends where the next command's attribute begins.
+    let end = src[cmd_start..]
+        .find("\n#[tauri::command]")
+        .map(|i| cmd_start + i)
+        .unwrap_or(src.len());
+    let cmd_src = &src[cmd_start..end];
+    assert!(
+        cmd_src.contains("if notification_type == \"test\""),
+        "send_whatsapp_to_patient must reject the consent-exempt 'test' label"
+    );
+    // The exemption stays narrow: send_whatsapp_notification keeps refusing
+    // group/test (H8).
+    assert!(src.contains("if message.is_group || message.notification_type == \"test\""));
+}
+
+/// RCTF-F03-2 — behavioral proof through the real gate: without consent, a
+/// patient-directed send is refused by `automation::send_whatsapp`'s consent
+/// gate; with consent granted it passes; revoked → refused again. This pins
+/// the gate semantics the label bypass would have skipped.
+#[tokio::test]
+async fn rctf_f03_gate_semantics_patient_send() {
+    use hospital_mgmt_lib::whatsapp::automation::check_patient_consent;
+
+    let pool = setup().await;
+    let patient_id = seed_patient_with_phone(&pool, "Gate", "Check", "+923009998881").await;
+
+    // No consent row → refused.
+    let r = check_patient_consent(&pool, "+923009998881", Some("92"), None)
+        .await
+        .unwrap_err();
+    assert!(r.contains("has not consented"), "got: {}", r);
+
+    // Consent granted → passes.
+    set_consent(&pool, patient_id, true).await;
+    check_patient_consent(&pool, "+923009998881", Some("92"), None)
+        .await
+        .expect("consented patient must pass the gate");
+
+    // Consent revoked again → refused once more.
+    set_consent(&pool, patient_id, false).await;
+    let r = check_patient_consent(&pool, "+923009998881", Some("92"), None)
+        .await
+        .unwrap_err();
+    assert!(r.contains("has not consented"), "got: {}", r);
+}
+
+/// RCTF-FULL-SYSTEM-2026-09-08 F-05: consent must be attributed by patient
+/// IDENTITY, not by the recipient phone's 9-digit suffix. Two patients can
+/// share a suffix (family plans, number reuse) — the legacy suffix lookup
+/// picks the NEWEST patient and checks THEIR consent, so patient A's
+/// reminder could be authorized (or blocked) by patient B's consent
+/// record. Every call path that knows the patient id (scheduler reminders,
+/// appointment events) now passes it; the gate checks THAT patient's row.
+#[tokio::test]
+async fn rctf_f05_consent_attributed_by_identity_not_phone_suffix() {
+    use hospital_mgmt_lib::whatsapp::automation::check_patient_consent;
+
+    let pool = setup().await;
+    // Two active patients sharing the same 9-digit suffix. The suffix
+    // fallback would resolve BOTH to the newer patient (b).
+    let patient_a = seed_patient_with_phone(&pool, "Suffix", "Old", "+923009997770").await;
+    let patient_b = seed_patient_with_phone(&pool, "Suffix", "New", "+923009997770").await;
+
+    // Only the OLDER patient consented.
+    set_consent(&pool, patient_a, true).await;
+    set_consent(&pool, patient_b, false).await;
+
+    // Identity-based: A's message is authorized by A's consent…
+    check_patient_consent(&pool, "+923009997770", Some("92"), Some(patient_a))
+        .await
+        .expect("patient A consented — A's own message must pass");
+
+    // …and B's is blocked by B's refusal, even though the phone suffix is
+    // identical. The legacy fallback would have checked B's record for A
+    // (refused) and B's record for B — the identity path checks each
+    // patient's OWN row.
+    let r = check_patient_consent(&pool, "+923009997770", Some("92"), Some(patient_b))
+        .await
+        .unwrap_err();
+    assert!(r.contains("has not consented"), "got: {}", r);
+
+    // The legacy suffix path (manual ad-hoc sends, no id known) still
+    // resolves to the NEWEST patient — its documented limitation — and
+    // refuses here because that newest patient has not consented.
+    let r = check_patient_consent(&pool, "+923009997770", Some("92"), None)
+        .await
+        .unwrap_err();
+    assert!(r.contains("has not consented"), "got: {}", r);
 }

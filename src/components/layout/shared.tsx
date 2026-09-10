@@ -1,8 +1,31 @@
 import type { ReactNode } from "react";
 import { motion } from "motion/react";
-import { type LucideIcon } from "lucide-react";
+import { RotateCcw, TriangleAlert, type LucideIcon } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+
+// ── RCTF-FULL-SYSTEM-2026-09-08 F-21: unsaved-changes guard ────────────────
+/** Wrap a dialog's open-change handler: closing with UNSAVED changes (Esc,
+ *  overlay click, Cancel) now confirms first instead of silently discarding
+ *  a 20-field patient edit or a typed lab result. The codebase already had
+ *  this pattern in ConsentPanel.tsx — this makes it reusable.
+ *
+ *  Usage:
+ *    const guard = useDiscardGuard();
+ *    <Dialog onOpenChange={(o) => guard(o, isDirty, closeFn)}>…</Dialog>
+ */
+export function useDiscardGuard() {
+  return (nextOpen: boolean, isDirty: boolean, close: () => void) => {
+    if (nextOpen) return; // opening — nothing to guard
+    if (isDirty) {
+      const ok = window.confirm(
+        "Discard unsaved changes? Everything you entered in this form will be lost.",
+      );
+      if (!ok) return; // stay open
+    }
+    close();
+  };
+}
 
 /* ============================================================
    VitalFlow HMS — Shared Design System Components
@@ -415,6 +438,54 @@ export function EmptyState({
         </p>
       )}
       {action}
+    </div>
+  );
+}
+
+// ── ErrorState ─────────────────────────────────────────────────
+/** RCTF-FULL-SYSTEM-2026-09-08 F-09: persistent error state. A failed
+ *  query previously rendered the EMPTY state ("No patients registered
+ *  yet") after the 6-second toast faded — staff acted on false absence
+ *  of data (registering duplicates, believing no lab orders exist). This
+ *  component is the distinct, PERSISTENT failure surface: it never
+ *  resolves on its own, names the likely cause, and offers a retry.
+ *  Empty ≠ error; a page must never show an empty state while its query
+ *  is in an error state. */
+export function ErrorState({
+  onRetry,
+  retrying,
+  detail,
+}: {
+  onRetry?: () => void;
+  retrying?: boolean;
+  detail?: string;
+}) {
+  return (
+    <div
+      role="alert"
+      className="flex flex-col items-center justify-center py-16 px-8 text-center"
+    >
+      <div className="h-16 w-16 rounded-[var(--radius-lg)] bg-red-500/10 border border-red-500/30 flex items-center justify-center mb-5">
+        <TriangleAlert className="h-7 w-7 text-red-500" />
+      </div>
+      <h3 className="text-display-md text-foreground mb-1.5">
+        Could not load this data
+      </h3>
+      <p className="text-sm text-muted-foreground max-w-md mb-2 leading-relaxed">
+        The request failed — the database may be unreachable or restarting.
+        This is <strong>not</strong> an empty list: do not re-enter records.
+      </p>
+      {detail && (
+        <p className="text-xs text-muted-foreground/80 max-w-md mb-5 font-mono break-all">
+          {detail}
+        </p>
+      )}
+      {onRetry && (
+        <Button variant="outline" onClick={onRetry} disabled={retrying}>
+          <RotateCcw className="h-4 w-4" />
+          {retrying ? "Retrying…" : "Try again"}
+        </Button>
+      )}
     </div>
   );
 }

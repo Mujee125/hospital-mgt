@@ -1,7 +1,27 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tauri::Manager;
+
+/// Serializes every config write within this process (RCTF-FULL-SYSTEM-
+/// 2026-09-09 F-01). The v3 save is a TWO-FILE commit — `entropy.key`
+/// (possibly created) and `config.json` — so the write path must be atomic
+/// as a PAIR, not just per file. Without the lock, two racing first-time
+/// saves could interleave: thread A re-reads entropy E1, thread B installs
+/// E2, A then writes a config blob that no longer matches the on-disk key
+/// → undecryptable config. Config saves are rare (Settings screen /
+/// first-run setup), so a process-wide mutex costs nothing. Poisoning is
+/// ignored (`unwrap_or_else`) — a panicking saver leaves no partially-
+/// written state (each file write is already temp+rename atomic), so the
+/// next save can safely proceed.
+static CONFIG_SAVE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn config_save_lock() -> MutexGuard<'static, ()> {
+    let m = CONFIG_SAVE_LOCK.get_or_init(|| Mutex::new(()));
+    // Poison-tolerant acquire: see the static's doc comment.
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Application configuration persisted to config.json.
 ///
@@ -35,8 +55,20 @@ pub struct AppConfig {
     pub pinned_server_cert_pem: String,
     #[serde(default)]
     pub pinned_server_fingerprint: String,
+    /// RCTF-FULL-SYSTEM-2026-09-08 F-19: hex of the per-install broadcast
+    /// secret (delivered over the TLS pairing channel). Verifies
+    /// HMS_SERVER_V2 LAN broadcasts whose HMAC key, unlike the TLS
+    /// fingerprint, is never published. Empty on pre-F-19 deployments —
+    /// the client falls back to V1 (fingerprint-keyed) broadcasts.
+    #[serde(default)]
+    pub pinned_broadcast_secret_hex: String,
     /// RCTF-IMPL-001 WP-3: config format version.
-    /// 1 = legacy (plaintext db_password); 2 = DPAPI-encrypted db_password.
+    /// 1 = legacy (plaintext db_password); 2 = DPAPI-encrypted db_password
+    /// (machine scope, no per-install entropy — RCTF F-01: decryptable by
+    /// every process on the machine); 3 = DPAPI + per-install entropy from
+    /// `entropy.key` (see `secrets.rs` — decrypting now requires the machine
+    /// scope AND the ACL-hardened entropy file, raising the bar from "any
+    /// local account" to "admin or the app's own user").
     #[serde(default = "default_config_version")]
     pub config_version: u32,
     /// RCTF-IMPL-001 WP-3: encrypted db_password (base64 DPAPI blob on Windows).
@@ -103,6 +135,7 @@ impl Default for AppConfig {
             setup_complete: false,
             pinned_server_cert_pem: String::new(),
             pinned_server_fingerprint: String::new(),
+            pinned_broadcast_secret_hex: String::new(),
             config_version: 1,
             db_password_encrypted: None,
             auto_backup_enabled: cfg!(feature = "server-build"),
@@ -137,6 +170,61 @@ impl AppConfig {
         Self::user_config_path(app_handle)
     }
 
+    /// RCTF-FULL-SYSTEM-2026-09-09 F-01: on-disk config version (None if the
+    /// file is unreadable — treated as "nothing to migrate").
+    fn disk_config_version(path: &Path) -> Option<u32> {
+        let content = fs::read_to_string(path).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+        json.get("config_version")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            // A missing config_version field means v1.
+            .or(Some(1))
+    }
+
+    /// RCTF-FULL-SYSTEM-2026-09-09 F-01: one-shot boot migration. The lazy
+    /// v1/v2→v3 upgrade in `load_from_inner` only lands when something
+    /// calls `save()` — and nothing saves until an admin edits Settings,
+    /// which could be never. This runs at every boot after a successful
+    /// load: if the on-disk file is still v1/v2, it re-saves immediately,
+    /// so the no-entropy blob leaves disk at the new binary's FIRST
+    /// launch, not whenever someone happens to open Settings.
+    ///
+    /// Failure-tolerant by design: a failed migration (unreadable dir, ACL,
+    /// DPAPI) logs and continues booting with the in-memory config — the
+    /// v1/v2 file remains loadable by both this binary and the previous
+    /// one, so a boot must never strand the machine on the repair screen
+    /// over an opportunistic hardening write. The v2-shaped `.bak` written
+    /// by the migration save covers the reverse direction.
+    pub fn maybe_migrate_to_v3(app_handle: &tauri::AppHandle) {
+        let path = Self::config_path(app_handle);
+        match Self::disk_config_version(&path) {
+            Some(v) if v < 3 => {
+                if let Some(cfg) = Self::load_from_inner(&path) {
+                    if !cfg.db_password.is_empty() {
+                        match cfg.save_to_inner(&path) {
+                            Ok(()) => {
+                                eprintln!(
+                                    "[HMS CONFIG] Migrated config.json v{} → v3 \
+                                     (per-install DPAPI entropy, RCTF F-01)",
+                                    v
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[HMS CONFIG] WARNING: v{}→v3 migration failed ({}); \
+                                     keeping the v{} file — it remains loadable.",
+                                    v, e, v
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// AERP Part G (config_tests): same resolution as `config_path` without
     /// needing an AppHandle. Only the app-config-dir fallback differs —
     /// tests always place their config at the machine path (ProgramData),
@@ -145,6 +233,238 @@ impl AppConfig {
     #[cfg(feature = "hms-integration-tests")]
     pub fn config_path_for_tests() -> Option<PathBuf> {
         Self::machine_config_path().filter(|p| p.exists())
+    }
+
+    // ── RCTF-FULL-SYSTEM-2026-09-09 F-01: per-install DPAPI entropy ──────────
+
+    /// Path of the per-install entropy file, always next to the config file
+    /// it protects (`C:\ProgramData\HMS\entropy.key` in production).
+    fn entropy_key_path(config_path: &Path) -> PathBuf {
+        config_path.with_file_name("entropy.key")
+    }
+
+    /// RCTF-FULL-SYSTEM-2026-09-08 F-11: entropy access for OTHER at-rest
+    /// secrets (the WhatsApp access token). Resolves the machine config
+    /// path (where entropy.key lives) without requiring an AppHandle;
+    /// on machines where ProgramData is unset (tests, non-Windows CI)
+    /// the caller's encrypt/decrypt is a pass-through anyway, so an
+    /// error here only fails on real deployments where it matters.
+    pub fn load_or_create_entropy_for_secrets() -> Result<Vec<u8>, String> {
+        let path = Self::machine_config_path().ok_or_else(|| {
+            "ProgramData env var is not set (entropy key unavailable).".to_string()
+        })?;
+        Self::load_or_create_entropy(&path)
+    }
+
+    /// RCTF-FULL-SYSTEM-2026-09-08 F-19: the per-install LAN-broadcast
+    /// secret. Previously the discovery HMAC was keyed on the TLS cert
+    /// FINGERPRINT — public by construction (it sits in cleartext in every
+    /// paired client's config.json and in get_config), so anyone who ever
+    /// read one client's config could forge signed broadcasts (redirect/
+    /// DoS against the whole LAN). This secret never leaves the install
+    /// except through the TLS pairing channel to a client being paired —
+    /// the same out-of-band path the DB credentials already use. Stored as
+    /// `broadcast.key` next to entropy.key with the same ACL posture.
+    pub fn load_or_create_broadcast_secret() -> Result<Vec<u8>, String> {
+        let dir = Self::machine_config_path()
+            .ok_or_else(|| {
+                "ProgramData env var is not set (broadcast key unavailable).".to_string()
+            })?
+            .parent()
+            .map(|p| p.to_path_buf())
+            .ok_or_else(|| "Config path has no parent directory.".to_string())?;
+        let key_path = dir.join("broadcast.key");
+        if let Ok(bytes) = fs::read(&key_path) {
+            if !bytes.is_empty() {
+                return Ok(bytes);
+            }
+        }
+        use rand::RngCore;
+        let mut fresh = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut fresh);
+        let tmp = dir.join(format!(
+            "broadcast.{}-{}.key.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        fs::write(&tmp, fresh).map_err(|e| format!("Write broadcast tmp: {}", e))?;
+        // Same (M)-then-downgrade ACL order as entropy.key — see the
+        // F-01 notes there for why the rename needs Modify.
+        #[cfg(target_os = "windows")]
+        {
+            let mut icacls = std::process::Command::new("icacls");
+            icacls
+                .arg(tmp.as_os_str())
+                .args(["/inheritance:r"])
+                .args(["/grant:r", "SYSTEM:F"])
+                .args(["/grant:r", "Administrators:F"]);
+            if let Some(user) = std::env::var_os("USERNAME") {
+                let _ = icacls.arg(format!("{}:(M)", user.to_string_lossy()));
+            }
+            let _ = icacls
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        fs::rename(&tmp, &key_path).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("Rename broadcast.key: {}", e)
+        })?;
+        #[cfg(target_os = "windows")]
+        {
+            let mut icacls = std::process::Command::new("icacls");
+            icacls.arg(key_path.as_os_str()).args(["/grant:r"]);
+            if let Some(user) = std::env::var_os("USERNAME") {
+                let _ = icacls.arg(format!("{}:(R)", user.to_string_lossy()));
+            }
+            let _ = icacls
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        fs::read(&key_path).map_err(|e| format!("Re-read broadcast.key: {}", e))
+    }
+
+    /// Read the install's entropy bytes for DECRYPTING a v3 blob. Strict by
+    /// design: a missing/empty file is an error, never a "create a fresh
+    /// one" — a freshly generated key would not match the existing blob and
+    /// would convert a recoverable situation (restore config.json.bak) into
+    /// a silent permanent one.
+    fn read_entropy(config_path: &Path) -> Result<Vec<u8>, String> {
+        let p = Self::entropy_key_path(config_path);
+        let bytes = fs::read(&p).map_err(|e| {
+            format!(
+                "entropy.key unreadable ({}): {} — v3 configs need it to decrypt. \
+                 Restore config.json.bak (v2 shape) to recover.",
+                p.display(),
+                e
+            )
+        })?;
+        if bytes.is_empty() {
+            return Err(format!(
+                "entropy.key is empty ({}): v3 configs need it to decrypt. \
+                 Restore config.json.bak (v2 shape) to recover.",
+                p.display()
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Load the install's entropy bytes, creating the file on first use
+    /// (32 CSPRNG bytes, ACL-hardened to SYSTEM/Administrators/app user).
+    ///
+    /// Callers hold `CONFIG_SAVE_LOCK` (see `save_to_inner`): the entropy
+    /// creation + config write is a TWO-FILE commit, and the mutex makes
+    /// the pair atomic within this process — without it, a concurrent
+    /// first-time save could observe an entropy key that a sibling racer is
+    /// about to replace, writing a config blob no longer decryptable by
+    /// what is on disk.
+    ///
+    /// Race safety beyond the mutex: two creators both write a UNIQUE temp
+    /// file and atomically rename it onto `entropy.key`; the creator then
+    /// RE-READS the final on-disk value, so even if its rename lost the
+    /// race it encrypts with the winning bytes. (The remaining
+    /// cross-process window — two app processes doing first-time saves —
+    /// is not a supported configuration; single-instance is the deployment
+    /// contract, and the v2-shaped `.bak` recovers from any torn state.)
+    fn load_or_create_entropy(config_path: &Path) -> Result<Vec<u8>, String> {
+        let key_path = Self::entropy_key_path(config_path);
+
+        // Fast path: the file already exists with content.
+        if let Ok(bytes) = fs::read(&key_path) {
+            if !bytes.is_empty() {
+                return Ok(bytes);
+            }
+            // An empty file (truncated by an old crash/tamper) falls
+            // through and is replaced by the create path below.
+        }
+
+        use rand::RngCore;
+        let mut fresh = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut fresh);
+
+        // Unique temp name (mirrors the config-save pattern) so concurrent
+        // creators never share an intermediate file.
+        let unique = format!(
+            "{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0),
+            {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static SEQ: AtomicU64 = AtomicU64::new(0);
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            }
+        );
+        let tmp = key_path.with_file_name(format!("entropy.{}.key.tmp", unique));
+        fs::write(&tmp, fresh).map_err(|e| format!("Write entropy tmp: {}", e))?;
+
+        // ACL-harden the temp BEFORE the rename (same order as config.json),
+        // but the app user gets MODIFY here, not Read: on Windows the rename
+        // below needs DELETE permission on the source file, which (R) does
+        // not carry — observed live: a UAC-filtered token could WRITE the
+        // temp, harden it to (R), and then be DENIED its own rename, leaving
+        // an orphan entropy.*.key.tmp and no entropy.key. The downgrade to
+        // read-only happens on the FINAL file after the rename (the key is
+        // created once and never rewritten, so (R) is the steady state).
+        #[cfg(target_os = "windows")]
+        {
+            let mut icacls = std::process::Command::new("icacls");
+            icacls
+                .arg(tmp.as_os_str())
+                .args(["/inheritance:r"])
+                .args(["/grant:r", "SYSTEM:F"])
+                .args(["/grant:r", "Administrators:F"]);
+            if let Some(user) = std::env::var_os("USERNAME") {
+                let _ = icacls.arg(format!("{}:(M)", user.to_string_lossy()));
+            }
+            if let Err(e) = icacls
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                eprintln!(
+                    "[HMS CONFIG] Warning: could not ACL-harden entropy.key ({}). \
+                     The per-install entropy is still applied, but the file may \
+                     be readable by other local accounts.",
+                    e
+                );
+            }
+        }
+
+        // Atomic install. fs::rename on Windows replaces an existing file
+        // (MoveFileEx MOVEFILE_REPLACE_EXISTING) — the same atomic-replace
+        // primitive the config write itself relies on.
+        fs::rename(&tmp, &key_path).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("Rename entropy.key: {}", e)
+        })?;
+
+        // Post-rename downgrade: the FINAL key is read-only for the app
+        // user (the entropy never rotates), stripping the MODIFY the rename
+        // needed. Best-effort — a failure leaves (M), which still denies
+        // every OTHER account (the confidentiality goal) and the key works.
+        #[cfg(target_os = "windows")]
+        {
+            let mut icacls = std::process::Command::new("icacls");
+            icacls.arg(key_path.as_os_str()).args(["/grant:r"]);
+            if let Some(user) = std::env::var_os("USERNAME") {
+                let _ = icacls.arg(format!("{}:(R)", user.to_string_lossy()));
+            }
+            let _ = icacls
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+
+        // Re-read the winner's bytes (see race note above). This read cannot
+        // see a torn file: the content arrived via rename, atomically.
+        fs::read(&key_path).map_err(|e| format!("Re-read entropy.key: {}", e))
     }
 
     /// Review Pass 3, P3-4: tri-state disk probe for the config-mutation gate.
@@ -190,11 +510,11 @@ impl AppConfig {
         // WP3-N04 (AERP Part G): reject config files from a NEWER format
         // version than this binary understands. Silently treating an unknown
         // future version as v1/v2 could mis-handle fields we don't know
-        // about (e.g. a v3 with a different encryption envelope would be
+        // about (e.g. a v4 with a different encryption envelope would be
         // decrypted as garbage or, worse, parsed as plaintext v1).
-        if version > 2 {
+        if version > 3 {
             eprintln!(
-                "[HMS CONFIG] ERROR: config.json has unknown config_version {} (this build supports 1 and 2). \
+                "[HMS CONFIG] ERROR: config.json has unknown config_version {} (this build supports 1, 2 and 3). \
                  Refusing to load — update the application or restore a compatible config backup.",
                 version
             );
@@ -203,23 +523,53 @@ impl AppConfig {
 
         let mut cfg: AppConfig = serde_json::from_value(json).ok()?;
 
-        if version < 2 {
-            // V1 (legacy): db_password is plaintext. Mark for migration.
-            // The actual encryption happens on the next save() call.
-            // For now, populate db_password_encrypted so save() knows to encrypt.
-            cfg.config_version = 2; // upgrade in-memory; disk upgrades on next save
-        } else {
-            // V2: decrypt db_password from db_password_encrypted.
-            if let Some(enc) = &cfg.db_password_encrypted {
-                match crate::secrets::decrypt(enc) {
-                    Ok(plain) => {
-                        cfg.db_password = plain;
-                    }
-                    Err(e) => {
-                        eprintln!("[HMS CONFIG] ERROR: failed to decrypt db_password: {}. Database connection will fail.", e);
-                        cfg.db_password = String::new();
+        match version {
+            // V3: decrypt with the per-install entropy (RCTF F-01).
+            3 => {
+                if let Some(enc) = &cfg.db_password_encrypted {
+                    match Self::read_entropy(path)
+                        .and_then(|entropy| crate::secrets::decrypt_with_entropy(enc, &entropy))
+                    {
+                        Ok(plain) => {
+                            cfg.db_password = plain;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[HMS CONFIG] ERROR: failed to decrypt db_password: {}. Database connection will fail. \
+                                 Restore config.json.bak (v2 shape) to recover.",
+                                e
+                            );
+                            cfg.db_password = String::new();
+                        }
                     }
                 }
+            }
+            // V1 (plaintext) and V2 (DPAPI, no per-install entropy): read
+            // the password now, and mark for the v3 upgrade on the next
+            // save. V2 blobs were written by the pre-F-01 binary with no
+            // entropy — the legacy `decrypt` reads them.
+            _ => {
+                if version == 2 {
+                    if let Some(enc) = &cfg.db_password_encrypted {
+                        match crate::secrets::decrypt(enc) {
+                            Ok(plain) => {
+                                cfg.db_password = plain;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[HMS CONFIG] ERROR: failed to decrypt db_password: {}. Database connection will fail.",
+                                    e
+                                );
+                                cfg.db_password = String::new();
+                            }
+                        }
+                    }
+                }
+                // In-memory upgrade marker: the on-disk file stays v1/v2
+                // until an explicit save() re-encrypts it as v3 — the same
+                // lazy-migration pattern the v1→v2 upgrade has used since
+                // WP-3 (a read must never rewrite disk).
+                cfg.config_version = 3;
             }
         }
 
@@ -253,10 +603,11 @@ impl AppConfig {
         self.save_to_inner(path)
     }
 
-    /// Serialize this config as a v2 (DPAPI-encrypted) on-disk JSON payload.
-    /// Shared by `save_to_inner` (the live config write) and the v1→v2
-    /// migration backup path (QA-2026-09-08 C2) so the .bak gets the same
-    /// encrypted shape as the live file.
+    /// The v2 (legacy, no-entropy DPAPI) on-disk JSON payload. Used ONLY
+    /// for the `.bak` rollback artifact now: the previous binary cannot
+    /// read v3, and entropy-loss recovery must work without `entropy.key`
+    /// — both need a blob the no-entropy path can decrypt. Shared by the
+    /// v1→v3 and v2→v3 migration backup paths in `save_to_inner`.
     fn serialize_v2(&self) -> Result<String, String> {
         let mut save_cfg = self.clone();
         if !save_cfg.db_password.is_empty() {
@@ -265,14 +616,36 @@ impl AppConfig {
             save_cfg.db_password_encrypted = Some(enc);
             save_cfg.config_version = 2;
         }
+        Self::inject_blob_and_serialize(&save_cfg)
+    }
 
-        // VF-VERIF-003: `db_password_encrypted` is `#[serde(skip_serializing)]`
-        // so it never leaks through the `get_config` IPC reply. But the disk
-        // write needs the field — a v2 file without the blob decrypts to an
-        // empty password on next launch and bricks the DB connection.
-        // Re-inject it into the JSON object after struct serialization.
+    /// The v3 (RCTF F-01) on-disk JSON payload — DPAPI machine scope PLUS
+    /// the per-install entropy from `entropy.key` (created on first use
+    /// next to `config_path`). This is the shape every LIVE config write
+    /// persists.
+    fn serialize_v3(&self, config_path: &Path) -> Result<String, String> {
+        let mut save_cfg = self.clone();
+        if !save_cfg.db_password.is_empty() {
+            let entropy = Self::load_or_create_entropy(config_path)?;
+            let enc = crate::secrets::encrypt_with_entropy(&save_cfg.db_password, &entropy)
+                .map_err(|e| format!("Failed to encrypt db_password: {}", e))?;
+            save_cfg.db_password_encrypted = Some(enc);
+            save_cfg.config_version = 3;
+        }
+        Self::inject_blob_and_serialize(&save_cfg)
+    }
+
+    /// Shared tail of both serializers: struct → JSON, then re-inject
+    /// `db_password_encrypted`.
+    ///
+    /// VF-VERIF-003: `db_password_encrypted` is `#[serde(skip_serializing)]`
+    /// so it never leaks through the `get_config` IPC reply. But the disk
+    /// write needs the field — a v2/v3 file without the blob decrypts to an
+    /// empty password on next launch and bricks the DB connection.
+    /// Re-inject it into the JSON object after struct serialization.
+    fn inject_blob_and_serialize(save_cfg: &AppConfig) -> Result<String, String> {
         let mut json: serde_json::Value =
-            serde_json::to_value(&save_cfg).map_err(|e| e.to_string())?;
+            serde_json::to_value(save_cfg).map_err(|e| e.to_string())?;
         if save_cfg.db_password_encrypted.is_some() {
             json["db_password_encrypted"] =
                 serde_json::Value::String(save_cfg.db_password_encrypted.clone().unwrap());
@@ -281,59 +654,66 @@ impl AppConfig {
     }
 
     fn save_to_inner(&self, path: &Path) -> Result<(), String> {
-        // RCTF-IMPL-001 WP-3 + QA-2026-09-08 C2: the v1→v2 migration backup
-        // and the live write share one serializer so both files on disk are
-        // always the same encrypted v2 shape.
-        let content = self.serialize_v2()?;
+        // RCTF F-01: entropy creation + config write is a two-file commit —
+        // hold the process-wide save lock for the whole function so the
+        // pair lands atomically (see CONFIG_SAVE_LOCK).
+        let _save_lock = config_save_lock();
+
+        // RCTF-IMPL-001 WP-3 + QA-2026-09-08 C2 + RCTF-FULL-SYSTEM-2026-09-09
+        // F-01: the live write is the v3 shape (per-install entropy). The
+        // migration backup and the live write use SEPARATE serializers now:
+        // the .bak deliberately keeps the v2 (no-entropy) shape — the
+        // previous binary can't read v3, and entropy-loss recovery must work
+        // without entropy.key.
+        let content = self.serialize_v3(path)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
 
-        // WP3-I05 (AERP Part G) + QA-2026-09-08 C2: before the FIRST v1→v2
-        // migration overwrites the on-disk file, preserve the current file
-        // as `config.json.bak`. The v1 file contains the last known-good
-        // plaintext password; if the v2 write later turns out unreadable
-        // (corrupt blob, ACL issue, DPAPI key loss), the operator has a
-        // recovery path that does not require re-provisioning PostgreSQL.
-        // Only written when the existing file is still v1 (a v2 file
+        // WP3-I05 (AERP Part G) + QA-2026-09-08 C2 + RCTF F-01: before the
+        // FIRST v1/v2→v3 migration overwrites the on-disk file, preserve the
+        // current file as `config.json.bak` in the v2 (no-entropy) shape.
+        // The .bak is the recovery path for BOTH rollback directions:
+        //   • binary rollback: the previous build rejects version > 2 —
+        //     restore the .bak and it loads;
+        //   • entropy loss: `entropy.key` deleted/corrupt → the v3 blob is
+        //     undecryptable — restore the .bak and it loads (without the
+        //     entropy file).
+        // Only written when the existing file is still v1/v2 (a v3 file
         // already exists → this is not a migration) and no .bak already
-        // exists (never clobber the original v1 backup).
-        //
-        // C2 fix: the preserved .bak is REWRITTEN to v2 (DPAPI-encrypted)
-        // BEFORE the copy — the backup's purpose is "last known-good
-        // password for recovery", and a DPAPI LOCAL_MACHINE blob is exactly
-        // as recoverable on this machine as plaintext (same machine, same
-        // encryption scope) while no longer leaking the superuser password
-        // to every local user via the parent dir's Users:Modify ACE. The
-        // ACL hardening below is now defense-in-depth, not the only barrier.
-        //
-        // Migration condition mirrors the old inline logic: only when this
-        // save actually writes the v2 shape (password present, or already
-        // upgraded in memory by load_from_inner) AND the on-disk file is
-        // still v1 — a v2 disk file means this is not a migration.
-        let writing_v2 = !self.db_password.is_empty() || self.config_version >= 2;
-        if writing_v2 {
-            let is_v1_on_disk = fs::read_to_string(path)
+        // exists (never clobber the original migration backup).
+        let writing_v3 = !self.db_password.is_empty() || self.config_version >= 3;
+        if writing_v3 {
+            let is_legacy_on_disk = fs::read_to_string(path)
                 .ok()
                 .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
                 .map(|j| {
                     j.get("config_version")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(1)
-                        < 2
+                        < 3
                 })
                 .unwrap_or(false);
-            if is_v1_on_disk {
+            if is_legacy_on_disk {
                 let bak = path.with_extension("json.bak");
                 if !bak.exists() {
                     // Best-effort: a failed backup must not block the save —
-                    // the atomic write below is the critical path.
-                    if let Ok(v2_content) = self.serialize_v2() {
-                        let _ = fs::write(&bak, &v2_content);
+                    // the atomic write below is the critical path. If even
+                    // the v2 serialization fails (DPAPI unavailable), fall
+                    // back to the legacy byte-for-byte copy.
+                    //
+                    // Empty-password edge: serialize_v2 with no password
+                    // would stamp the in-memory version (3) with no blob —
+                    // a file the PREVIOUS binary rejects and that carries no
+                    // recovery value anyway. The old on-disk bytes are the
+                    // correct artifact in that case.
+                    if !self.db_password.is_empty() {
+                        if let Ok(v2_content) = self.serialize_v2() {
+                            let _ = fs::write(&bak, &v2_content);
+                        } else {
+                            let _ = fs::copy(path, &bak);
+                        }
                     } else {
-                        // Encryption failed — fall back to the legacy copy so
-                        // the recovery path still exists, and rely on the ACL
-                        // hardening (it stays load-bearing in this branch).
                         let _ = fs::copy(path, &bak);
                     }
 
@@ -559,6 +939,7 @@ pub async fn save_config(
     merged.setup_complete = config.setup_complete;
     merged.pinned_server_cert_pem = config.pinned_server_cert_pem;
     merged.pinned_server_fingerprint = config.pinned_server_fingerprint;
+    merged.pinned_broadcast_secret_hex = config.pinned_broadcast_secret_hex;
     merged.save(&app_handle)
 }
 

@@ -388,6 +388,74 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     sqlx::query("ALTER TABLE appointments ADD CONSTRAINT chk_appointments_status CHECK (status IN ('scheduled','confirmed','completed','cancelled','no-show'))")
         .execute(pool).await.map_err(|e| format!("appointments chk: {}", e))?;
 
+    // RCTF-FULL-SYSTEM-2026-09-08 F-23 (H3 remainder): the app-level
+    // check_doctor_overlap guard is check-then-act — two receptionists
+    // submitting the same slot concurrently can BOTH pass before either
+    // INSERT lands. This DB-level EXCLUDE constraint is the atomic
+    // backstop: two ACTIVE appointments for the same doctor may never
+    // overlap in time. (btree_gist extends GiST to scalar types so
+    // equality and range predicates mix in one constraint; the time
+    // range needs an IMMUTABLE SQL wrapper — the inline expression is
+    // only STABLE because tsrange's polymorphic casts consult the
+    // timezone, so Postgres refuses it in an index expression.)
+    //
+    // Before attaching, seeded/pre-existing conflicts must be healed or
+    // the ADD would fail and brick startup — mirror the app guard's
+    // resolution: cancel the LATER-starting appointment of each
+    // conflicting pair (keeps the earlier booking; the caller rebooks).
+    // The F-08 data rollback removed the 157k synthetic conflicts from
+    // the live DB; this heal covers any real deployment's stragglers.
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS btree_gist")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("btree_gist extension: {}", e))?;
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION hms_appt_tsrange(d DATE, t TIME, dur INT)
+        RETURNS tsrange LANGUAGE sql IMMUTABLE AS $$
+            SELECT tsrange(d + t, d + t + (dur || ' minutes')::interval)
+        $$
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("hms_appt_tsrange function: {}", e))?;
+    sqlx::query(
+        r#"
+        UPDATE appointments later
+           SET status = 'cancelled'
+          FROM appointments earlier
+         WHERE later.doctor_id = earlier.doctor_id
+           AND later.id > earlier.id
+           AND later.status IN ('scheduled', 'confirmed')
+           AND earlier.status IN ('scheduled', 'confirmed')
+           AND later.appointment_date = earlier.appointment_date
+           AND hms_appt_tsrange(later.appointment_date, later.appointment_time, later.duration_minutes)
+               && hms_appt_tsrange(earlier.appointment_date, earlier.appointment_time, earlier.duration_minutes)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("appointments conflict heal: {}", e))?;
+    sqlx::query("ALTER TABLE appointments DROP CONSTRAINT IF EXISTS excl_appt_doctor_slot")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("appointments excl drop: {}", e))?;
+    sqlx::query(
+        r#"
+        ALTER TABLE appointments ADD CONSTRAINT excl_appt_doctor_slot
+          EXCLUDE USING gist (
+            doctor_id WITH =,
+            appointment_date WITH =,
+            (hms_appt_tsrange(appointment_date, appointment_time, duration_minutes)) WITH &&
+          )
+          WHERE (status IN ('scheduled', 'confirmed'))
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("appointments excl constraint: {}", e))?;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS messages (
@@ -1132,6 +1200,37 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
         "UPDATE bills SET bill_number = 'INV-' || TO_CHAR(created_at, 'YYYY') || '-' || LPAD(id::TEXT, 6, '0') \
          WHERE bill_number NOT LIKE 'INV-%'",
     ).execute(pool).await.ok();
+
+    // RCTF-FULL-SYSTEM-2026-09-09 F-07: idempotent payment posting at the DB
+    // level. The same non-empty reference must never appear twice on the
+    // same bill (a double-click / IPC retry previously double-charged).
+    // BEFORE attaching the partial unique index, heal any historical
+    // duplicates NON-destructively: financial rows are never deleted — each
+    // duplicate after the first keeps its money but loses its uniqueness by
+    // having the reference annotated (operator-visible in the payment
+    // history; reconciliation can then investigate each one deliberately).
+    // Advance-method rows are exempt: `apply_advance` legitimately posts
+    // multiple partial applications of the same advance to one bill.
+    sqlx::query(
+        "UPDATE payments p SET reference_number = LEFT('dup-of-#' || p2.first_id || '/' || p2.id || ' ' || COALESCE(p.reference_number,''), 80) \
+         FROM (SELECT id, bill_id, reference_number, \
+                      MIN(id) OVER (PARTITION BY bill_id, reference_number) AS first_id \
+               FROM payments \
+               WHERE reference_number IS NOT NULL AND reference_number <> '' \
+                 AND payment_method <> 'advance') p2 \
+         WHERE p.id = p2.id AND p2.id <> p2.first_id",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("payments duplicate-reference heal: {}", e))?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_bill_reference \
+           ON payments (bill_id, reference_number) \
+          WHERE reference_number IS NOT NULL AND reference_number <> '' AND payment_method <> 'advance'",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("uq_payments_bill_reference: {}", e))?;
 
     // Refunds: a refund reduces the effective amount paid on a bill but
     // NEVER deletes the payment row (financial append-only audit trail).

@@ -12,11 +12,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useQueue, useCreateQueueToken, useCallNextToken, useSetTokenStatus, usePatientsEhr, useDoctors } from "@/lib/queries";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
-import { PageContainer, PageHeader, SectionCard, EmptyState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
+import { patientDescriptor } from "@/lib/utils";
+import { PageContainer, PageHeader, SectionCard, EmptyState, ErrorState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
 
 export function Queue() {
   const { has } = useAuth();
-  const { data: tokens = [], isLoading } = useQueue();
+  const { data: tokens = [], isLoading, isError, refetch, isFetching } = useQueue();
   const { data: patients = [] } = usePatientsEhr();
   const { data: doctors = [] } = useDoctors();
   const createToken = useCreateQueueToken();
@@ -60,6 +61,8 @@ export function Queue() {
       <SectionCard>
         {isLoading ? (
           <LoadingState rows={6} />
+        ) : isError ? (
+          <ErrorState onRetry={() => void refetch()} retrying={isFetching} />
         ) : tokens.length === 0 ? (
           <EmptyState icon={ListOrdered} title="Queue is empty" description="Issue a token to start managing patient flow." />
         ) : (
@@ -92,18 +95,21 @@ export function Queue() {
                     {has(PERMISSIONS.QueueManage) && (
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-1">
+                          {/* F-21: disabled while a mutation is in flight — a
+                              double-click previously advanced the queue past a
+                              patient (two completes/skips per tap-tap). */}
                           {t.status === "waiting" && (
-                            <Button size="icon" variant="ghost" aria-label={`Call token #${t.token_number}`} className="h-8 w-8 text-muted-foreground hover:text-foreground" onClick={() => callNext.mutate({ doctor_id: t.doctor_id })} title="Call">
+                            <Button size="icon" variant="ghost" aria-label={`Call token #${t.token_number}`} className="h-8 w-8 text-muted-foreground hover:text-foreground" disabled={callNext.isPending || setStatus.isPending} onClick={() => callNext.mutate({ doctor_id: t.doctor_id })} title="Call">
                               <Play className="h-3.5 w-3.5" />
                             </Button>
                           )}
                           {t.status === "in-progress" && (
-                            <Button size="icon" variant="ghost" aria-label={`Mark token #${t.token_number} completed`} className="h-8 w-8 text-muted-foreground hover:text-success" onClick={() => setStatus.mutate({ id: t.id, status: "completed" })} title="Complete">
+                            <Button size="icon" variant="ghost" aria-label={`Mark token #${t.token_number} completed`} className="h-8 w-8 text-muted-foreground hover:text-success" disabled={setStatus.isPending} onClick={() => setStatus.mutate({ id: t.id, status: "completed" })} title="Complete">
                               <Check className="h-3.5 w-3.5" />
                             </Button>
                           )}
                           {t.status !== "completed" && (
-                            <Button size="icon" variant="ghost" aria-label={`Skip token #${t.token_number}`} className="h-8 w-8 text-muted-foreground hover:text-destructive" onClick={() => setStatus.mutate({ id: t.id, status: "skipped" })} title="Skip">
+                            <Button size="icon" variant="ghost" aria-label={`Skip token #${t.token_number}`} className="h-8 w-8 text-muted-foreground hover:text-destructive" disabled={setStatus.isPending} onClick={() => setStatus.mutate({ id: t.id, status: "skipped" })} title="Skip">
                               <X className="h-3.5 w-3.5" />
                             </Button>
                           )}
@@ -130,7 +136,7 @@ export function Queue() {
               <Select value={patientId?.toString() ?? ""} onValueChange={(v) => setPatientId(Number(v))}>
                 <SelectTrigger><SelectValue placeholder="Select patient" /></SelectTrigger>
                 <SelectContent>
-                  {patients.map((p) => <SelectItem key={p.id} value={p.id.toString()}>{p.first_name} {p.last_name} · {p.phone}</SelectItem>)}
+                  {patients.map((p) => <SelectItem key={p.id} value={p.id.toString()}>{patientDescriptor(p)}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>

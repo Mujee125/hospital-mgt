@@ -24,10 +24,12 @@
 mod common;
 
 use common::*;
+use hospital_mgmt_lib::commands::ipd::discharge_patient_core;
 use hospital_mgmt_lib::commands::nursing::{
     create_nurse_note_core, record_medication_administration_core, record_vitals_core,
     CreateNurseNoteRequest, RecordAdministrationRequest, RecordVitalsRequest,
 };
+use hospital_mgmt_lib::models::DischargeIpd;
 use hospital_mgmt_lib::rbac::SessionState;
 use sqlx::PgPool;
 use std::sync::{Arc, Mutex};
@@ -343,6 +345,341 @@ async fn test_ns3_mar_rejects_invalid_status() {
         "invalid MAR status must be rejected, got: {}",
         err
     );
+}
+
+// ── RCTF-FULL-SYSTEM-2026-09-08 F-22: vitals plausibility guard ───────────────
+
+/// Implausible values — the classic missed-decimal entries (temp 370,
+/// SpO2 9.8) — are refused with the expected range; plausible values at
+/// the extremes still record.
+#[tokio::test]
+async fn rctf_f22_implausible_vitals_refused() {
+    let pool = test_pool().await;
+    let pw = fixture_pw();
+    let nurse_id = seed_user(&pool, "f22_nurse", &pw, &["nurse"]).await;
+    seed_session_row(&pool, nurse_id, "hash_f22_nurse").await;
+    let nurse_state = state_for(&pool, nurse_id, "hash_f22_nurse").await;
+
+    let patient_id = seed_patient_with_phone(&pool, "Foj", "Vitals", "+92300f22a").await;
+    let (_, bed_id) = seed_ward_and_bed(&pool, "f22").await;
+    let admission_id = seed_admission(&pool, patient_id, bed_id, "admitted").await;
+
+    let vital = |temp: Option<f64>, spo2: Option<i32>| RecordVitalsRequest {
+        admission_id,
+        temperature_c: temp,
+        systolic_bp: None,
+        diastolic_bp: None,
+        pulse_bpm: None,
+        resp_rate: None,
+        spo2_pct: spo2,
+        pain_score: None,
+        notes: None,
+    };
+
+    // Temperature 370 — the missed decimal point.
+    let err = record_vitals_core(&pool, &nurse_state, vital(Some(370.0), None))
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("missed decimal") && err.contains("30–43"),
+        "temp 370 must be refused with the range hint, got: {}",
+        err
+    );
+
+    // SpO2 9.8 — the other missed decimal.
+    let err = record_vitals_core(&pool, &nurse_state, vital(None, Some(9)))
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("50–100"),
+        "SpO2 9 must be refused, got: {}",
+        err
+    );
+
+    // Nothing was written by the refused attempts.
+    let (rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vitals WHERE admission_id = $1")
+        .bind(admission_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+
+    // Plausible extremes record fine: hypothermia edge (30.0) and full
+    // recovery SpO2 (100).
+    record_vitals_core(&pool, &nurse_state, vital(Some(30.0), Some(100)))
+        .await
+        .expect("plausible extreme values must record");
+    let (rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vitals WHERE admission_id = $1")
+        .bind(admission_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+// ── RCTF-FULL-SYSTEM-2026-09-08 F-14: MAR double-administration guard ────────
+
+/// Two 'administered' entries for the same (admission, item) inside 15
+/// minutes must be refused — the accidental double-dose scenario (two
+/// nurses, or a double-tap) previously recorded silently. 'held' and
+/// 'refused' may repeat, and a fresh 'administered' after the window (or
+/// for a DIFFERENT item) passes.
+#[tokio::test]
+async fn rctf_f14_mar_double_administration_refused() {
+    let pool = test_pool().await;
+    let pw = fixture_pw();
+    let nurse_id = seed_user(&pool, "f14_nurse", &pw, &["nurse"]).await;
+    seed_session_row(&pool, nurse_id, "hash_f14_nurse").await;
+    let nurse_state = state_for(&pool, nurse_id, "hash_f14_nurse").await;
+
+    let patient_id = seed_patient_with_phone(&pool, "Fod", "Double", "+92300f14a").await;
+    let (_, bed_id) = seed_ward_and_bed(&pool, "f14").await;
+    let admission_id = seed_admission(&pool, patient_id, bed_id, "admitted").await;
+    let item = seed_prescription_item(&pool, patient_id, "F14 Med").await;
+
+    // First administration records normally.
+    record_medication_administration_core(
+        &pool,
+        &nurse_state,
+        RecordAdministrationRequest {
+            admission_id,
+            prescription_item_id: item,
+            status: "administered".into(),
+            notes: None,
+        },
+    )
+    .await
+    .expect("first administration must record");
+
+    // The second, moments later, is refused as a likely double dose.
+    let err = record_medication_administration_core(
+        &pool,
+        &nurse_state,
+        RecordAdministrationRequest {
+            admission_id,
+            prescription_item_id: item,
+            status: "administered".into(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("already recorded as administered"),
+        "double administration must be refused, got: {}",
+        err
+    );
+    // Exactly ONE administered row exists.
+    let (rows,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM medication_administrations \
+         WHERE admission_id = $1 AND prescription_item_id = $2 AND status = 'administered'",
+    )
+    .bind(admission_id)
+    .bind(item)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 1, "exactly one administered row");
+
+    // 'held' still records inside the window (a hold is not a dose).
+    record_medication_administration_core(
+        &pool,
+        &nurse_state,
+        RecordAdministrationRequest {
+            admission_id,
+            prescription_item_id: item,
+            status: "held".into(),
+            notes: Some("NPO".into()),
+        },
+    )
+    .await
+    .expect("held entries may repeat within the window");
+
+    // A DIFFERENT item administers fine (the guard is per-item).
+    let item2 = seed_prescription_item(&pool, patient_id, "F14 Med Two").await;
+    record_medication_administration_core(
+        &pool,
+        &nurse_state,
+        RecordAdministrationRequest {
+            admission_id,
+            prescription_item_id: item2,
+            status: "administered".into(),
+            notes: None,
+        },
+    )
+    .await
+    .expect("a different item is not a double administration");
+}
+
+/// The prescription must still be ACTIVE — a dispensed/completed
+/// prescription can no longer be administered against an admission.
+#[tokio::test]
+async fn rctf_f14_mar_refuses_inactive_prescription() {
+    let pool = test_pool().await;
+    let pw = fixture_pw();
+    let nurse_id = seed_user(&pool, "f14b_nurse", &pw, &["nurse"]).await;
+    seed_session_row(&pool, nurse_id, "hash_f14b_nurse").await;
+    let nurse_state = state_for(&pool, nurse_id, "hash_f14b_nurse").await;
+
+    let patient_id = seed_patient_with_phone(&pool, "Foe", "Rxdone", "+92300f14b").await;
+    let (_, bed_id) = seed_ward_and_bed(&pool, "f14b").await;
+    let admission_id = seed_admission(&pool, patient_id, bed_id, "admitted").await;
+    let item = seed_prescription_item(&pool, patient_id, "F14b Med").await;
+
+    // Mark the prescription dispensed (a terminal status).
+    sqlx::query("UPDATE prescriptions SET status = 'dispensed' WHERE id = (SELECT prescription_id FROM prescription_items WHERE id = $1)")
+        .bind(item)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let err = record_medication_administration_core(
+        &pool,
+        &nurse_state,
+        RecordAdministrationRequest {
+            admission_id,
+            prescription_item_id: item,
+            status: "administered".into(),
+            notes: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("prescription is not active"),
+        "an inactive prescription must not be administerable, got: {}",
+        err
+    );
+}
+
+// ── RCTF-FULL-SYSTEM-2026-09-08 F-15: discharge transaction hardening ────────
+
+/// A nurse holds IpdManage but discharge also needs the same — use a
+/// doctor session (IpdManage holder) for the discharge core.
+async fn f15_session(pool: &PgPool, tag: &str) -> (hospital_mgmt_lib::rbac::Session, i32) {
+    let pw = fixture_pw();
+    let uid = seed_user(pool, &format!("f15_{}", tag), &pw, &["doctor"]).await;
+    seed_session_row(pool, uid, &format!("hash_f15_{}", tag)).await;
+    let s = load_session_for(pool, uid, &format!("hash_f15_{}", tag)).await;
+    (s, uid)
+}
+
+/// Discharging an ALREADY-discharged admission must fail cleanly (the
+/// conditional UPDATE + rows_affected check), never double-free the bed
+/// or write a second discharge audit row.
+#[tokio::test]
+async fn rctf_f15_double_discharge_refused() {
+    let pool = test_pool().await;
+    let (doc, _uid) = f15_session(&pool, "dd").await;
+
+    let patient_id = seed_patient_with_phone(&pool, "Fof", "Disch", "+92300f15a").await;
+    let (_, bed_id) = seed_ward_and_bed(&pool, "f15a").await;
+    let admission_id = seed_admission(&pool, patient_id, bed_id, "admitted").await;
+
+    // First discharge succeeds and frees the bed.
+    discharge_patient_core(
+        &pool,
+        &doc,
+        DischargeIpd {
+            id: admission_id,
+            discharge_summary: Some("Recovered".into()),
+        },
+    )
+    .await
+    .expect("first discharge must succeed");
+    let (bed_status,): (String,) = sqlx::query_as("SELECT status FROM beds WHERE id = $1")
+        .bind(bed_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(bed_status, "available", "the bed must be freed once");
+
+    // Second discharge refused with the not-found/already-discharged error.
+    let err = discharge_patient_core(
+        &pool,
+        &doc,
+        DischargeIpd {
+            id: admission_id,
+            discharge_summary: Some("Recovered again".into()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("already discharged"),
+        "double discharge must be refused, got: {}",
+        err
+    );
+
+    // Discharge date was NOT overwritten by the second attempt.
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM ipd_admissions WHERE id = $1 AND status = 'discharged'",
+    )
+    .bind(admission_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1, "exactly one discharged row");
+}
+
+/// The unpaid-bills guard must block discharge, and the blocked discharge
+/// must leave the admission FULLY intact (still admitted, bed still
+/// occupied) — the aborted transaction writes nothing.
+#[tokio::test]
+async fn rctf_f15_unpaid_bills_block_discharge_atomically() {
+    let pool = test_pool().await;
+    let (doc, _uid) = f15_session(&pool, "ub").await;
+
+    let patient_id = seed_patient_with_phone(&pool, "Fog", "Owed", "+92300f15b").await;
+    let (_, bed_id) = seed_ward_and_bed(&pool, "f15b").await;
+    let admission_id = seed_admission(&pool, patient_id, bed_id, "admitted").await;
+
+    // An unpaid bill for this patient (bill_number drawn from the app's
+    // sequence, as create_bill does).
+    let (bill_number,): (i64,) = sqlx::query_as("SELECT nextval('bill_number_seq')")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO bills (patient_id, bill_number, bill_type, total_amount, net_amount, status) \
+         VALUES ($1, $2, 'ipd', 500, 500, 'unpaid')",
+    )
+    .bind(patient_id)
+    .bind(format!("INV-2026-{:06}", bill_number))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let err = discharge_patient_core(
+        &pool,
+        &doc,
+        DischargeIpd {
+            id: admission_id,
+            discharge_summary: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("unpaid bill"),
+        "unpaid bills must block discharge, got: {}",
+        err
+    );
+
+    // The blocked discharge changed NOTHING: admission still admitted,
+    // bed still occupied.
+    let (admission_status, bed_status): (String, String) = sqlx::query_as(
+        "SELECT a.status, b.status FROM ipd_admissions a JOIN beds b ON b.id = a.bed_id WHERE a.id = $1",
+    )
+    .bind(admission_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        admission_status, "admitted",
+        "the admission must stay active"
+    );
+    assert_eq!(bed_status, "occupied", "the bed must stay occupied");
 }
 
 // ── NS-4: Nurse note validation ────────────────────────────────────────────────

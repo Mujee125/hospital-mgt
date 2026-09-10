@@ -438,3 +438,112 @@ async fn test_soft_delete_excludes_from_inventory() {
         "Soft-deleted unit must not appear in available inventory"
     );
 }
+
+// ── RCTF-FULL-SYSTEM-2026-09-08 F-23: DB-level double-booking backstop ────────
+
+/// Two CONCURRENT same-slot inserts for one doctor: the EXCLUDE constraint
+/// (excl_appt_doctor_slot) must let exactly ONE through — the
+/// check-then-act race the app-level guard cannot close. Also pins the
+/// legit siblings: a different doctor at the same time, and the same
+/// doctor back-to-back, both pass.
+#[test]
+async fn rctf_f23_exclude_constraint_blocks_concurrent_double_book() {
+    let pool = setup_pool().await;
+
+    // A doctor and two patients.
+    let doc: (i32,) = sqlx::query_as(
+        "INSERT INTO doctors (first_name, last_name, phone, specialization, qualification) \
+         VALUES ('F23', 'Doc', '+92300f23d', 'GP', 'MBBS') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let doc2: (i32,) = sqlx::query_as(
+        "INSERT INTO doctors (first_name, last_name, phone, specialization, qualification) \
+         VALUES ('F23', 'Doc2', '+92300f23e', 'GP', 'MBBS') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let p1 = seed_patient(&pool, "O", "+").await;
+    let p2 = seed_patient(&pool, "O", "+").await;
+
+    // The racing inserts — same doctor, same slot, both 'scheduled'.
+    let insert = |doc_id: i32, pid: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                r#"INSERT INTO appointments
+                       (patient_id, doctor_id, appointment_date, appointment_time,
+                        duration_minutes, reason, status)
+                   VALUES ($1, $2, CURRENT_DATE + 1, '10:00', 30, 'F23 race', 'scheduled')"#,
+            )
+            .bind(pid)
+            .bind(doc_id)
+            .execute(&pool)
+            .await
+        }
+    };
+    let (r1, r2) = tokio::join!(insert(doc.0, p1), insert(doc.0, p2));
+
+    // EXACTLY one of the two must succeed; the loser gets 23P01.
+    let succeeded = r1.is_ok() as u8 + r2.is_ok() as u8;
+    assert_eq!(succeeded, 1, "exactly one racing insert may win");
+    for r in [r1, r2] {
+        if let Err(e) = r {
+            assert!(
+                e.to_string().contains("excl_appt_doctor_slot"),
+                "the loser must fail on the exclusion constraint, got: {}",
+                e
+            );
+        }
+    }
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM appointments \
+         WHERE doctor_id = $1 AND appointment_time = '10:00' AND status = 'scheduled'",
+    )
+    .bind(doc.0)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "one appointment row for the slot");
+
+    // Back-to-back on the same doctor passes (10:30–11:00 vs 10:00–10:30).
+    sqlx::query(
+        r#"INSERT INTO appointments
+               (patient_id, doctor_id, appointment_date, appointment_time,
+                duration_minutes, reason, status)
+           VALUES ($1, $2, CURRENT_DATE + 1, '10:30', 30, 'back-to-back', 'scheduled')"#,
+    )
+    .bind(p1)
+    .bind(doc.0)
+    .execute(&pool)
+    .await
+    .expect("back-to-back must not conflict");
+
+    // A DIFFERENT doctor at the exact same time passes.
+    sqlx::query(
+        r#"INSERT INTO appointments
+               (patient_id, doctor_id, appointment_date, appointment_time,
+                duration_minutes, reason, status)
+           VALUES ($1, $2, CURRENT_DATE + 1, '10:00', 30, 'other doctor', 'scheduled')"#,
+    )
+    .bind(p2)
+    .bind(doc2.0)
+    .execute(&pool)
+    .await
+    .expect("a different doctor at the same time must pass");
+
+    // A CANCELLED appointment at a conflicting time passes (exempt).
+    sqlx::query(
+        r#"INSERT INTO appointments
+               (patient_id, doctor_id, appointment_date, appointment_time,
+                duration_minutes, reason, status)
+           VALUES ($1, $2, CURRENT_DATE + 1, '10:15', 30, 'cancelled slot', 'cancelled')"#,
+    )
+    .bind(p1)
+    .bind(doc.0)
+    .execute(&pool)
+    .await
+    .expect("cancelled status is exempt from the exclusion");
+}

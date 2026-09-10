@@ -36,6 +36,15 @@ pub struct WhatsAppMessage {
     pub appointment_id: Option<i32>,
     /// Type label for the audit log e.g. "booked", "confirmed", "reminder"
     pub notification_type: String,
+    /// RCTF-FULL-SYSTEM-2026-09-08 F-05: the patient whose PHI this message
+    /// carries, when known. Consent is checked against THIS identity (primary
+    /// key), not the recipient phone — a 9-digit phone suffix can be shared
+    /// by two patients (family plans, number reuse), which previously
+    /// attributed patient A's message to patient B's consent record.
+    /// `None` only for sends where no patient is involved (group digest,
+    /// operator's own test phone, staff ad-hoc sends to non-patients) —
+    /// those fall back to the legacy suffix matching.
+    pub patient_id: Option<i32>,
 }
 
 // Re-export non-command helpers so the rest of the app keeps using

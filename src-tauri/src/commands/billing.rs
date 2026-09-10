@@ -164,6 +164,55 @@ pub async fn create_bill_core(
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
+    // RCTF-FULL-SYSTEM-2026-09-09 F-02: every optional linkage on the bill
+    // must belong to the SAME patient — a tampered/buggy client could
+    // otherwise attach another patient's encounter or IPD admission to
+    // this bill and corrupt settlement/IPD-billing reports downstream.
+    if let Some(enc_id) = bill.encounter_id {
+        let owner: Option<(i32,)> =
+            sqlx::query_as("SELECT patient_id FROM encounters WHERE id = $1")
+                .bind(enc_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| crate::db::sanitize_db_error(&e))?;
+        match owner {
+            Some((pid,)) if pid == bill.patient_id => {}
+            Some((pid,)) => {
+                tx.rollback().await.ok();
+                return Err(format!(
+                    "Encounter #{} belongs to a different patient (patient #{}, not #{}). The bill was not created.",
+                    enc_id, pid, bill.patient_id
+                ));
+            }
+            None => {
+                tx.rollback().await.ok();
+                return Err(format!("Encounter #{} does not exist.", enc_id));
+            }
+        }
+    }
+    if let Some(adm_id) = bill.ipd_admission_id {
+        let owner: Option<(i32,)> =
+            sqlx::query_as("SELECT patient_id FROM ipd_admissions WHERE id = $1")
+                .bind(adm_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| crate::db::sanitize_db_error(&e))?;
+        match owner {
+            Some((pid,)) if pid == bill.patient_id => {}
+            Some((pid,)) => {
+                tx.rollback().await.ok();
+                return Err(format!(
+                    "IPD admission #{} belongs to a different patient (patient #{}, not #{}). The bill was not created.",
+                    adm_id, pid, bill.patient_id
+                ));
+            }
+            None => {
+                tx.rollback().await.ok();
+                return Err(format!("IPD admission #{} does not exist.", adm_id));
+            }
+        }
+    }
+
     // Sequential, immutable invoice number from the SEQUENCE — assigned
     // inside the same transaction as the INSERT (Phase 6.3; replaces the
     // COUNT(*)+1 pattern that raced under concurrent creation).
@@ -227,7 +276,18 @@ pub async fn record_payment(
     session: tauri::State<'_, SessionState>,
     payment: CreatePayment,
 ) -> Result<i32, String> {
-    let s = rbac::require_strong(&session, pool.inner(), Permission::PaymentsManage).await?;
+    record_payment_core(pool.inner(), &session, payment).await
+}
+
+/// Payment-recording logic core (AERP Part G extraction pattern): guard +
+/// IPC-07 amount validation + F-07 idempotency/overpay guards + INSERT +
+/// roll-up + audit, callable without a Tauri AppHandle (billing_tests.rs).
+pub async fn record_payment_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    payment: CreatePayment,
+) -> Result<i32, String> {
+    let s = rbac::require_strong(session_state, pool, Permission::PaymentsManage).await?;
     // IPC-07: validate the payment amount BEFORE any DB work. The previous
     // check `payment.amount <= 0.0` rejected negatives and zero but let
     // `NaN` and `Infinity` through:
@@ -262,6 +322,63 @@ pub async fn record_payment(
         return Err("This bill is cancelled — payments are closed on it.".to_string());
     }
 
+    // RCTF-FULL-SYSTEM-2026-09-09 F-07 (1/2): idempotent payment posting.
+    // The same non-empty reference on the same bill must not be posted twice
+    // — a double-click or an IPC retry after a hung call previously created
+    // a second payment row (a real double charge; the bill-row lock above
+    // merely serialized both into existence). The lock also makes this
+    // check race-safe; the partial unique index uq_payments_bill_reference
+    // (db.rs) is the DB-level backstop. Advance-method rows are exempt —
+    // `apply_advance` legitimately posts multiple partial applications of
+    // the same advance to one bill.
+    let reference = payment
+        .reference_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    if let Some(reference) = reference {
+        let dup: Option<(i32,)> = sqlx::query_as(
+            "SELECT id FROM payments \
+             WHERE bill_id = $1 AND reference_number = $2 AND payment_method <> 'advance'",
+        )
+        .bind(payment.bill_id)
+        .bind(reference)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+        if dup.is_some() {
+            return Err(format!(
+                "A payment with reference '{}' was already posted on this bill — this looks like a duplicate posting. \
+                 If this is genuinely a NEW payment, clear or change the reference field.",
+                reference
+            ));
+        }
+    }
+
+    // RCTF-FULL-SYSTEM-2026-09-09 F-07 (2/2): overpay guard. A payment can
+    // never exceed the bill's outstanding balance (net − payments + refunds).
+    // Excess cash handed over at the counter must be recorded as a patient
+    // advance (record_advance), not as an overpayment that silently
+    // inflates collections. Computed inside the lock so two clerks cannot
+    // both consume the same outstanding balance.
+    let outstanding: (Decimal,) = sqlx::query_as(
+        "SELECT b.net_amount \
+              - COALESCE((SELECT SUM(amount) FROM payments  WHERE bill_id = b.id), 0) \
+              + COALESCE((SELECT SUM(amount) FROM refunds WHERE bill_id = b.id), 0) \
+           FROM bills b WHERE b.id = $1",
+    )
+    .bind(payment.bill_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    if dec(payment.amount) > outstanding.0 {
+        return Err(format!(
+            "Payment of {} exceeds the outstanding balance ({}). Record the excess as a patient advance instead.",
+            dec(payment.amount),
+            outstanding.0
+        ));
+    }
+
     let row: (i32,) = sqlx::query_as(
         r#"INSERT INTO payments (bill_id, amount, payment_method, reference_number, received_by_user_id)
            VALUES ($1,$2,$3,$4,$5) RETURNING id"#,
@@ -269,7 +386,7 @@ pub async fn record_payment(
     .bind(payment.bill_id)
     .bind(dec(payment.amount))
     .bind(payment.payment_method.as_deref().unwrap_or("cash"))
-    .bind(&payment.reference_number)
+    .bind(reference)
     .bind(s.user_id)
     .fetch_one(&mut *tx)
     .await
@@ -295,7 +412,7 @@ pub async fn record_payment(
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(
-        pool.inner(),
+        pool,
         &s,
         "payment_record",
         "payments",

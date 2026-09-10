@@ -93,12 +93,47 @@ pub async fn send_whatsapp_to_patient(
     // `send_to_patient_checks` (pure DB + string logic, no AppHandle)
     // so they are directly testable (WP1-P02).
     send_to_patient_checks(pool.inner(), &phone, &message).await?;
+    // RCTF-FULL-SYSTEM-2026-09-09 F-03: `automation::send_whatsapp` exempts
+    // `notification_type == "test"` from the patient-consent gate (the
+    // Settings connectivity test goes to the operator's own phone). This
+    // command's recipient is a registered patient, so a caller-supplied
+    // "test" label would skip consent for a patient-directed send — the
+    // same exemption `send_whatsapp_notification` already refuses (H8).
+    // Only the dedicated `send_whatsapp_test` command may carry the label.
+    let notification_type = notification_type.unwrap_or_else(|| "custom".to_string());
+    if notification_type == "test" {
+        return Err(
+            "Test sends must use the WhatsApp test in Settings (this command requires patient consent).".to_string(),
+        );
+    }
+    // RCTF F-05: resolve the patient by phone here (IPC-09 already proves the
+    // number belongs to a registered patient) and pass the IDENTITY to the
+    // consent gate — the 9-digit suffix lookup can mis-attribute consent
+    // between two patients sharing a suffix; the primary key cannot.
+    let clinic_default_cc: Option<String> = std::env::var("HMS_DEFAULT_CC").ok();
+    let normalized =
+        automation::normalize_phone(&phone, clinic_default_cc.as_deref()).unwrap_or_default();
+    let digits: String = normalized.chars().filter(|c| c.is_ascii_digit()).collect();
+    let suffix_len = digits.len().min(9);
+    let suffix = &digits[digits.len().saturating_sub(suffix_len)..];
+    let patient: Option<(i32,)> = if suffix.is_empty() {
+        None
+    } else {
+        sqlx::query_as(
+            "SELECT id FROM patients WHERE phone LIKE $1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 1",
+        )
+        .bind(format!("%{}", suffix))
+        .fetch_optional(pool.inner())
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?
+    };
     let msg = WhatsAppMessage {
         recipient: phone,
         message,
         is_group: false,
         appointment_id: None,
-        notification_type: notification_type.unwrap_or_else(|| "custom".to_string()),
+        notification_type,
+        patient_id: patient.map(|(id,)| id),
     };
     let result = automation::send_whatsapp(&app_handle, pool.inner(), msg.clone()).await;
     crate::audit::for_session(
@@ -193,6 +228,8 @@ pub async fn send_whatsapp_test(
         is_group: false,
         appointment_id: None,
         notification_type: "test".to_string(),
+        // The operator's own phone — no patient identity involved.
+        patient_id: None,
     };
     automation::send_whatsapp(&app_handle, pool.inner(), msg).await?;
     Ok("WhatsApp message sent successfully.".to_string())
@@ -309,6 +346,15 @@ pub async fn set_whatsapp_config(
         access_token
     };
 
+    // RCTF-FULL-SYSTEM-2026-09-08 F-11: the access token is a live Meta
+    // API credential — previously stored as PLAINTEXT in the DB (and thus
+    // in every unencrypted backup dump). It is now DPAPI-encrypted with
+    // the per-install entropy key (same envelope as config.json v3) and
+    // prefixed `encv1:`. Rows without the prefix are legacy plaintext and
+    // still load (read-side tolerance below); they re-encrypt on the next
+    // save through this path.
+    let token_to_save = automation::encrypt_token_for_storage(&token_to_save)?;
+
     // CR-9: pin id=1 on INSERT so ON CONFLICT (id) actually fires and upserts
     // the singleton row. Without the explicit id, SERIAL would allocate a new
     // id each call and the conflict would never trigger (the original bug).
@@ -356,7 +402,7 @@ pub async fn test_whatsapp_api(
 ) -> Result<String, String> {
     // CR-4: require SettingsManage — testing the API sends a real WhatsApp
     // message using stored credentials; restrict to admins.
-    let _ = rbac::require_strong(
+    let s = rbac::require_strong(
         &session_state,
         pool.inner(),
         rbac::Permission::SettingsManage,
@@ -370,5 +416,20 @@ pub async fn test_whatsapp_api(
     let phone = automation::normalize_phone(&test_phone, None)?;
     let message = "✅ WhatsApp Business API test from VitalFlow HMS. If you received this, your API integration is working correctly!";
     automation::send_via_business_api(&config, &phone, message).await?;
+
+    // RCTF-FULL-SYSTEM-2026-09-08 F-12: an external WhatsApp send with
+    // neither an audit row nor a whatsapp_notifications row was invisible —
+    // now every test send is audited (the operator's own phone is the
+    // destination, but it is still outbound traffic via the API token).
+    crate::audit::for_session(
+        pool.inner(),
+        &s,
+        "whatsapp_test_send",
+        "whatsapp",
+        None,
+        Some(serde_json::json!({"test_phone": phone})),
+    )
+    .await;
+
     Ok("Test message sent via Business API. Check the recipient's WhatsApp.".to_string())
 }

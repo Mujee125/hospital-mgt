@@ -39,11 +39,14 @@ use tokio_rustls::TlsAcceptor;
 
 pub const PAIRING_PORT: u16 = 42011;
 const CODE_TTL_SECS: u64 = 600; // 10 minutes
-                                // SEC-03: a pairing code is intended for ONE client. Allowing 10 different
-                                // machines to consume the same code turns a leaked code into 10 leaked
-                                // credential sets. 3 is the safe ceiling (operator retries + minor typo
-                                // attempts) without enabling mass credential leakage.
-const MAX_USES: u32 = 3;
+                                // SEC-03 + RCTF-FULL-SYSTEM-2026-09-08 F-10: a pairing code is intended for
+                                // ONE client, and redeeming it hands over full DB credentials — so the code
+                                // itself is SINGLE-USE. The original 3-use ceiling (operator retries) is
+                                // superseded: a failed attempt on the SERVER side does not consume the code
+                                // unless the code actually matched (consume happens only on match), so the
+                                // legitimate "typo retry" case is covered by the consume-on-match rule,
+                                // and a matched redemption must never be replayable by a second machine.
+const MAX_USES: u32 = 1;
 const MAX_LINE_BYTES: usize = 4096;
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -80,6 +83,13 @@ struct PairingResponse {
     /// Server's own TLS cert PEM — sent over the encrypted channel so the
     /// client can pin it for the subsequent Postgres SSL connection.
     server_cert_pem: String,
+    /// RCTF-FULL-SYSTEM-2026-09-08 F-19: hex of the per-install broadcast
+    /// secret. Delivered ONLY over this TLS pairing channel (the same
+    /// out-of-band path as the DB credentials) so the client can verify
+    /// HMS_SERVER_V2 broadcasts — whose key, unlike the TLS fingerprint,
+    /// is never published anywhere. Empty string = server does not
+    /// support V2 (old build); the client falls back to V1.
+    broadcast_secret_hex: String,
 }
 
 #[cfg(feature = "server-build")]
@@ -424,12 +434,20 @@ async fn handle_connection(
         }
     }
 
+    // F-19: include the per-install broadcast secret (hex) so the pairing
+    // client can verify V2 broadcasts. Empty when unavailable → the
+    // client keeps V1 behavior.
+    let broadcast_secret_hex = crate::config::AppConfig::load_or_create_broadcast_secret()
+        .map(hex::encode)
+        .unwrap_or_default();
+
     let response = PairingResponse {
         db_user: creds.db_user,
         db_password: creds.db_password,
         db_name: creds.db_name,
         db_port: creds.db_port,
         server_cert_pem,
+        broadcast_secret_hex,
     };
     let _ = write_json_line(&mut tls_stream, &response).await;
     let _ = tls_stream.shutdown().await;
@@ -452,7 +470,7 @@ where
 pub async fn redeem_code(
     server_ip: &str,
     code: &str,
-) -> Result<(String, String, String, u16, String, String), String> {
+) -> Result<(String, String, String, u16, String, String, String), String> {
     let addr = format!("{}:{}", server_ip, PAIRING_PORT);
     let tcp_stream = tokio::time::timeout(CONNECTION_DEADLINE, TcpStream::connect(&addr))
         .await
@@ -539,6 +557,7 @@ pub async fn redeem_code(
         response.db_port,
         response.server_cert_pem,
         fingerprint,
+        response.broadcast_secret_hex,
     ))
 }
 
@@ -548,11 +567,36 @@ fn rustls_pki_types_server_name() -> rustls::pki_types::ServerName<'static> {
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
+/// RCTF-FULL-SYSTEM-2026-09-08 F-10: minting a pairing code ISSUES full DB
+/// credentials to whoever redeems it — the command was webview-reachable
+/// with NO guard and NO audit row (any code running in the webview, or a
+/// curious staff user via devtools, could pair an arbitrary machine). Now:
+/// requires a signed-in SettingsManage session, and every issue is audited.
+/// Single-use: MAX_USES is 1 below (see the F-10 note there) — one code
+/// pairs exactly one client.
 #[tauri::command]
 pub async fn generate_pairing_code(
+    pool: tauri::State<'_, sqlx::PgPool>,
+    session_state: tauri::State<'_, crate::rbac::SessionState>,
     service: tauri::State<'_, PairingService>,
 ) -> Result<String, String> {
-    Ok(service.generate_code())
+    let s = crate::rbac::require_strong(
+        &session_state,
+        pool.inner(),
+        crate::rbac::Permission::SettingsManage,
+    )
+    .await?;
+    let code = service.generate_code();
+    crate::audit::for_session(
+        pool.inner(),
+        &s,
+        "pairing_code_generate",
+        "pairing",
+        None,
+        Some(serde_json::json!({"code_ttl_secs": CODE_TTL_SECS})),
+    )
+    .await;
+    Ok(code)
 }
 
 #[tauri::command]
@@ -598,8 +642,15 @@ pub async fn redeem_pairing_code(
         crate::rbac::ConfigMutationGrant::Authorized(_) => { /* admin re-pairing */ }
     }
 
-    let (db_user, db_password, db_name, db_port, server_cert_pem, fingerprint) =
-        redeem_code(&server_ip, &code).await?;
+    let (
+        db_user,
+        db_password,
+        db_name,
+        db_port,
+        server_cert_pem,
+        fingerprint,
+        broadcast_secret_hex,
+    ) = redeem_code(&server_ip, &code).await?;
 
     // ── Persist credentials + pin atomically ─────────────────────────────
     // We always start from the loaded config (or default) and overwrite only
@@ -614,6 +665,9 @@ pub async fn redeem_pairing_code(
     cfg.db_name = db_name.clone();
     cfg.pinned_server_cert_pem = server_cert_pem;
     cfg.pinned_server_fingerprint = fingerprint.clone();
+    // F-19: pin the broadcast secret for V2 broadcast verification (empty
+    // when the server is an older build — the client keeps V1).
+    cfg.pinned_broadcast_secret_hex = broadcast_secret_hex;
     // setup_complete is set to TRUE only after verify_pairing succeeds,
     // so that a partially-completed pairing (credentials saved but DB
     // unreachable) doesn't leave the client in a broken "setup complete"
@@ -685,7 +739,7 @@ pub async fn verify_pairing(
 
     // Attempt a real DB connection. Uses the same code path as normal
     // startup so if this works, startup will work too.
-    crate::db::initialize(
+    let pool = crate::db::initialize(
         &cfg.db_host,
         cfg.db_port,
         &cfg.db_user,
@@ -709,9 +763,29 @@ pub async fn verify_pairing(
                 e, hint
             )
         }
-    })?
-    .close()
-    .await; // close immediately — initialize_database will open the real pool
+    })?;
+
+    // RCTF-FULL-SYSTEM-2026-09-08 F-12: pairing redirects a client and
+    // replaces its pinned cert — it is a security-relevant configuration
+    // event and must leave a trace. The just-verified pool is the hospital
+    // DB, so the row lands in the SAME audit trail as every other control
+    // event (best-effort: a failed audit write must not block setup).
+    let _ = sqlx::query(
+        r#"INSERT INTO audit_logs (user_id, username, action, resource, resource_id, details)
+           VALUES (NULL, $1, 'pairing_completed', 'pairing', $2, $3)"#,
+    )
+    .bind(std::env::var("COMPUTERNAME").unwrap_or_else(|_| "unknown-client".into()))
+    .bind(format!("{}:{}", cfg.db_host, cfg.db_port))
+    .bind(serde_json::json!({
+        "db_user": cfg.db_user,
+        "db_name": cfg.db_name,
+        "pinned_fingerprint": cfg.pinned_server_fingerprint,
+    }))
+    .execute(&pool)
+    .await
+    .inspect_err(|e| eprintln!("[HMS Pairing] audit row failed (non-fatal): {}", e));
+
+    pool.close().await; // close immediately — initialize_database will open the real pool
 
     // ── Mark setup complete ───────────────────────────────────────────────
     // Only written here, after a successful DB connection, so that a

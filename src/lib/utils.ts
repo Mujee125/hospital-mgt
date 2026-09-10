@@ -44,3 +44,50 @@ export function formatMoney(amount: number | string | null | undefined): string 
  * "currency" verb (e.g. `formatCurrency(revenueToday)`).
  */
 export const formatCurrency = formatMoney;
+
+// ── Patient-identity helpers (RCTF-FULL-SYSTEM-2026-09-09 F-02) ──────────
+//
+// Wrong-patient selection is the classic clinical error mode: two
+// homonymous relatives sharing a family phone were indistinguishable in
+// every patient picker. Every picker and patient-facing action surface must
+// render a SECOND identifier (MRN) plus the date of birth alongside the
+// name, per the two-identifier patient-safety convention.
+
+/** Human label for a patient: "MRN-SYN-000001" or "no MRN". */
+export function patientMrn(mrn: string | null | undefined): string {
+  const trimmed = (mrn ?? "").trim();
+  return trimmed.length > 0 ? trimmed : "no MRN";
+}
+
+/** YYYY-MM-DD → "12 May 1990" (or the raw string if unparsable). */
+export function formatDob(dob: string | null | undefined): string {
+  if (!dob) return "DOB unknown";
+  const d = new Date(dob);
+  if (isNaN(d.getTime())) return dob;
+  return d.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+/**
+ * One-line patient descriptor for pickers and action dialogs:
+ * "Ali Raza · MRN MRN-000123 · DOB 12 May 1990 · 03001234567".
+ * MRN and DOB are the two-identifier guard; phone stays for lookup
+ * convenience.
+ */
+export function patientDescriptor(p: {
+  first_name: string;
+  last_name: string;
+  mrn?: string | null;
+  date_of_birth?: string | null;
+  phone: string;
+}): string {
+  const mrn = (p.mrn ?? "").trim();
+  const idPart = mrn ? `MRN ${mrn}` : "no MRN";
+  const dobPart = p.date_of_birth ? `DOB ${formatDob(p.date_of_birth)}` : "";
+  return [`${p.first_name} ${p.last_name}`, idPart, dobPart, p.phone]
+    .filter(Boolean)
+    .join(" · ");
+}

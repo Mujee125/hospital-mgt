@@ -1881,14 +1881,23 @@ export function useCreatePrescription() {
 export function useDispensePrescriptionItem() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (prescriptionItemId: number) =>
+    // RCTF F-16: nonStockAck performs an acknowledged non-stock dispense —
+    // the backend refuses to dispense an item with no inventory match
+    // unless the user has explicitly confirmed it (previously the item
+    // was marked dispensed with a silent zero deduction).
+    mutationFn: (vars: { prescriptionItemId: number; nonStockAck?: boolean }) =>
       invoke<void>("dispense_prescription_item", {
-        prescriptionItemId,
+        prescriptionItemId: vars.prescriptionItemId,
+        nonStockAck: vars.nonStockAck ?? false,
       }),
-    onSuccess: () => {
+    onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ["pharmacy"] });
       qc.invalidateQueries({ queryKey: ["inventory"] });
-      toast.success("Item dispensed. Inventory updated.");
+      toast.success(
+        vars.nonStockAck
+          ? "Item dispensed (non-stock, no deduction)."
+          : "Item dispensed. Inventory updated.",
+      );
     },
     onError: (err) => toast.error(`Failed to dispense: ${err}`),
   });

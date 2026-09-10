@@ -21,13 +21,14 @@ import {
 } from "@/lib/queries";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
-import { PageContainer, PageHeader, SectionCard, EmptyState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
+import { patientDescriptor } from "@/lib/utils";
+import { PageContainer, PageHeader, SectionCard, EmptyState, ErrorState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
 
 export function IPD() {
   const { has } = useAuth();
   const { data: wards = [] } = useWards();
   const { data: beds = [] } = useBeds();
-  const { data: admissions = [], isLoading } = useAdmissions();
+  const { data: admissions = [], isLoading, isError, refetch, isFetching } = useAdmissions();
   const { data: patients = [] } = usePatientsEhr();
   const { data: doctors = [] } = useDoctors();
   const admit = useAdmitPatient();
@@ -207,6 +208,8 @@ export function IPD() {
       <SectionCard icon={BedDouble} title="Current admissions">
         {isLoading ? (
           <LoadingState rows={5} />
+        ) : isError ? (
+          <ErrorState onRetry={() => void refetch()} retrying={isFetching} />
         ) : admissions.length === 0 ? (
           <EmptyState icon={BedDouble} title="No admissions recorded" description="Admitted patients will appear here." />
         ) : (
@@ -285,7 +288,7 @@ export function IPD() {
                 <SelectContent>
                   {patients.map((p) => (
                     <SelectItem key={p.id} value={p.id.toString()}>
-                      {p.first_name} {p.last_name} · {p.phone}
+                      {patientDescriptor(p)}
                     </SelectItem>
                   ))}
                 </SelectContent>

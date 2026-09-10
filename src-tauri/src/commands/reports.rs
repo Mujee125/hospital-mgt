@@ -41,6 +41,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
+use crate::audit;
 use crate::rbac::{self, Permission, SessionState};
 
 // ── Return-shape structs ─────────────────────────────────────────────────────
@@ -1939,8 +1940,22 @@ pub async fn export_report_csv(
     report_type: String,
     params: String,
 ) -> Result<String, String> {
-    let _ = rbac::require(&session, Permission::ReportsView)?;
+    let s = rbac::require(&session, Permission::ReportsView)?;
     let pool = pool.inner();
+
+    // RCTF-FULL-SYSTEM-2026-09-08 F-12: a CSV export is bulk PHI/revenue
+    // egress — audit.rs's own doc names "explicit PHI exports" as THE
+    // auditable events, yet this command wrote no row. Every export is
+    // now recorded (type + params; the row-count is added on success).
+    audit::for_session(
+        pool,
+        &s,
+        "report_export",
+        "reports",
+        Some(&report_type),
+        Some(serde_json::json!({"params": params})),
+    )
+    .await;
 
     // Parse the params JSON. We accept a loose `serde_json::Value` and
     // extract the fields we need per report_type — this avoids defining a

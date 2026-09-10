@@ -162,6 +162,17 @@ pub async fn update_inventory_item(
     item: UpdateInventoryItem,
 ) -> Result<(), String> {
     let s = rbac::require(&session, Permission::InventoryManage)?;
+    update_inventory_item_core(pool.inner(), &s, id, item).await
+}
+
+/// Item-edit core (AERP Part G extraction pattern). See the F-17 notes
+/// in the body for the movement-recording contract.
+pub async fn update_inventory_item_core(
+    pool: &PgPool,
+    s: &crate::rbac::Session,
+    id: i32,
+    item: UpdateInventoryItem,
+) -> Result<(), String> {
     if id != item.id {
         return Err("Path id does not match body id.".to_string());
     }
@@ -169,6 +180,34 @@ pub async fn update_inventory_item(
         return Err("Item name is required.".to_string());
     }
     let expiry = parse_date(&item.expiry_date)?;
+
+    // RCTF-FULL-SYSTEM-2026-09-08 F-17: the update previously rewrote
+    // stock_quantity directly — bypassing the module's own invariant
+    // ("every adjustment is recorded in inventory_movements"), allowing
+    // negative stock (unlike adjust_inventory), and racing
+    // adjust_inventory's FOR UPDATE (lost update). The row is now locked
+    // inside a transaction; a quantity CHANGE is written as a
+    // 'correction' movement row so the trail can never drift from the
+    // balance; and a negative resulting balance is refused.
+    let mut tx = pool.begin().await.map_err(|e| format!("Begin tx: {}", e))?;
+
+    let current: Option<(Decimal,)> =
+        sqlx::query_as("SELECT stock_quantity FROM inventory_items WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| format!("Lock inventory item: {}", e))?;
+    let current_balance = current
+        .ok_or_else(|| format!("Inventory item {} not found.", id))?
+        .0;
+
+    let new_qty = dec(item.stock_quantity);
+    if new_qty < Decimal::ZERO {
+        return Err(format!(
+            "Stock quantity cannot be negative (got {}). Use Adjust Stock or correct the value.",
+            new_qty
+        ));
+    }
 
     sqlx::query(
         r#"UPDATE inventory_items SET
@@ -182,24 +221,50 @@ pub async fn update_inventory_item(
     .bind(&item.sku)
     .bind(&item.category)
     .bind(&item.unit)
-    .bind(dec(item.stock_quantity))
+    .bind(new_qty)
     .bind(dec(item.reorder_level))
     .bind(expiry)
     .bind(&item.batch_number)
     .bind(dec(item.unit_cost))
     .bind(item.is_active)
     .bind(id)
-    .execute(pool.inner())
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("Update inventory item: {}", e))?;
 
+    // A quantity change through the EDIT path is a stock correction —
+    // record it as a movement so the audit trail stays complete (the
+    // module's own invariant, previously bypassed by this command).
+    if new_qty != current_balance {
+        let delta = new_qty - current_balance;
+        sqlx::query(
+            r#"INSERT INTO inventory_movements
+                  (item_id, quantity_change, reason, balance_after, created_by_user_id, notes)
+               VALUES ($1, $2, 'correction', $3, $4, 'Stock corrected via item edit')"#,
+        )
+        .bind(id)
+        .bind(delta)
+        .bind(new_qty)
+        .bind(s.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Record correction movement: {}", e))?;
+    }
+
+    tx.commit().await.map_err(|e| format!("Commit: {}", e))?;
+
     audit::for_session(
-        pool.inner(),
-        &s,
+        pool,
+        s,
         "inventory_item_update",
         "inventory_items",
         Some(&id.to_string()),
-        Some(serde_json::json!({"name": item.name, "is_active": item.is_active})),
+        Some(serde_json::json!({
+            "name": item.name,
+            "is_active": item.is_active,
+            "stock_before": current_balance.to_string(),
+            "stock_after": new_qty.to_string()
+        })),
     )
     .await;
     Ok(())

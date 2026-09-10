@@ -672,3 +672,194 @@ async fn test_bl6_claim_state_machine_and_uniqueness() {
         err
     );
 }
+
+// ── RCTF-FULL-SYSTEM-2026-09-09 F-02/F-07: linkage + payment guards ──────────
+
+/// Seed an encounter row for a patient (mirrors create_encounter's INSERT
+/// shape without the RBAC layer).
+async fn seed_encounter(pool: &PgPool, patient_id: i32) -> i32 {
+    let row: (i32,) = sqlx::query_as(
+        "INSERT INTO encounters (patient_id, visit_type, chief_complaint) \
+         VALUES ($1, 'opd', 'RCTF fixture') RETURNING id",
+    )
+    .bind(patient_id)
+    .fetch_one(pool)
+    .await
+    .expect("seed encounter");
+    row.0
+}
+
+/// RCTF-F02-1 — a bill whose encounter belongs to a DIFFERENT patient is
+/// rejected; the linkage to the correct patient's encounter still works.
+#[tokio::test]
+async fn rctf_f02_bill_encounter_patient_mismatch_refused() {
+    let pool = test_pool().await;
+    let pw = fixture_pw();
+    let clerk_id = seed_user(&pool, "f02_clerk", &pw, &["billing_clerk"]).await;
+    seed_session_row(&pool, clerk_id, "hash_f02_clerk").await;
+    let clerk = state_for(&pool, clerk_id, "hash_f02_clerk").await;
+
+    let patient_a = seed_patient_with_phone(&pool, "Ann", "Right", "+92300f02a").await;
+    let patient_b = seed_patient_with_phone(&pool, "Bob", "Wrong", "+92300f02b").await;
+    let enc_b = seed_encounter(&pool, patient_b).await;
+
+    // Encounter of patient B attached to patient A's bill → refused.
+    let mut bad = bill_for(patient_a, 1.0, 100.0, 0.0);
+    bad.encounter_id = Some(enc_b);
+    let err = create_bill_core(&pool, &clerk, bad, false)
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("belongs to a different patient"),
+        "mismatched encounter must be refused, got: {}",
+        err
+    );
+
+    // Nonexistent encounter → refused with the not-exist message.
+    let mut ghost = bill_for(patient_a, 1.0, 100.0, 0.0);
+    ghost.encounter_id = Some(9_999_999);
+    let err = create_bill_core(&pool, &clerk, ghost, false)
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("does not exist"),
+        "ghost encounter must be refused, got: {}",
+        err
+    );
+
+    // Own encounter → bill created (no rows leaked from the refusals above).
+    let enc_a = seed_encounter(&pool, patient_a).await;
+    let mut good = bill_for(patient_a, 1.0, 100.0, 0.0);
+    good.encounter_id = Some(enc_a);
+    let bill_id = create_bill_core(&pool, &clerk, good, false)
+        .await
+        .expect("own-patient encounter is valid");
+    let (enc, pid): (Option<i32>, i32) =
+        sqlx::query_as("SELECT encounter_id, patient_id FROM bills WHERE id = $1")
+            .bind(bill_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(enc, Some(enc_a));
+    assert_eq!(pid, patient_a);
+}
+
+/// RCTF-F07-1 — duplicate payment reference on the same bill is refused
+/// (the double-click / IPC-retry double charge), and the overpay guard
+/// caps a payment at the outstanding balance. A full happy path (pay to
+/// exactly the balance, then a second payment of any size is refused).
+#[tokio::test]
+async fn rctf_f07_payment_idempotency_and_overpay_guard() {
+    use hospital_mgmt_lib::commands::billing::record_payment_core;
+    use hospital_mgmt_lib::models::CreatePayment;
+
+    let pool = test_pool().await;
+    let pw = fixture_pw();
+    let clerk_id = seed_user(&pool, "f07_clerk", &pw, &["billing_clerk"]).await;
+    seed_session_row(&pool, clerk_id, "hash_f07_clerk").await;
+    let clerk = state_for(&pool, clerk_id, "hash_f07_clerk").await;
+
+    let patient_id = seed_patient_with_phone(&pool, "Pay", "Guard", "+92300f07a").await;
+    let bill_id = create_bill_core(&pool, &clerk, bill_for(patient_id, 1.0, 100.0, 0.0), false)
+        .await
+        .expect("bill");
+
+    // First payment with a reference: succeeds.
+    record_payment_core(
+        &pool,
+        &clerk,
+        CreatePayment {
+            bill_id,
+            amount: 40.0,
+            payment_method: Some("card".into()),
+            reference_number: Some("RCTF-F07-REF".into()),
+        },
+    )
+    .await
+    .expect("first payment with reference");
+
+    // Same reference again (double-click shape): refused.
+    let err = record_payment_core(
+        &pool,
+        &clerk,
+        CreatePayment {
+            bill_id,
+            amount: 40.0,
+            payment_method: Some("card".into()),
+            reference_number: Some("RCTF-F07-REF".into()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("already posted"),
+        "duplicate reference must be refused, got: {}",
+        err
+    );
+    // And the DB backstop: only one payment row exists for the bill so far.
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM payments WHERE bill_id = $1")
+        .bind(bill_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "no duplicate row may be created");
+
+    // Overpay: 40 paid of 100 → a 61 payment must be refused.
+    let err = record_payment_core(
+        &pool,
+        &clerk,
+        CreatePayment {
+            bill_id,
+            amount: 61.0,
+            payment_method: Some("cash".into()),
+            reference_number: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("exceeds the outstanding balance"),
+        "overpay must be refused, got: {}",
+        err
+    );
+
+    // Exact outstanding (60) is fine — pays the bill in full.
+    record_payment_core(
+        &pool,
+        &clerk,
+        CreatePayment {
+            bill_id,
+            amount: 60.0,
+            payment_method: Some("cash".into()),
+            reference_number: None,
+        },
+    )
+    .await
+    .expect("exact balance payment");
+
+    // After full payment, ANY further payment exceeds the (now zero)
+    // outstanding balance — the bill can no longer absorb money.
+    let err = record_payment_core(
+        &pool,
+        &clerk,
+        CreatePayment {
+            bill_id,
+            amount: 1.0,
+            payment_method: Some("cash".into()),
+            reference_number: Some("RCTF-F07-AFTER".into()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("exceeds the outstanding balance"),
+        "paid-in-full bill must refuse more money, got: {}",
+        err
+    );
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM payments WHERE bill_id = $1")
+        .bind(bill_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 2, "exactly the two legitimate payments exist");
+}

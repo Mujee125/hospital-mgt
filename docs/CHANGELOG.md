@@ -1,8 +1,75 @@
-Token issue skipped $4 (Postgres counted 6 params, sqlx bound 5); call-next used bare FOR UPDATE over LEFT JOINs which Postgres rejects. Fixed with $4/$5 renumbering and FOR UPDATE OF q at all 8 lock sites. Adds queue_tests suite (4 tests) covering issue/numbering/uniqueness, priority + atomic call-next, department scoping, and RBAC - the module previously had zero coverage. 277 Rust tests, all gates green."# Changelog — VitalFlow HMS
+# Changelog — VitalFlow HMS
 
 All notable changes to the VitalFlow Hospital Management System are documented here. Dates are in Asia/Karachi timezone (UTC+5).
 
 This changelog is the canonical entry point for understanding what changed between releases. For full engineering detail, see the per-batch entries in `worklog.md` (project root). For per-document revision detail, see the "Revision history" subsection at the top of each document in `/docs`.
+
+---
+
+## v0.4.0 — 2026-09-09 (RCTF remediation complete: all 24 findings closed)
+
+Closes the remaining 18 findings of the full-system RCTF assessment (documentation/RCTF-FULL-SYSTEM-2026-09-08.md). Together with v0.3.2 (the 80/20 six), **every one of the 24 findings now has its fix in the code**. Test suite: 420 Rust tests (133 unit + 287 integration across 18 binaries, incl. the new pharmacy_tests suite) + 119 frontend tests; all gates (cargo fmt/clippy, tsc, eslint, vitest) green.
+
+### Privacy / consent
+- **Consent by identity, not phone (F-05):** WhatsApp consent is now checked against the patient's primary key wherever the caller knows it (reminders, appointment events, patient sends) — two patients sharing a 9-digit phone suffix can no longer have consent attributed to the wrong record. The suffix fallback survives only for manual ad-hoc sends.
+- **Consent-aware daily digest (F-04):** patients who have not granted WhatsApp consent appear as initials only ("10:00 A.R. — Dr. Khan") in the doctors' group digest; consented patients keep full names.
+- **Minimum-necessary lab alerts (F-20):** critical values notify the ordering physician directly (full detail) plus a de-identified doctor-role broadcast (test + order number, deep link); releases go only to the ordering user. A deleted ordering account never degrades into an everyone-broadcast.
+
+### Clinical integrity
+- **MAR double-administration guard (F-14):** a second 'administered' entry within 15 minutes for the same admission+item is refused ("verify with the other nurse"); inactive prescriptions can't be administered; all checks inside one locked transaction.
+- **Atomic discharge (F-15):** status check, unpaid-bills guard, conditional discharge UPDATE, and bed-free run in one transaction with the admission row locked — no more double-discharge or leave-with-unpaid-bill races.
+- **Catalog-identity stock matching (F-16):** dispensing matches inventory via the medication catalog (brand/generic) before the free-text name; a no-match dispense is REFUSED unless the pharmacist explicitly confirms a non-stock dispense (recorded as non-stock in the audit trail). Previously it silently dispensed with zero deduction.
+- **Inventory edit integrity (F-17):** stock changes through the edit path lock the row, refuse negative quantities, and write a 'correction' movement row — the audit trail can no longer drift from the balance.
+- **Sample-first lab workflow (F-18):** results cannot be entered before the sample is collected; amendments preserve the ORIGINAL completer's identity instead of overwriting it with the amender's; result + order-status updates are atomic.
+- **Vitals plausibility (F-22):** hard physiological ranges at the backend (temp 30–43 °C, systolic 50–260, diastolic 30–150, pulse 20–250, resp 4–60, SpO₂ 50–100) with missed-decimal hints; the form mirrors them. "Temperature 370" no longer stores cleanly.
+- **DB-level double-booking backstop (F-23):** an EXCLUDE constraint makes two overlapping ACTIVE appointments for the same doctor impossible at the database — the check-then-act race two receptionists could win is closed atomically.
+
+### Security
+- **Pairing hardening (F-10):** generating a pairing code requires an admin session and is audited; codes are single-use (a code redeemed by one machine can't be replayed by another).
+- **Encrypted-at-rest secrets (F-11):** backup archives are AES-256-GCM encrypted immediately after verification (`HMSE1` envelope; key derived from the per-install entropy — a stolen archive or USB stick decrypts only on the install that made it). The WhatsApp access token is DPAPI+entropy-encrypted in the DB (`encv1:` envelope; legacy rows re-encrypt on next save). Restore decrypts to a temp file deleted the moment pg_restore finishes.
+- **Audit gaps closed (F-12):** every permission DENIAL in the high-risk path, every CSV export, every WhatsApp test send, and every pairing completion now leaves an audit row.
+- **Private LAN broadcast trust chain (F-19):** V2 broadcasts are HMAC-keyed on a per-install secret delivered only over the TLS pairing channel — the old key (the TLS certificate fingerprint) was public by construction. V1 keeps broadcasting during the fleet upgrade window.
+
+### UX / reliability
+- **Persistent error states (F-09):** a failed load now shows a distinct, retry-able error panel ("this is NOT an empty list — do not re-enter records") on every core page, instead of "No patients registered yet" after the toast fades.
+- **Pagination (F-13):** the Patients page renders 25 rows at a time and drops the per-row animation stagger (the 10k-row freeze); the shared Pagination component applies to remaining pages incrementally.
+- **Unsaved-changes guard (F-21):** closing the patient dialog with edits confirms first (Esc/overlay included); queue row buttons disable while a call/complete/skip is in flight.
+- **Misc fixes (F-24):** `get_rooms` surfaces DB errors instead of an empty list; role changes save all-or-nothing in one transaction.
+
+### Also fixed this release
+- **Entropy key creation under UAC (found live):** the F-01 temp file was ACL'd read-only before its rename — which then failed (rename needs DELETE). Temp now gets Modify, the final key downgrades to Read after rename.
+- AES-256-GCM via the new `aes-gcm` crate (only new dependency).
+
+### Ship notes
+- On first launch of a v0.4.0 server: config.json migrates to v3; `entropy.key` + `broadcast.key` appear beside it; nightly backups become `auto_db_*.sql.enc`. Legacy `.sql` backups remain restorable.
+- Re-pair existing clients when convenient so they pin the broadcast secret (they keep V1 verification until then).
+
+---
+
+## v0.3.2 — 2026-09-09 (RCTF remediation: patient-safety + credential hardening)
+
+Closes the 80/20 priority subset of the full-system RCTF assessment (documentation/RCTF-FULL-SYSTEM-2026-09-08.md, 24 findings): the six defects that drive the majority of clinical and security risk. Test suite: 152 Rust unit tests (133 lib incl. 6 new DPAPI-entropy pins) + full 17-suite integration battery green + 119 frontend tests; all gates (cargo fmt/clippy, tsc, eslint, vitest) green.
+
+### Wrong-patient safety (F-02)
+- **Backend linkage guards:** `create_lab_order`, `create_prescription`, and `create_bill` now verify — inside the transaction — that the referenced encounter (and IPD admission, for bills) belongs to the same patient as the row being created. Mismatches roll back with an explicit error ("Encounter #N belongs to a different patient…"). Previously the client could attach patient B's encounter to patient A's order/bill.
+- **Two-identifier pickers:** every patient picker (Queue, Billing ×2, Laboratory, IPD, Pharmacy, AppointmentForm) now renders `first last · MRN X · DOB 12 May 1990 · phone` instead of name+phone alone — the two-identifier convention against wrong-chart selection in homonymous families. Appointments moved to the MRN-bearing `usePatientsEhr` source.
+
+### Credential hardening (F-01, code half)
+- **Config v3 — DPAPI per-install entropy:** the DB password blob is now protected with DPAPI LocalMachine **plus** 32 CSPRNG entropy bytes from an ACL-hardened `entropy.key` beside config.json (SYSTEM/Admins F, app user R; created via unique-temp + atomic rename). Decrypting now requires the machine scope AND that file — the bar moves from "any local account" (verified live by the assessment: a plain non-admin process recovered the postgres superuser password) to admin or the app's own user.
+- **Migration & recovery:** v1/v2 configs load via the legacy paths and upgrade on save; a one-shot boot migration in all three boot paths re-saves immediately so the weak blob leaves disk at the new binary's first launch (not whenever someone next opens Settings). The migration `.bak` deliberately keeps the v2 shape — the previous binary can't read v3 (binary rollback), and entropy-loss recovery works without the key. A process-wide save lock makes the entropy+config two-file commit atomic. Verified end-to-end by a rehearsal test against a COPY of the real production config (password round-trips; live file untouched). The live config intentionally stays v2 until the new installer ships.
+- **Ops half (done on the deployment):** bootstrap-credentials.txt deleted; pgdata + backups ACLs hardened (Users removed at all levels).
+
+### Clinical integrity (F-03, F-06, F-07)
+- **Consent bypass closed:** `send_whatsapp_to_patient` rejects the caller-controlled `notification_type="test"` label that skipped the WhatsApp consent gate (mirrors the H8 fix on the sibling command). Arbitrary content to a non-consenting patient is no longer reachable through the label.
+- **Lab self-approval closed:** the lab_technician role is no longer seeded with `lab.approve`, and `approve_lab_result` refuses when the approver is the same user who entered the result — release always requires a second LabApprove holder. (Single-tech deployments grant the permission explicitly in Users→Roles.)
+- **Payment integrity:** duplicate `reference_number` postings on a bill are refused ("already posted — duplicate?"), and payments exceeding the outstanding balance are refused with a pointer to record the excess as a patient advance. Guards run inside the bill's `FOR UPDATE` lock. A partial unique index `uq_payments_bill_reference` (advance-method applications exempt) backs it at the DB; a heal migration annotates historical duplicates (`dup-of-#first/own`) without deleting any financial row. Confirmed present on the live hospital_db.
+
+### Backup reliability (F-08)
+- **Catch-up-on-wake:** the nightly backup no longer requires `now.hour() == auto_backup_hour`. `auto_backup_due` compares the newest `auto_db_*` archive's mtime against the scheduled window — a machine that slept through the 02:00 window (observed live: armed, zero executions) or an app closed for days backs up on the first tick after wake/boot. One attempt per day retained (failure notification to admins unchanged); manual archives never count as the schedule having run.
+- **Data hygiene (deployment):** the synthetic 10k-patient dataset was rolled back from the live hospital_db in one FK-safe transaction with in-tx verification; safety + post-rollback archives preserved and pg_restore-verified.
+
+### Deferred (unchanged)
+Least-privilege DB role, Authenticode, ts-rs IPC types, WhatsApp token encryption, backup encryption-at-rest, F-09 error states, F-13 pagination, F-14 MAR dedup, F-16/17 inventory, F-19 LAN trust chain. Release gate: rebuild both installers + fresh-machine install test; on first launch of the new build, confirm config.json → v3 + entropy.key appears.
 
 ---
 

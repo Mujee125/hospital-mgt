@@ -43,7 +43,19 @@
   ; would make the entire PHI store modifiable by any local account.
   nsExec::ExecToLog 'icacls "$APPDATA\HMS" /grant *S-1-5-32-545:(OI)(CI)M /T'
 
-
+  ; Windows Defender real-time protection is the most common cause of
+  ; on-site initdb failure ("child process was terminated by exception" —
+  ; see docs/08 §12.7): its heuristics flag initdb.exe spawning unsigned
+  ; postgres.exe children that then write hundreds of catalog files.
+  ; Excluding the pgsql BINARY tree before anything runs covers the
+  ; robocopy copy, initdb, and every service start, while deliberately
+  ; leaving pgdata (the PHI store) under AV scanning. Deliberately NOT
+  ; fatal: if Defender is disabled or a third-party AV replaced it,
+  ; Add-MpPreference errors out and the Pop below is ignored — the
+  ; initdb error message further down then tells on-site staff to add
+  ; the exclusion by hand.
+  nsExec::ExecToLog "powershell -NoProfile -ExecutionPolicy Bypass -Command $\"Add-MpPreference -ExclusionPath '$APPDATA\HMS\pgsql'$\""
+  Pop $0
 
   ; Check if database is already provisioned AND config exists
   IfFileExists "$APPDATA\HMS\pgdata\PG_VERSION" 0 run_setup_init
@@ -117,10 +129,15 @@ pw_generation_ok:
   ; If database is already initialized, skip initdb and pg_ctl register
   IfFileExists "$APPDATA\HMS\pgdata\PG_VERSION" skip_initdb_and_register 0
 
-  nsExec::ExecToLog '"$APPDATA\HMS\pgsql\bin\initdb.exe" -D "$APPDATA\HMS\pgdata" -U postgres --auth=trust --encoding=UTF8'
+  ; initdb output goes to a log file (via cmd /c for the redirection —
+  ; nsExec has none) so a failure on a clinic PC can be diagnosed from
+  ; the machine itself, e.g. the "child process was terminated by
+  ; exception" line that identifies antivirus interference, instead of
+  ; only the generic exit code this script sees.
+  nsExec::ExecToLog 'cmd /c ""$APPDATA\HMS\pgsql\bin\initdb.exe" -D "$APPDATA\HMS\pgdata" -U postgres --auth=trust --encoding=UTF8 >"$APPDATA\HMS\install-initdb.log" 2>&1"'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_OK|MB_ICONSTOP "PostgreSQL initialization (initdb) failed. Setup cannot continue. Check that no previous PostgreSQL installation is using the same data directory."
+    MessageBox MB_OK|MB_ICONSTOP "PostgreSQL initialization (initdb) failed. Setup cannot continue.$\r$\n$\r$\nThe full technical log was saved to:$\r$\n$APPDATA\HMS\install-initdb.log$\r$\n$\r$\nMost common cause on a new PC: antivirus killed the initdb child process. Add an antivirus exclusion for the folder$\"$APPDATA\HMS\pgsql$\" (or temporarily disable real-time protection), delete the folder$\"$APPDATA\HMS\pgdata$\" if it exists, then run this installer again."
     Abort
   ${EndIf}
 

@@ -340,7 +340,15 @@ pub fn permissions_for_role(role: &str) -> Vec<Permission> {
             LabOrder,
             LabResultManage,
             LabCatalogManage,
-            LabApprove,
+            // RCTF-FULL-SYSTEM-2026-09-09 F-06: LabApprove deliberately
+            // removed from the seeded tech role — the tech held BOTH
+            // result-entry and result-approval, voiding the documented
+            // "a tech cannot self-approve their own entries" separation of
+            // duties. A single-tech deployment that wants the tech to
+            // release results must grant `lab.approve` to the role
+            // explicitly in Users → Roles (a deliberate, audited admin
+            // action); `approve_lab_result` additionally refuses
+            // self-approval even then.
             InventoryView,
             BloodBankView,
             BloodBankDonorManage,
@@ -471,8 +479,19 @@ pub async fn require_strong(
     pool: &sqlx::PgPool,
     perm: Permission,
 ) -> Result<Session, String> {
+    // RCTF-FULL-SYSTEM-2026-09-08 F-12: denial auditing. A user probing 50
+    // commands previously left ZERO rows (EA-002 RISK-AUTH-011, open since
+    // the first review) — with no trace, probing is invisible to the
+    // compliance officer. Every DENIAL in the strong path (which guards
+    // high-risk writes) now leaves an `authz_denied` audit row.
     // Step 1: in-memory permission check (same as require)
-    let session = require(state, perm)?;
+    let session = match require(state, perm) {
+        Ok(s) => s,
+        Err(msg) => {
+            audit_denial(pool, state, perm, &msg).await;
+            return Err(msg);
+        }
+    };
 
     // Step 2: DB-backed session validity check
     let valid: Option<(i32,)> = sqlx::query_as(
@@ -491,11 +510,42 @@ pub async fn require_strong(
         // Session invalidated (cross-PC login, deactivation, role change,
         // password reset, or expiry). Clear in-memory state so future
         // calls fail fast at the in-memory check instead of hitting DB.
+        // F-12: audit BEFORE clearing, so the denial row still carries the
+        // attempting principal's identity.
+        let msg = "Session invalidated. Please sign in again.".to_string();
+        audit_denial(pool, state, perm, &msg).await;
         *state.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        return Err("Session invalidated. Please sign in again.".to_string());
+        return Err(msg);
     }
 
     Ok(session)
+}
+
+/// F-12: best-effort denial audit — never fails the command's own error
+/// path, never blocks. Identifies the (attempting, signed-in) principal
+/// when a session exists, so even "not signed in" probes are counted.
+async fn audit_denial(pool: &sqlx::PgPool, state: &SessionState, perm: Permission, reason: &str) {
+    // Read the identity WITHOUT consuming the error path: clone the lock.
+    let (user_id, username) = {
+        let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(s) => (Some(s.user_id), Some(s.username.clone())),
+            None => (None, None),
+        }
+    };
+    let _ = crate::audit::record(
+        pool,
+        user_id,
+        username.as_deref(),
+        "authz_denied",
+        "rbac",
+        Some(perm.as_str()),
+        Some(serde_json::json!({
+            "reason": reason,
+            "permission": perm.as_str(),
+        })),
+    )
+    .await;
 }
 
 /// Like `require`, but allows pre-login access (no session).

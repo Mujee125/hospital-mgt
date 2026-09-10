@@ -53,6 +53,9 @@ sha2         = "0.10"
 hex          = "0.4"
 base64       = "0.22"
 time         = "0.3"
+# RCTF-FULL-SYSTEM-2026-09-08 F-11: backup-archive encryption at rest
+# (AES-256-GCM; key derived from the per-install entropy — see backup.rs).
+aes-gcm     = "0.10"
 # PDF receipt generation
 printpdf     = "0.7"
 # WhatsApp Business Cloud API (HTTP client)

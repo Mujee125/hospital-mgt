@@ -29,24 +29,29 @@ import {
 } from "@/lib/queries";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
-import { PageContainer, PageHeader, SectionCard, EmptyState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
+import { PageContainer, PageHeader, SectionCard, EmptyState, ErrorState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
 
-/** Vitals entry fields: key → { label, placeholder, plausible max } */
+/**
+ * Vitals entry fields: key → { label, placeholder, plausible range }.
+ * RCTF F-22: min/max mirror the backend's plausibility guard exactly so
+ * the form blocks missed-decimal entries (temp 370, SpO₂ 9.8) before the
+ * round-trip; the backend remains the enforcement boundary.
+ */
 const VITAL_FIELDS = [
-  { key: "temperature_c", label: "Temperature (°C)", placeholder: "37.0", max: 45 },
-  { key: "systolic_bp", label: "Systolic BP", placeholder: "120", max: 300 },
-  { key: "diastolic_bp", label: "Diastolic BP", placeholder: "80", max: 200 },
-  { key: "pulse_bpm", label: "Pulse (bpm)", placeholder: "72", max: 250 },
-  { key: "resp_rate", label: "Resp. rate", placeholder: "16", max: 80 },
-  { key: "spo2_pct", label: "SpO₂ (%)", placeholder: "98", max: 100 },
-  { key: "pain_score", label: "Pain score (0–10)", placeholder: "0", max: 10 },
+  { key: "temperature_c", label: "Temperature (°C)", placeholder: "37.0", min: 30, max: 43 },
+  { key: "systolic_bp", label: "Systolic BP", placeholder: "120", min: 50, max: 260 },
+  { key: "diastolic_bp", label: "Diastolic BP", placeholder: "80", min: 30, max: 150 },
+  { key: "pulse_bpm", label: "Pulse (bpm)", placeholder: "72", min: 20, max: 250 },
+  { key: "resp_rate", label: "Resp. rate", placeholder: "16", min: 4, max: 60 },
+  { key: "spo2_pct", label: "SpO₂ (%)", placeholder: "98", min: 50, max: 100 },
+  { key: "pain_score", label: "Pain score (0–10)", placeholder: "0", min: 0, max: 10 },
 ] as const;
 
 type VitalFieldKey = (typeof VITAL_FIELDS)[number]["key"];
 
 export function Nursing() {
   const { has } = useAuth();
-  const { data: admissions = [], isLoading } = useAdmissions("admitted");
+  const { data: admissions = [], isLoading, isError, refetch, isFetching } = useAdmissions("admitted");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const selected = admissions.find((a) => a.id === selectedId) ?? null;
 
@@ -64,6 +69,8 @@ export function Nursing() {
         <SectionCard icon={HeartPulse} title="Admitted patients">
           {isLoading ? (
             <LoadingState rows={5} />
+          ) : isError ? (
+            <ErrorState onRetry={() => void refetch()} retrying={isFetching} />
           ) : admissions.length === 0 ? (
             <EmptyState
               icon={HeartPulse}
@@ -261,6 +268,7 @@ function VitalsPanel({ admissionId, canManage }: { admissionId: number; canManag
                     type="number"
                     step="any"
                     placeholder={f.placeholder}
+                    min={f.min}
                     max={f.max}
                     value={form[f.key]}
                     onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}

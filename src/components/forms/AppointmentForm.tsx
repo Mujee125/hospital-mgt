@@ -11,7 +11,8 @@ import {
 } from "@/components/ui/select";
 import { toast } from "sonner";
 import { useCreateAppointment, useUpdateAppointment } from "@/lib/queries";
-import type { Patient, Doctor } from "@/lib/models";
+import type { PatientEhr, Doctor } from "@/lib/models";
+import { patientDescriptor } from "@/lib/utils";
 import { ActionBar, FormField } from "@/components/layout/shared";
 
 interface Appointment {
@@ -28,7 +29,7 @@ interface Appointment {
 
 interface AppointmentFormProps {
   appointment?: Appointment;
-  patients: Patient[];
+  patients: PatientEhr[];
   doctors: Doctor[];
   onSuccess: (newAppointmentId?: number) => void;
   onCancel: () => void;
@@ -130,7 +131,7 @@ export function AppointmentForm({
             <SelectContent>
               {patients.map((p) => (
                 <SelectItem key={p.id} value={String(p.id)}>
-                  {p.first_name} {p.last_name} ({p.phone})
+                  {patientDescriptor(p)}
                 </SelectItem>
               ))}
             </SelectContent>

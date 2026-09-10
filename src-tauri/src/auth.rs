@@ -1053,9 +1053,14 @@ pub async fn list_user_roles(
 }
 
 async fn sync_user_roles(pool: &PgPool, user_id: i32, roles: &[String]) -> Result<(), String> {
+    // F-24 (EA-002 DF-2): the delete + inserts previously ran as separate
+    // pool statements — a failure mid-loop left the user with a PARTIAL
+    // role set (or none at all), locking them out of their permissions
+    // until the next successful save. One transaction: all-or-nothing.
+    let mut tx = pool.begin().await.map_err(|e| format!("Begin tx: {}", e))?;
     sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("Clear user roles: {}", e))?;
     for role_name in roles {
@@ -1066,9 +1071,12 @@ async fn sync_user_roles(pool: &PgPool, user_id: i32, roles: &[String]) -> Resul
         )
         .bind(user_id)
         .bind(role_name)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("Insert user role {}: {}", role_name, e))?;
     }
+    tx.commit()
+        .await
+        .map_err(|e| format!("Commit roles: {}", e))?;
     Ok(())
 }

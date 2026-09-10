@@ -98,10 +98,13 @@ pub fn start_scheduler(
         }
 
         let mut last_digest_day: Option<u32> = None;
+        // RCTF F-08: in-memory ONE-ATTEMPT-PER-DAY marker for the nightly
+        // backup (prevents endless retry-after-failure loops within a day;
+        // the persistent due-state lives on disk — newest auto_db_* mtime).
         // Only read by the server-build nightly job; silenced for client
         // builds where the job compiles out.
         #[allow(unused_mut, unused_variables)]
-        let mut last_auto_backup_day: Option<u32> = None;
+        let mut last_auto_backup_attempt: Option<u32> = None;
 
         loop {
             if !running_inner.load(Ordering::Relaxed) {
@@ -155,20 +158,36 @@ pub fn start_scheduler(
             }
 
             // ── Nightly auto-backup (Phase 7, server build only) ────────
-            // At the configured local hour, once per day: reload the config
-            // from disk (so Settings changes apply WITHOUT an app restart),
-            // run pg_dump via the same core the manual command uses, verify
-            // the archive, copy to the optional USB directory, apply
-            // retention, and write a system-attributed audit row. A backup
-            // failure is logged — never panicked — so one bad night cannot
-            // take down reminders/notifications for the whole hospital.
+            // Once per day at/after the configured local hour: reload the
+            // config from disk (so Settings changes apply WITHOUT an app
+            // restart), run pg_dump via the same core the manual command
+            // uses, verify the archive, copy to the optional USB directory,
+            // apply retention, and write a system-attributed audit row. A
+            // backup failure is logged — never panicked — so one bad night
+            // cannot take down reminders/notifications for the whole hospital.
+            //
+            // RCTF-FULL-SYSTEM-2026-09-09 F-08: the condition is now
+            // `auto_backup_due` (backup.rs) instead of
+            // `now.hour() == auto_backup_hour`. The old equality meant a
+            // machine that SLEPT through the configured hour never backed
+            // up at all — observed live: armed for 00:00, zero executions,
+            // no error anywhere. The due-check compares the newest
+            // `auto_db_*` archive's mtime against the scheduled window, so
+            // the first tick after a slept-through window (or after days
+            // of the app being closed) catches the backup up. The in-memory
+            // attempt marker keeps failures to ONE retry-less attempt per
+            // day (the failure notification tells admins to intervene).
             #[cfg(feature = "server-build")]
-            if last_auto_backup_day != Some(today_day) {
-                // Reload per tick inside the target hour window — a cheap
-                // file read that keeps the hour/retention/USB settings live.
+            {
                 if let Some(cfg) = AppConfig::load(&app_handle) {
-                    if cfg.auto_backup_enabled && now.hour() == cfg.auto_backup_hour.min(23) {
-                        last_auto_backup_day = Some(today_day);
+                    let due = crate::commands::backup::auto_backup_due(
+                        &crate::commands::backup::backups_dir_path().unwrap_or_default(),
+                        Local::now(),
+                        cfg.auto_backup_hour,
+                        cfg.auto_backup_enabled,
+                    );
+                    if due && last_auto_backup_attempt != Some(today_day) {
+                        last_auto_backup_attempt = Some(today_day);
                         if let Err(e) = run_nightly_backup(&pool, &cfg).await {
                             eprintln!("[HMS Scheduler] Auto-backup FAILED: {}", e);
                             // Phase 9: surface the failure to admins in the
@@ -286,10 +305,11 @@ async fn send_due_reminders(
     pool: &PgPool,
     config: &AppConfig,
 ) -> Result<(), String> {
-    let rows = sqlx::query_as::<_, (i32, String, String, String, String, String)>(
+    let rows = sqlx::query_as::<_, (i32, i32, String, String, String, String, String)>(
         r#"
         SELECT
             a.id,
+            a.patient_id,
             p.first_name || ' ' || p.last_name AS patient_name,
             p.phone AS patient_phone,
             d.first_name || ' ' || d.last_name AS doctor_name,
@@ -316,7 +336,7 @@ async fn send_due_reminders(
     .await
     .map_err(|e| format!("Reminder query failed: {}", e))?;
 
-    for (id, patient_name, phone, doctor_name, _date, time) in rows {
+    for (id, patient_id, patient_name, phone, doctor_name, _date, time) in rows {
         let msg_text =
             whatsapp::build_reminder_msg(&config.clinic_name, &patient_name, &doctor_name, &time);
 
@@ -326,6 +346,7 @@ async fn send_due_reminders(
             is_group: false,
             appointment_id: Some(id),
             notification_type: "reminder".to_string(),
+            patient_id: Some(patient_id),
         };
 
         if let Err(e) = whatsapp::send_whatsapp(app_handle, pool, msg).await {
@@ -340,6 +361,16 @@ async fn send_due_reminders(
 }
 
 /// Build and send the morning schedule digest to the doctors WhatsApp group.
+///
+/// RCTF-FULL-SYSTEM-2026-09-08 F-04: the digest is a GROUP send, so the
+/// per-patient consent gate does not apply — but the recipients are
+/// everyone in the configured WhatsApp group, which is broader than the
+/// patient consented to. Patients who have NOT granted WhatsApp consent
+/// are now anonymized to initials (the minimum staff need to run the
+/// clinic day: "10:00 A.R. — Dr. Khan" is actionable; "10:00 Amna Raza"
+/// is a PHI disclosure). Consented patients keep full names — doctors
+/// need the full identity to prepare. Group membership control stays the
+/// deployment's responsibility (documented in the deployment guide).
 async fn send_daily_digest(
     app_handle: &tauri::AppHandle,
     pool: &PgPool,
@@ -349,12 +380,17 @@ async fn send_daily_digest(
         r#"
         SELECT
             TO_CHAR(a.appointment_time, 'HH12:MI AM')  AS appt_time,
-            p.first_name || ' ' || p.last_name         AS patient_name,
+            CASE
+                WHEN COALESCE(pc.granted, FALSE) THEN p.first_name || ' ' || p.last_name
+                ELSE LEFT(p.first_name, 1) || '.' || LEFT(p.last_name, 1) || '.'
+            END                                          AS patient_name,
             d.first_name || ' ' || d.last_name         AS doctor_name,
             a.status
         FROM appointments a
         JOIN patients p ON p.id = a.patient_id
         JOIN doctors  d ON d.id = a.doctor_id
+        LEFT JOIN patient_consent pc
+               ON pc.patient_id = p.id AND pc.consent_type = 'whatsapp'
         WHERE a.appointment_date = CURRENT_DATE
           AND a.status NOT IN ('cancelled')
         ORDER BY a.appointment_time
@@ -376,6 +412,7 @@ async fn send_daily_digest(
         is_group: true,
         appointment_id: None,
         notification_type: "daily_digest".to_string(),
+        patient_id: None,
     };
 
     whatsapp::send_whatsapp(app_handle, pool, msg).await

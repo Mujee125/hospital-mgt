@@ -103,10 +103,11 @@ fn time_to_minutes(t: &str) -> Option<i32> {
 async fn get_appt_details(
     pool: &PgPool,
     id: i32,
-) -> Result<(String, String, String, String, String), String> {
-    sqlx::query_as::<_, (String, String, String, String, String)>(
+) -> Result<(i32, String, String, String, String, String), String> {
+    sqlx::query_as::<_, (i32, String, String, String, String, String)>(
         r#"
         SELECT
+            a.patient_id,
             p.first_name || ' ' || p.last_name          AS patient_name,
             p.phone                                       AS patient_phone,
             d.first_name || ' ' || d.last_name          AS doctor_name,
@@ -205,11 +206,20 @@ pub async fn create_appointment(
     .bind(s.user_id)
     .fetch_one(pool.inner())
     .await
-    .map_err(|e| format!("Failed to create appointment: {}", e))?;
+    .map_err(|e| {
+        // F-23: the EXCLUDE constraint is the atomic backstop — a race the
+        // app-level pre-check missed lands here; surface the same friendly
+        // message the pre-check uses.
+        if e.to_string().contains("excl_appt_doctor_slot") {
+            "This doctor already has an appointment that overlaps the selected time. Choose a different time or doctor.".to_string()
+        } else {
+            format!("Failed to create appointment: {}", e)
+        }
+    })?;
 
     let appt_id = row.0;
 
-    if let Ok((patient_name, phone, doctor_name, date_str, time_str)) =
+    if let Ok((patient_id, patient_name, phone, doctor_name, date_str, time_str)) =
         get_appt_details(pool.inner(), appt_id).await
     {
         let clinic = clinic_name(&app_handle);
@@ -229,6 +239,7 @@ pub async fn create_appointment(
                 is_group: false,
                 appointment_id: Some(appt_id),
                 notification_type: "booked".to_string(),
+                patient_id: Some(patient_id),
             },
         )
         .await;
@@ -385,12 +396,19 @@ pub async fn update_appointment(
     .bind(appointment.id)
     .execute(pool.inner())
     .await
-    .map_err(|e| format!("Update failed: {}", e))?;
+    .map_err(|e| {
+        // F-23: friendly mapping for the EXCLUDE backstop (reschedule races).
+        if e.to_string().contains("excl_appt_doctor_slot") {
+            "This doctor already has an appointment that overlaps the selected time. Choose a different time or doctor.".to_string()
+        } else {
+            format!("Update failed: {}", e)
+        }
+    })?;
 
     let prev = old_status.map(|x| x.0).unwrap_or_default();
     let next = appointment.status.as_str();
     if prev != next {
-        if let Ok((patient_name, phone, doctor_name, date_str, time_str)) =
+        if let Ok((patient_id, patient_name, phone, doctor_name, date_str, time_str)) =
             get_appt_details(pool.inner(), appointment.id).await
         {
             let clinic = clinic_name(&app_handle);
@@ -427,6 +445,7 @@ pub async fn update_appointment(
                         is_group: false,
                         appointment_id: Some(appointment.id),
                         notification_type: ntype.to_string(),
+                        patient_id: Some(patient_id),
                     },
                 )
                 .await;
@@ -472,7 +491,7 @@ pub async fn update_appointment_status(
 
     let prev = old.map(|x| x.0).unwrap_or_default();
     if prev != status {
-        if let Ok((patient_name, phone, doctor_name, date_str, time_str)) =
+        if let Ok((patient_id, patient_name, phone, doctor_name, date_str, time_str)) =
             get_appt_details(pool.inner(), id).await
         {
             let clinic = clinic_name(&app_handle);
@@ -509,6 +528,7 @@ pub async fn update_appointment_status(
                         is_group: false,
                         appointment_id: Some(id),
                         notification_type: ntype.to_string(),
+                        patient_id: Some(patient_id),
                     },
                 )
                 .await;

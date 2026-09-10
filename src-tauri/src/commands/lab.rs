@@ -103,7 +103,18 @@ pub async fn create_lab_order(
     session: tauri::State<'_, SessionState>,
     order: CreateLabOrder,
 ) -> Result<i32, String> {
-    let s = rbac::require_strong(&session, pool.inner(), Permission::LabOrder).await?;
+    create_lab_order_core(pool.inner(), &session, order).await
+}
+
+/// Lab-order creation logic core (AERP Part G extraction pattern): guard +
+/// validation + linkage check + INSERT + audit, callable without a Tauri
+/// AppHandle so the RCTF F-02 linkage guards run at command level.
+pub async fn create_lab_order_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    order: CreateLabOrder,
+) -> Result<i32, String> {
+    let s = rbac::require_strong(session_state, pool, Permission::LabOrder).await?;
     if order.test_catalog_ids.is_empty() {
         return Err("At least one test must be selected.".to_string());
     }
@@ -112,6 +123,33 @@ pub async fn create_lab_order(
         .begin()
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    // RCTF-FULL-SYSTEM-2026-09-09 F-02: the encounter, when provided, must
+    // belong to the SAME patient as the order — a tampered/buggy client
+    // could otherwise attach patient B's encounter to patient A's order and
+    // poison every encounter-based chart join downstream.
+    if let Some(enc_id) = order.encounter_id {
+        let owner: Option<(i32,)> =
+            sqlx::query_as("SELECT patient_id FROM encounters WHERE id = $1")
+                .bind(enc_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| crate::db::sanitize_db_error(&e))?;
+        match owner {
+            Some((pid,)) if pid == order.patient_id => {}
+            Some((pid,)) => {
+                tx.rollback().await.ok();
+                return Err(format!(
+                    "Encounter #{} belongs to a different patient (patient #{}, not #{}). The order was not created.",
+                    enc_id, pid, order.patient_id
+                ));
+            }
+            None => {
+                tx.rollback().await.ok();
+                return Err(format!("Encounter #{} does not exist.", enc_id));
+            }
+        }
+    }
 
     let row: (i32,) = sqlx::query_as(
         r#"INSERT INTO lab_orders (patient_id, encounter_id, ordered_by_doctor_id, ordered_by_user_id, status)
@@ -139,7 +177,7 @@ pub async fn create_lab_order(
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(
-        pool.inner(),
+        pool,
         &s,
         "lab_order_create",
         "lab_orders",
@@ -188,6 +226,18 @@ pub async fn update_lab_result(
 /// Result-entry logic core (AERP Part G extraction pattern — Phase 9 moved
 /// the body out from behind tauri::State so the notification emitters can
 /// be integration-tested at command level).
+///
+/// RCTF-FULL-SYSTEM-2026-09-08 F-18 hardening:
+///   • a result can only be entered once the order was SAMPLED (an
+///     'ordered' row has no specimen — result-before-sample is refused);
+///   • an amendment preserves the ORIGINAL completer's identity and
+///     completion time (the previous code overwrote completed_at /
+///     completed_by_user_id with the amender's — the original tech's
+///     attribution survived only in the audit log, contradicting
+///     db.rs's "audit trail preserved" comment);
+///   • the result UPDATE and the order status flip run in ONE
+///     transaction (previously two pool statements — a failure between
+///     left a result with a stale order status).
 pub async fn update_lab_result_core(
     pool: &PgPool,
     session_state: &SessionState,
@@ -195,25 +245,62 @@ pub async fn update_lab_result_core(
 ) -> Result<(), String> {
     let s = rbac::require_strong(session_state, pool, Permission::LabResultManage).await?;
 
-    // Phase 6.2: result entry now goes through the approval workflow —
-    // approval_status 'entered' (awaiting in-charge approval). Overwriting
-    // an already-APPROVED result is a correction: it demotes the row back
-    // to 'entered' with an 'amended' marker preserved in notes by the
-    // approver, never silently (see approve_lab_result for the release path).
+    let mut tx = pool.begin().await.map_err(|e| format!("Begin tx: {}", e))?;
+
+    // F-18: sample-first workflow — read the current row + its order's
+    // status, locked, before writing anything. 'ordered' means the sample
+    // was never collected; a result without a specimen is invalid.
+    let current: Option<(Option<String>, String)> = sqlx::query_as(
+        r#"SELECT lot.approval_status, lo.status
+           FROM lab_order_tests lot
+           JOIN lab_orders lo ON lo.id = lot.lab_order_id
+           WHERE lot.id = $1
+           FOR UPDATE OF lot, lo"#,
+    )
+    .bind(result.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("Lock lab result: {}", e))?;
+    let (approval_status, order_status) =
+        current.ok_or_else(|| "Lab result row not found.".to_string())?;
+
+    match order_status.as_str() {
+        // Sample collected (or the order is already in the results cycle:
+        // a re-entry/correction of an existing result).
+        "sampled" | "resulted" | "approved" => {}
+        _ => {
+            return Err(format!(
+                "Cannot enter a result for order in status '{}' — the sample has not been \
+                 collected. Collect the sample first.",
+                order_status
+            ));
+        }
+    }
+
+    // Phase 6.2: result entry goes through the approval workflow — first
+    // entry sets 'entered' (awaiting in-charge approval). Overwriting an
+    // already-APPROVED result is a correction: it demotes the row back to
+    // 'amended' (re-approval required) and PRESERVES the original
+    // completer's identity (F-18 — the amendment is attributed to the
+    // amender in the audit row, not by overwriting the row's columns).
+    let was_approved = approval_status.as_deref() == Some("approved");
     let updated = sqlx::query(
         r#"UPDATE lab_order_tests SET
               result_value=$1, result_unit=$2, result_abnormal_flag=$3,
-              result_notes=$4, completed_at=NOW(), completed_by_user_id=$5,
-              approval_status = CASE WHEN approval_status = 'approved' THEN 'amended' ELSE 'entered' END
-           WHERE id=$6"#,
+              result_notes=$4,
+              completed_at = CASE WHEN $5::boolean THEN completed_at ELSE NOW() END,
+              completed_by_user_id = CASE WHEN $5::boolean THEN completed_by_user_id ELSE $6 END,
+              approval_status = CASE WHEN $5::boolean THEN 'amended' ELSE 'entered' END
+           WHERE id=$7"#,
     )
     .bind(&result.result_value)
     .bind(&result.result_unit)
     .bind(&result.result_abnormal_flag)
     .bind(&result.result_notes)
+    .bind(was_approved)
     .bind(s.user_id)
     .bind(result.id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("Update lab result: {}", e))?;
     if updated.rows_affected() == 0 {
@@ -222,16 +309,19 @@ pub async fn update_lab_result_core(
 
     // Order status: any completed test moves the order to 'resulted'
     // (awaiting approval). Full approval to 'approved' happens in
-    // approve_lab_result once EVERY test is approved.
+    // approve_lab_result once EVERY test is approved. Same transaction
+    // as the result write (F-18 — previously two pool statements).
     sqlx::query(
         r#"UPDATE lab_orders SET status = 'resulted'
            WHERE id = (SELECT lab_order_id FROM lab_order_tests WHERE id = $1)
              AND status IN ('ordered', 'sampled')"#,
     )
     .bind(result.id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("Update lab order status: {}", e))?;
+
+    tx.commit().await.map_err(|e| format!("Commit: {}", e))?;
 
     // Critical-value protocol step 1: a critical flag cannot be "approved"
     // until acknowledged (chk_lot_critical_release enforces at release),
@@ -257,13 +347,17 @@ pub async fn update_lab_result_core(
         )
         .await;
 
-        // Phase 9: push to the in-app notification center so every doctor
-        // sees the escalation without opening the lab worklist. Broadcast
-        // to the doctor role (no doctor→user mapping exists) + admins.
-        // Best-effort — never fails the result entry.
+        // Phase 9 + RCTF-FULL-SYSTEM-2026-09-08 F-20: minimum-necessary
+        // targeting. The critical alert goes DIRECTLY to the ordering user
+        // (full details — patient + test), and the doctor-role broadcast is
+        // DE-IDENTIFIED (test + order number only) so every doctor can still
+        // see the escalation and act via the deep link without the patient
+        // identity being spread to the whole role. Previously the full
+        // patient name + test went to every doctor on the system.
         if let Some(order_id) = order.map(|o| o.0) {
-            let info: Option<(String, String)> = sqlx::query_as(
-                "SELECT COALESCE(p.first_name || ' ' || p.last_name, 'Patient'), \
+            let info: Option<(Option<i32>, String, String)> = sqlx::query_as(
+                "SELECT lo.ordered_by_user_id, \
+                        COALESCE(p.first_name || ' ' || p.last_name, 'Patient'), \
                         COALESCE(tc.name, 'test') \
                  FROM lab_orders lo \
                  JOIN lab_order_tests lot ON lot.id = $1 \
@@ -277,11 +371,44 @@ pub async fn update_lab_result_core(
             .await
             .ok()
             .flatten();
-            if let Some((patient, test)) = info {
-                let title = format!("CRITICAL lab value: {} — {}", patient, test);
+            if let Some((ordering_user, patient, test)) = info {
+                // Direct to the ordering user — full, actionable detail.
+                // ordered_by_user_id is nullable (ON DELETE SET NULL): when
+                // the ordering account no longer exists, only the
+                // de-identified role broadcast fires — a NULL/NULL emit is
+                // an EVERYONE broadcast, which must never carry full PHI.
+                if let Some(ordering_user) = ordering_user {
+                    let title = format!("CRITICAL lab value: {} — {}", patient, test);
+                    let body = format!(
+                        "A CRITICAL result was entered for {} (order #{}). Contact the ordering doctor immediately.",
+                        patient, order_id
+                    );
+                    if let Err(e) = crate::commands::notifications::emit(
+                        pool,
+                        crate::commands::notifications::NotificationOut {
+                            user_id: Some(ordering_user),
+                            role_target: None,
+                            kind: "lab_critical".into(),
+                            title,
+                            body,
+                            entity_type: Some("lab_order".into()),
+                            entity_id: Some(order_id),
+                        },
+                    )
+                    .await
+                    {
+                        eprintln!("[HMS Lab] notification emit failed (non-fatal): {}", e);
+                    }
+                }
+
+                // De-identified role broadcast — the escalation safety net
+                // (and the only channel when the ordering user is gone).
+                // Patient name stays out; the deep link (entity_id) is the
+                // drill-in for whichever doctor is on shift.
+                let title = format!("CRITICAL lab value: {} (order #{})", test, order_id);
                 let body = format!(
-                    "A CRITICAL result was entered for {} (order #{}). Contact the ordering doctor immediately.",
-                    patient, order_id
+                    "A CRITICAL {} result was entered on order #{}. Open the order to review.",
+                    test, order_id
                 );
                 if let Err(e) = crate::commands::notifications::emit(
                     pool,
@@ -375,12 +502,14 @@ pub async fn collect_lab_sample_core(
     Ok(barcode)
 }
 
-/// Approve (release) a lab result row. Requires LabApprove — held by the
-/// lab in-charge, doctors, and super admin, but NOT by plain
-/// LabResultManage holders, so a tech cannot self-approve their own
-/// entries. If the result is flagged critical, `critical_acknowledged`
-/// must be true — the approver confirms the critical-value call was made
-/// (phone call to the ordering doctor per protocol) before release.
+/// Approve (release) a lab result row. Requires LabApprove — held by
+/// doctors, super admin, and a lab in-charge (NOT the seeded
+/// `lab_technician` role; a single-tech deployment grants it explicitly),
+/// and the approver must differ from the user who entered the result, so
+/// no one can self-approve their own entries (RCTF F-06). If the result is
+/// flagged critical, `critical_acknowledged` must be true — the approver
+/// confirms the critical-value call was made (phone call to the ordering
+/// doctor per protocol) before release.
 /// Phase 6.2 (SRS §2.4 result approval + critical alerting).
 /// RBAC: LabApprove. Audited.
 #[tauri::command]
@@ -409,17 +538,27 @@ pub async fn approve_lab_result_core(
 ) -> Result<(), String> {
     let s = rbac::require_strong(session_state, pool, Permission::LabApprove).await?;
 
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT approval_status, result_abnormal_flag FROM lab_order_tests WHERE id = $1",
+    let row: Option<(String, Option<String>, Option<i32>)> = sqlx::query_as(
+        "SELECT approval_status, result_abnormal_flag, completed_by_user_id FROM lab_order_tests WHERE id = $1",
     )
     .bind(lab_order_test_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
-    let (status, flag) = row.ok_or_else(|| "Lab result row not found.".to_string())?;
+    let (status, flag, completed_by) =
+        row.ok_or_else(|| "Lab result row not found.".to_string())?;
 
     if status != "entered" && status != "amended" {
         return Err(format!("This result is not awaiting approval (status: {}). Only entered results can be approved.", status));
+    }
+    // RCTF-FULL-SYSTEM-2026-09-09 F-06: separation of duties — the user who
+    // entered (or last amended) the result cannot release it themselves,
+    // even if they hold LabApprove (e.g. a doctor who both entered and would
+    // approve). Approval must be a second person's review.
+    if completed_by == Some(s.user_id) {
+        return Err(
+            "You entered this result, so you cannot approve it yourself. Another LabApprove holder must review and release it.".to_string(),
+        );
     }
     if flag.as_deref() == Some("critical") && !critical_acknowledged {
         return Err("This result is flagged CRITICAL. You must acknowledge that the ordering doctor has been contacted before releasing it.".to_string());
@@ -459,11 +598,15 @@ pub async fn approve_lab_result_core(
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    // Phase 9: notify the ordering side that the result is released
-    // (best-effort — never fails the approval).
+    // Phase 9 + RCTF-FULL-SYSTEM-2026-09-08 F-20: notify the ORDERING USER
+    // directly (best-effort — never fails the approval). The role broadcast
+    // spread the patient's identity to every doctor; the order row knows
+    // the exact user who placed the order, and the release is relevant to
+    // them alone.
     {
-        let info: Option<(i32, String, String)> = sqlx::query_as(
-            "SELECT lo.id, COALESCE(p.first_name || ' ' || p.last_name, 'Patient'), \
+        let info: Option<(i32, Option<i32>, String, String)> = sqlx::query_as(
+            "SELECT lo.id, lo.ordered_by_user_id, \
+                    COALESCE(p.first_name || ' ' || p.last_name, 'Patient'), \
                     COALESCE(tc.name, 'test') \
              FROM lab_order_tests lot \
              JOIN lab_orders lo ON lo.id = lot.lab_order_id \
@@ -476,7 +619,10 @@ pub async fn approve_lab_result_core(
         .await
         .ok()
         .flatten();
-        if let Some((order_id, patient, test)) = info {
+        if let Some((order_id, Some(ordering_user), patient, test)) = info {
+            // Only the ordering user needs the release; when that account is
+            // gone (ordered_by_user_id NULL), there is no one to notify —
+            // a role broadcast would re-spread the patient's identity.
             let title = format!("Lab result released: {} — {}", patient, test);
             let body = format!(
                 "{}'s {} result on order #{} has been approved and released.",
@@ -485,8 +631,8 @@ pub async fn approve_lab_result_core(
             if let Err(e) = crate::commands::notifications::emit(
                 pool,
                 crate::commands::notifications::NotificationOut {
-                    user_id: None,
-                    role_target: Some("doctor".into()),
+                    user_id: Some(ordering_user),
+                    role_target: None,
                     kind: "lab_released".into(),
                     title,
                     body,

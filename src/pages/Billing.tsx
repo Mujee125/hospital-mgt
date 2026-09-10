@@ -33,8 +33,8 @@ import {
 import type { Expense } from "@/lib/models";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
-import { formatMoney } from "@/lib/utils";
-import { PageContainer, PageHeader, SectionCard, EmptyState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
+import { formatMoney, patientDescriptor } from "@/lib/utils";
+import { PageContainer, PageHeader, SectionCard, EmptyState, ErrorState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
 
 export function Billing() {
   const { has } = useAuth();
@@ -75,7 +75,7 @@ export function Billing() {
 
 function InvoicesTab({ canApprove }: { canApprove: boolean }) {
   const { has } = useAuth();
-  const { data: bills = [], isLoading } = useBills();
+  const { data: bills = [], isLoading, isError, refetch, isFetching } = useBills();
   const { data: patients = [] } = usePatientsEhr();
   const createBill = useCreateBill();
 
@@ -108,6 +108,8 @@ function InvoicesTab({ canApprove }: { canApprove: boolean }) {
     <SectionCard>
       {isLoading ? (
         <LoadingState rows={5} />
+      ) : isError ? (
+        <ErrorState onRetry={() => void refetch()} retrying={isFetching} />
       ) : bills.length === 0 ? (
         <EmptyState icon={Receipt} title="No invoices" description="Create an invoice to get started." />
       ) : (
@@ -166,7 +168,7 @@ function InvoicesTab({ canApprove }: { canApprove: boolean }) {
               <Label>Patient</Label>
               <Select value={patientId?.toString() ?? ""} onValueChange={(v) => setPatientId(Number(v))}>
                 <SelectTrigger><SelectValue placeholder="Select patient" /></SelectTrigger>
-                <SelectContent>{patients.map((p) => <SelectItem key={p.id} value={p.id.toString()}>{p.first_name} {p.last_name} · {p.phone}</SelectItem>)}</SelectContent>
+                <SelectContent>{patients.map((p) => <SelectItem key={p.id} value={p.id.toString()}>{patientDescriptor(p)}</SelectItem>)}</SelectContent>
               </Select>
             </div>
             <div className="space-y-2">
@@ -572,7 +574,7 @@ function AdvancesTab() {
               <Label>Patient</Label>
               <Select value={patientId?.toString() ?? ""} onValueChange={(v) => setPatientId(Number(v))}>
                 <SelectTrigger><SelectValue placeholder="Select patient" /></SelectTrigger>
-                <SelectContent>{patients.map((p) => <SelectItem key={p.id} value={p.id.toString()}>{p.first_name} {p.last_name} · {p.phone}</SelectItem>)}</SelectContent>
+                <SelectContent>{patients.map((p) => <SelectItem key={p.id} value={p.id.toString()}>{patientDescriptor(p)}</SelectItem>)}</SelectContent>
               </Select>
             </div>
             <div className="grid grid-cols-2 gap-3">

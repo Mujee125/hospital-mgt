@@ -19,8 +19,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useLabOrders, useLabCatalog, useCreateLabOrder, useLabOrderTests, useUpdateLabResult, useCollectLabSample, useApproveLabResult, usePatientsEhr, useDoctors } from "@/lib/queries";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
-import { formatMoney } from "@/lib/utils";
-import { PageContainer, PageHeader, SectionCard, EmptyState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
+import { formatMoney, patientDescriptor } from "@/lib/utils";
+import { PageContainer, PageHeader, SectionCard, EmptyState, ErrorState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
 
 const STATUS_FILTERS = [
   { value: "all", label: "All orders" },
@@ -33,7 +33,7 @@ const STATUS_FILTERS = [
 export function Laboratory() {
   const { has } = useAuth();
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const { data: allOrders = [], isLoading } = useLabOrders();
+  const { data: allOrders = [], isLoading, isError, refetch, isFetching } = useLabOrders();
   // Legacy rows (pre-6.2 'completed'/'pending' from old flow or seeds)
   // still display; the workflow filter only matches the 6.2 vocabulary.
   const orders = statusFilter === "all" ? allOrders : allOrders.filter((o) => o.status === statusFilter);
@@ -77,6 +77,8 @@ export function Laboratory() {
       <SectionCard>
         {isLoading ? (
           <LoadingState rows={5} />
+        ) : isError ? (
+          <ErrorState onRetry={() => void refetch()} retrying={isFetching} />
         ) : orders.length === 0 ? (
           <EmptyState icon={FlaskConical} title="No lab orders" description={statusFilter === "all" ? "Create a lab order to get started." : `No orders in the '${statusFilter}' stage.`} />
         ) : (
@@ -144,7 +146,7 @@ export function Laboratory() {
               <Label>Patient</Label>
               <Select value={form.patientId?.toString() ?? ""} onValueChange={(v) => setForm({ ...form, patientId: Number(v) })}>
                 <SelectTrigger><SelectValue placeholder="Select patient" /></SelectTrigger>
-                <SelectContent>{patients.map((p) => <SelectItem key={p.id} value={p.id.toString()}>{p.first_name} {p.last_name} · {p.phone}</SelectItem>)}</SelectContent>
+                <SelectContent>{patients.map((p) => <SelectItem key={p.id} value={p.id.toString()}>{patientDescriptor(p)}</SelectItem>)}</SelectContent>
               </Select>
             </div>
             <div className="space-y-1.5">

@@ -83,6 +83,21 @@ pub fn listen_for_broadcast_with_fp(
     timeout_secs: u64,
     expected_fingerprint_hex: Option<&str>,
 ) -> Option<(String, u16)> {
+    listen_for_broadcast_v2(timeout_secs, expected_fingerprint_hex, None)
+}
+
+/// RCTF-FULL-SYSTEM-2026-09-08 F-19: the V2-aware listener.
+/// `pinned_broadcast_secret` (delivered over the TLS pairing channel and
+/// pinned like the cert) verifies HMS_SERVER_V2 broadcasts — the new
+/// trust chain whose key is NOT public. V1 (fingerprint-keyed) broadcasts
+/// remain accepted while a pinned fingerprint exists (fleet upgrade
+/// window: old servers, old clients). Unsigned remains TOFU-only, as
+/// before.
+pub fn listen_for_broadcast_v2(
+    timeout_secs: u64,
+    expected_fingerprint_hex: Option<&str>,
+    pinned_broadcast_secret: Option<&[u8]>,
+) -> Option<(String, u16)> {
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", DISCOVERY_PORT)).ok()?;
     socket
         .set_read_timeout(Some(Duration::from_secs(timeout_secs)))
@@ -93,6 +108,45 @@ pub fn listen_for_broadcast_with_fp(
         match socket.recv_from(&mut buf) {
             Ok((n, _src)) => {
                 let msg = String::from_utf8_lossy(&buf[..n]);
+                // V2 secret-keyed format: HMS_SERVER_V2:<ip>:<port>:<hmac>:<ts>
+                if let Some(payload) = msg.strip_prefix("HMS_SERVER_V2:") {
+                    let parts: Vec<&str> = payload.split(':').collect();
+                    if parts.len() != 4 {
+                        continue;
+                    }
+                    let (ip, port_str, hmac_hex, ts_str) = (parts[0], parts[1], parts[2], parts[3]);
+                    let port: u16 = match port_str.parse() {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    let ts: u64 = match ts_str.parse() {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if ts > now + 60 {
+                        continue; // far-future timestamp — reject
+                    }
+                    if now.saturating_sub(ts) > BROADCAST_MAX_AGE_SECS {
+                        continue; // stale — likely a replay
+                    }
+                    // A V2 broadcast REQUIRES the pinned secret — it is the
+                    // whole point of V2. Without one, we never accept V2
+                    // (pre-pairing TOFU must use the unsigned/legacy path).
+                    let Some(secret) = pinned_broadcast_secret else {
+                        continue;
+                    };
+                    let signed_msg = format!("{}:{}:{}", ts_str, ip, port_str);
+                    let expected = hmac_sha256_hex(secret, signed_msg.as_bytes());
+                    if !constant_time_eq(hmac_hex.as_bytes(), expected.as_bytes()) {
+                        continue; // NOT signed by our server — drop
+                    }
+                    return Some((ip.to_string(), port));
+                }
+                // V1 / legacy handling (unchanged semantics).
                 if let Some(payload) = msg.strip_prefix("HMS_SERVER:") {
                     let parts: Vec<&str> = payload.split(':').collect();
                     // SEC-08: new signed format is `ip:port:hmac:timestamp`
@@ -191,6 +245,22 @@ pub fn detect_server_with_fp(expected_fingerprint_hex: Option<String>) -> Option
     listen_for_broadcast_with_fp(
         RECOVERY_LISTEN_TIMEOUT_SECS,
         expected_fingerprint_hex.as_deref(),
+    )
+}
+
+/// RCTF-FULL-SYSTEM-2026-09-08 F-19: V2-aware discovery — prefers
+/// secret-keyed broadcasts (verified with the pinned secret) and accepts
+/// V1 (fingerprint-keyed) for servers not yet upgraded. Either pin may
+/// be `None` (pre-pairing / pre-upgrade respectively).
+#[allow(dead_code)]
+pub fn detect_server_with_fp_secret(
+    expected_fingerprint_hex: Option<String>,
+    pinned_broadcast_secret: Option<Vec<u8>>,
+) -> Option<(String, u16)> {
+    listen_for_broadcast_v2(
+        RECOVERY_LISTEN_TIMEOUT_SECS,
+        expected_fingerprint_hex.as_deref(),
+        pinned_broadcast_secret.as_deref(),
     )
 }
 
@@ -307,26 +377,53 @@ pub fn start_broadcast(
         // Otherwise fall back to the legacy unsigned format (dev mode).
         let signing_enabled = !tls_fingerprint_hex.is_empty();
 
+        // RCTF-FULL-SYSTEM-2026-09-08 F-19: the V2 broadcast is keyed on
+        // the per-install broadcast SECRET (broadcast.key — delivered to
+        // clients over the TLS pairing channel, never published), not on
+        // the TLS fingerprint (which is public: cleartext in every paired
+        // client's config + get_config — anyone who read one client's
+        // config could forge signed broadcasts). V1 (fingerprint-keyed)
+        // keeps broadcasting during the fleet upgrade window so old
+        // clients keep working; new clients prefer V2 and accept V1 only
+        // for compatibility with an un-upgraded server.
+        let broadcast_secret: Option<Vec<u8>> =
+            crate::config::AppConfig::load_or_create_broadcast_secret().ok();
+        if broadcast_secret.is_none() {
+            eprintln!(
+                "[HMS Discovery] WARNING: broadcast secret unavailable — V2 signing disabled"
+            );
+        }
+
         while running.load(Ordering::Relaxed) {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let msg = if signing_enabled {
-                // Signed format: HMS_SERVER:<ip>:<port>:<hmac>:<timestamp>
-                // The signed message is `<timestamp>:<ip>:<port>` — clients
-                // reconstruct the same string from the parsed fields to
-                // verify the HMAC.
-                let signed_msg = format!("{}:{}:{}", now, local_ip, db_port);
+            let signed_msg = format!("{}:{}:{}", now, local_ip, db_port);
+
+            // V1 signed format: HMS_SERVER:<ip>:<port>:<hmac>:<timestamp>
+            // (fingerprint-keyed — legacy, kept for old clients).
+            let v1 = if signing_enabled {
                 let hmac = hmac_sha256_hex(tls_fingerprint_hex.as_bytes(), signed_msg.as_bytes());
                 format!("HMS_SERVER:{}:{}:{}:{}", local_ip, db_port, hmac, now)
             } else {
                 // Legacy unsigned format (dev/fallback only).
                 format!("HMS_SERVER:{}:{}", local_ip, db_port)
             };
-            if let Err(e) = socket.send_to(msg.as_bytes(), dest) {
+            if let Err(e) = socket.send_to(v1.as_bytes(), dest) {
                 eprintln!("[HMS Discovery] Broadcast error: {}", e);
             }
+
+            // V2 signed format: HMS_SERVER_V2:<ip>:<port>:<hmac>:<timestamp>
+            // (secret-keyed — the new trust chain).
+            if let Some(secret) = broadcast_secret.as_ref() {
+                let hmac = hmac_sha256_hex(secret, signed_msg.as_bytes());
+                let v2 = format!("HMS_SERVER_V2:{}:{}:{}:{}", local_ip, db_port, hmac, now);
+                if let Err(e) = socket.send_to(v2.as_bytes(), dest) {
+                    eprintln!("[HMS Discovery] Broadcast V2 error: {}", e);
+                }
+            }
+
             std::thread::sleep(Duration::from_secs(BROADCAST_INTERVAL_SECS));
         }
     });

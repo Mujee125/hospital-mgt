@@ -88,6 +88,7 @@ import {
 } from "@/lib/queries";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
+import { patientDescriptor } from "@/lib/utils";
 import type {
   Medication,
   CreateMedication,
@@ -103,6 +104,7 @@ import {
   PageHeader,
   SectionCard,
   EmptyState,
+  ErrorState,
   LoadingState,
   PageToolbar,
   StatusBadge,
@@ -191,7 +193,7 @@ function MedicationCatalogSection({ canManage }: { canManage: boolean }) {
 
   // Pass null (not undefined) when search is empty so the query key is
   // stable across re-renders.
-  const { data: medications = [], isLoading } = useMedications(search.trim() || null);
+  const { data: medications = [], isLoading, isError, refetch, isFetching } = useMedications(search.trim() || null);
 
   return (
     <SectionCard
@@ -208,6 +210,8 @@ function MedicationCatalogSection({ canManage }: { canManage: boolean }) {
     >
       {isLoading ? (
         <LoadingState rows={6} />
+      ) : isError ? (
+        <ErrorState onRetry={() => void refetch()} retrying={isFetching} />
       ) : medications.length === 0 ? (
         <EmptyState
           icon={Pill}
@@ -651,7 +655,7 @@ function PrescriptionsSection({
   const [detailId, setDetailId] = useState<number | null>(null);
 
   // Pass null when filter is empty so the query key stays stable.
-  const { data: prescriptions = [], isLoading } = usePrescriptions(
+  const { data: prescriptions = [], isLoading, isError, refetch, isFetching } = usePrescriptions(
     null,
     statusFilter || null,
   );
@@ -671,6 +675,8 @@ function PrescriptionsSection({
     >
       {isLoading ? (
         <LoadingState rows={5} />
+      ) : isError ? (
+        <ErrorState onRetry={() => void refetch()} retrying={isFetching} />
       ) : prescriptions.length === 0 ? (
         <EmptyState
           icon={FileText}
@@ -892,7 +898,7 @@ function CreatePrescriptionDialog({ onClose }: { onClose: () => void }) {
                 <SelectContent>
                   {patients.map((p: PatientEhr) => (
                     <SelectItem key={p.id} value={p.id.toString()}>
-                      {p.first_name} {p.last_name} · {p.phone}
+                      {patientDescriptor(p)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -1100,12 +1106,19 @@ function PrescriptionDetailDialog({
   const rx = data;
   const items: PrescriptionItem[] = rx?.items ?? [];
 
-  const handleDispense = async (itemId: number) => {
+  const handleDispense = async (itemId: number, nonStockAck = false) => {
     try {
-      await dispense.mutateAsync(itemId);
+      await dispense.mutateAsync({ prescriptionItemId: itemId, nonStockAck });
       setPendingItemId(null);
-    } catch {
-      /* toast already shown */
+      setNonStockItemId(null);
+    } catch (err) {
+      // RCTF F-16: a no-inventory-match dispense is refused by the backend
+      // — surface the explicit non-stock confirmation before giving up.
+      const msg = String(err);
+      if (!nonStockAck && msg.includes("no matching inventory item")) {
+        setNonStockItemId(itemId);
+      }
+      /* other errors: toast already shown */
     }
   };
 
@@ -1119,6 +1132,9 @@ function PrescriptionDetailDialog({
       void handleDispense(item.id);
     }
   };
+
+  const [nonStockItemId, setNonStockItemId] = useState<number | null>(null);
+  const nonStockItem = items.find((it) => it.id === nonStockItemId) ?? null;
 
   const pendingItem = items.find((it) => it.id === pendingItemId) ?? null;
 
@@ -1285,6 +1301,38 @@ function PrescriptionDetailDialog({
                 className="gap-2"
               >
                 {dispense.isPending ? "Dispensing…" : "Confirm dispense"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {/* RCTF F-16: explicit confirmation when the backend found no
+          matching inventory item — the dispense proceeds with no stock
+          deduction, recorded as non-stock. */}
+      {nonStockItem && (
+        <Dialog open onOpenChange={(o) => !o && setNonStockItemId(null)}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>No matching inventory item</DialogTitle>
+              <DialogDescription>
+                <strong>{nonStockItem.medication_name}</strong> has no matching
+                inventory item (checked the medication catalog and the item
+                name). Confirm only if this medication is tracked outside the
+                inventory system — it will be dispensed with{" "}
+                <strong>no stock deduction</strong> and recorded as non-stock.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <DialogClose asChild>
+                <Button variant="outline">Cancel</Button>
+              </DialogClose>
+              <Button
+                variant="default"
+                onClick={() => void handleDispense(nonStockItem.id, true)}
+                disabled={dispense.isPending}
+              >
+                {dispense.isPending ? "Dispensing…" : "Confirm non-stock dispense"}
               </Button>
             </DialogFooter>
           </DialogContent>

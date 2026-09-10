@@ -219,9 +219,24 @@ async fn test_nc4_lab_emitters_fire_notifications() {
     let tech_id = seed_user(&pool, "nc4_tech", &pw, &["lab_technician"]).await;
     seed_session_row(&pool, tech_id, "hash_nc4_tech").await;
     let tech = state_for(&pool, tech_id, "hash_nc4_tech").await;
+    // RCTF F-06: lab_technician no longer holds lab.approve — the release
+    // step runs through a doctor (the corrected approver role). The tech
+    // still collects and enters the result.
+    let doc_id = seed_user(&pool, "nc4_doc", &pw, &["doctor"]).await;
+    seed_session_row(&pool, doc_id, "hash_nc4_doc").await;
+    let doc = state_for(&pool, doc_id, "hash_nc4_doc").await;
 
     let patient_id = seed_patient_with_phone(&pool, "Lab", "Notif", "+92300nc4a").await;
     let (order_id, tests) = seed_lab_order_rows(&pool, patient_id, 1).await;
+    // RCTF F-20: the critical alert targets the ORDERING user — attribute
+    // the order to the doctor so the direct-emit path is exercised (the
+    // fixture leaves ordered_by_user_id NULL).
+    sqlx::query("UPDATE lab_orders SET ordered_by_user_id = $1 WHERE id = $2")
+        .bind(doc_id)
+        .bind(order_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     collect_lab_sample_core(&pool, &tech, tests[0].0)
         .await
         .unwrap();
@@ -248,19 +263,40 @@ async fn test_nc4_lab_emitters_fire_notifications() {
             .await
             .unwrap();
     assert!(
-        critical_rows >= 1,
-        "critical entry must emit a doctor-role notification"
+        critical_rows >= 2,
+        "critical entry must emit the direct (ordering-user) notification AND the de-identified role broadcast"
     );
-    let (role,): (Option<String>,) = sqlx::query_as(
-        "SELECT role_target FROM app_notifications WHERE kind = 'lab_critical' ORDER BY id DESC LIMIT 1",
+    // RCTF F-20: the full-detail alert goes to the ORDERING USER only…
+    let (direct_user, direct_title): (Option<i32>, String) = sqlx::query_as(
+        "SELECT user_id, title FROM app_notifications \
+         WHERE kind = 'lab_critical' AND user_id IS NOT NULL ORDER BY id DESC LIMIT 1",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!(
-        role.as_deref(),
-        Some("doctor"),
-        "critical notifications target the doctor role"
+        direct_user,
+        Some(doc_id),
+        "full-detail alert targets the ordering user"
+    );
+    assert!(
+        direct_title.contains("Lab Notif"),
+        "the direct alert carries the patient identity for the ordering user, got: {}",
+        direct_title
+    );
+    // …and the doctor-role broadcast is DE-IDENTIFIED (no patient name).
+    let (role_title, role_body): (String, String) = sqlx::query_as(
+        "SELECT title, body FROM app_notifications \
+         WHERE kind = 'lab_critical' AND role_target = 'doctor' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !role_title.contains("Lab Notif") && !role_body.contains("Lab Notif"),
+        "role broadcasts must be de-identified (no patient name), got title: {:?} body: {:?}",
+        role_title,
+        role_body
     );
     let (entity,): (Option<i32>,) = sqlx::query_as(
         "SELECT entity_id FROM app_notifications WHERE kind = 'lab_critical' ORDER BY id DESC LIMIT 1",
@@ -274,9 +310,9 @@ async fn test_nc4_lab_emitters_fire_notifications() {
         "critical notification links back to the lab order"
     );
 
-    // Release it through the REAL approve core → a lab_released
-    // notification must appear for the doctor role.
-    approve_lab_result_core(&pool, &tech, tests[0].1, true)
+    // Release it through the REAL approve core (doctor, per F-06) → a
+    // lab_released notification for the ORDERING USER (per F-20).
+    approve_lab_result_core(&pool, &doc, tests[0].1, true)
         .await
         .unwrap();
     let (released_rows,): (i64,) =
@@ -286,7 +322,20 @@ async fn test_nc4_lab_emitters_fire_notifications() {
             .unwrap();
     assert!(
         released_rows >= 1,
-        "result release must emit a doctor-role notification"
+        "result release must notify the ordering user"
+    );
+    // RCTF F-20: the release goes to the ORDERING USER, never a role
+    // broadcast — the patient's identity stays with the responsible party.
+    let (released_target,): (Option<i32>,) = sqlx::query_as(
+        "SELECT user_id FROM app_notifications WHERE kind = 'lab_released' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        released_target,
+        Some(doc_id),
+        "release notification targets the ordering user"
     );
 }
 

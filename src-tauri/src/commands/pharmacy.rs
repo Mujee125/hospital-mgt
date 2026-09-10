@@ -382,6 +382,33 @@ pub async fn create_prescription_core(
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
+    // RCTF-FULL-SYSTEM-2026-09-09 F-02: the encounter, when provided, must
+    // belong to the SAME patient as the prescription — otherwise a tampered
+    // client could attach patient B's encounter to patient A's prescription
+    // and corrupt every encounter-based chart join downstream.
+    if let Some(enc_id) = prescription.encounter_id {
+        let owner: Option<(i32,)> =
+            sqlx::query_as("SELECT patient_id FROM encounters WHERE id = $1")
+                .bind(enc_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| crate::db::sanitize_db_error(&e))?;
+        match owner {
+            Some((pid,)) if pid == prescription.patient_id => {}
+            Some((pid,)) => {
+                tx.rollback().await.ok();
+                return Err(format!(
+                    "Encounter #{} belongs to a different patient (patient #{}, not #{}). The prescription was not created.",
+                    enc_id, pid, prescription.patient_id
+                ));
+            }
+            None => {
+                tx.rollback().await.ok();
+                return Err(format!("Encounter #{} does not exist.", enc_id));
+            }
+        }
+    }
+
     let row: (i32,) = sqlx::query_as(
         r#"INSERT INTO prescriptions
               (patient_id, doctor_id, encounter_id, prescribed_by_user_id, status, notes)
@@ -490,48 +517,109 @@ pub async fn create_prescription_core(
 /// iteration (the SRS explicitly allows the simplification).
 ///
 /// RBAC: `InventoryManage`.
+///
+/// RCTF-FULL-SYSTEM-2026-09-08 F-16: stock matching no longer relies on
+/// the free-text `medication_name` alone. The match order is
+///   1. `medication_id` → the catalog entry's brand_name (then
+///      generic_name) against inventory `name` — the identity the
+///      prescriber actually selected;
+///   2. legacy: the item's free-text `medication_name` (case-insensitive),
+///      for items written without a catalog link.
+/// A NO-MATCH dispense is now REFUSED by default (previously it marked the
+/// item dispensed, deducted nothing, and logged only in an audit JSON
+/// field — stock silently drifted from reality with no movement row).
+/// `non_stock_ack = Some(true)` performs an acknowledged non-stock
+/// dispense: the item is dispensed with no deduction, the audit row
+/// records `non_stock: true`, and the caller has explicitly confirmed the
+/// medication is tracked outside the inventory system.
 #[tauri::command]
 pub async fn dispense_prescription_item(
     pool: tauri::State<'_, PgPool>,
     session: tauri::State<'_, SessionState>,
     prescription_item_id: i32,
+    non_stock_ack: Option<bool>,
 ) -> Result<(), String> {
     let s = rbac::require_strong(&session, pool.inner(), Permission::InventoryManage).await?;
+    dispense_prescription_item_core(pool.inner(), &s, prescription_item_id, non_stock_ack).await
+}
 
+/// Dispense logic core (AERP Part G extraction pattern — testable without
+/// an AppHandle). See the command doc above for the RCTF F-16 contract.
+pub async fn dispense_prescription_item_core(
+    pool: &PgPool,
+    s: &crate::rbac::Session,
+    prescription_item_id: i32,
+    non_stock_ack: Option<bool>,
+) -> Result<(), String> {
     let mut tx = pool
         .begin()
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    // Lock the prescription_item row and read its current state.
-    let item_row: Option<(i32, i32, String, i32, bool)> = sqlx::query_as(
-        r#"SELECT id, prescription_id, medication_name, quantity, dispensed
-           FROM prescription_items WHERE id = $1 FOR UPDATE"#,
+    // Lock the prescription_item row and read its current state. F-16:
+    // also read medication_id so the catalog-identity match runs before
+    // the free-text fallback.
+    let item_row: Option<(i32, i32, Option<i32>, String, i32, bool)> = sqlx::query_as(
+        r#"SELECT pi.id, pi.prescription_id, pi.medication_id, pi.medication_name, pi.quantity, pi.dispensed
+           FROM prescription_items pi WHERE pi.id = $1 FOR UPDATE"#,
     )
     .bind(prescription_item_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
-    let (item_id, rx_id, med_name, qty, already_dispensed) =
+    let (item_id, rx_id, medication_id, med_name, qty, already_dispensed) =
         item_row.ok_or_else(|| format!("Prescription item {} not found.", prescription_item_id))?;
 
     if already_dispensed {
         return Err("This prescription item has already been dispensed.".to_string());
     }
 
-    // Decrement inventory if there's a matching inventory_items row.
-    // Match by name, case-insensitive, on the active rows. Use FOR UPDATE
-    // to prevent concurrent dispenses racing on the same stock row.
-    let inv_row: Option<(i32, Decimal)> = sqlx::query_as(
-        r#"SELECT id, stock_quantity FROM inventory_items
-           WHERE LOWER(name) = LOWER($1) AND is_active = TRUE
-           ORDER BY id ASC LIMIT 1 FOR UPDATE"#,
-    )
-    .bind(&med_name)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    // F-16 stock matching — catalog identity first, free-text fallback.
+    // FOR UPDATE on the inventory row prevents concurrent dispenses racing
+    // on the same stock.
+    let inv_row: Option<(i32, Decimal)> = match medication_id {
+        Some(mid) => {
+            let by_catalog = sqlx::query_as(
+                r#"SELECT ii.id, ii.stock_quantity
+                   FROM inventory_items ii
+                   JOIN medications m ON m.id = $1
+                   WHERE (LOWER(ii.name) = LOWER(m.brand_name)
+                       OR LOWER(ii.name) = LOWER(m.generic_name))
+                     AND ii.is_active = TRUE
+                   ORDER BY ii.id ASC
+                   LIMIT 1
+                   FOR UPDATE OF ii"#,
+            )
+            .bind(mid)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| crate::db::sanitize_db_error(&e))?;
+            match by_catalog {
+                Some(row) => Some(row),
+                // Catalog match found nothing → legacy free-text match.
+                None => sqlx::query_as(
+                    r#"SELECT id, stock_quantity FROM inventory_items
+                       WHERE LOWER(name) = LOWER($1) AND is_active = TRUE
+                       ORDER BY id ASC LIMIT 1 FOR UPDATE"#,
+                )
+                .bind(&med_name)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| crate::db::sanitize_db_error(&e))?,
+            }
+        }
+        // No catalog link on the item → legacy free-text match.
+        None => sqlx::query_as(
+            r#"SELECT id, stock_quantity FROM inventory_items
+               WHERE LOWER(name) = LOWER($1) AND is_active = TRUE
+               ORDER BY id ASC LIMIT 1 FOR UPDATE"#,
+        )
+        .bind(&med_name)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?,
+    };
 
     // Capture the bool before the if-let so the audit JSON below doesn't
     // depend on `Option<(i32, Decimal)>: Copy` (it IS Copy today because
@@ -539,6 +627,20 @@ pub async fn dispense_prescription_item(
     // bool explicitly is clearer and survives a future Decimal-loses-Copy
     // refactor).
     let inventory_adjusted = inv_row.is_some();
+
+    // F-16: no stock match anywhere → the dispense is REFUSED unless the
+    // caller explicitly acknowledges a non-stock dispense. The old
+    // behavior (mark dispensed, deduct nothing, only an audit JSON field
+    // records it) let stock silently drift from reality.
+    if !inventory_adjusted && non_stock_ack != Some(true) {
+        return Err(format!(
+            "'{}' has no matching inventory item (checked the medication catalog and the item name). \
+             If this medication is tracked outside the inventory system, confirm a non-stock dispense — \
+             it will be recorded with no stock deduction.",
+            med_name
+        ));
+    }
+    let non_stock = !inventory_adjusted;
 
     if let Some((inv_id, current_balance)) = inv_row {
         let qty_dec = Decimal::from(qty);
@@ -575,11 +677,13 @@ pub async fn dispense_prescription_item(
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
     }
-    // If no matching inventory row exists we still mark the prescription
-    // item dispensed — the medication may be tracked outside the system
-    // (e.g. directly issued by the manufacturer, or a non-stock item).
-    // The audit log captures the dispense either way; the inventory
-    // movement row is only written when stock was actually decremented.
+    // If no matching inventory row exists and the caller acknowledged a
+    // non-stock dispense, the prescription item is still marked dispensed —
+    // the medication is tracked outside the system (manufacturer-direct
+    // issue, ward-stock item). The audit row records non_stock: true so
+    // the reconciliation report can surface every acknowledged exception.
+    // The inventory movement row is only written when stock was actually
+    // decremented.
 
     // Mark the prescription_item as dispensed.
     sqlx::query(
@@ -617,8 +721,8 @@ pub async fn dispense_prescription_item(
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(
-        pool.inner(),
-        &s,
+        pool,
+        s,
         "prescription_dispense",
         "prescription_items",
         Some(&item_id.to_string()),
@@ -627,6 +731,7 @@ pub async fn dispense_prescription_item(
             "medication_name": med_name,
             "quantity": qty,
             "inventory_adjusted": inventory_adjusted,
+            "non_stock": non_stock,
         })),
     )
     .await;

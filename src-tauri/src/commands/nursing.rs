@@ -135,6 +135,70 @@ pub async fn record_vitals_core(
         return Err("At least one vital sign must be recorded.".to_string());
     }
 
+    // RCTF-FULL-SYSTEM-2026-09-08 F-22: plausibility guard. The classic
+    // error is a missed decimal (temperature 370 instead of 37.0, SpO2 9.8
+    // instead of 98) — implausible values previously stored cleanly and
+    // rendered in the 7-point trend chart nurses scan for deterioration.
+    // Ranges are HARD limits (not soft warnings): values outside them are
+    // physiologically impossible or certain data-entry errors, refused
+    // with the expected range so the nurse can correct the entry.
+    //   temperature 30–43 °C   (hypothermia to severe hyperthermia)
+    //   systolic    50–260 mmHg
+    //   diastolic   30–150 mmHg
+    //   pulse       20–250 bpm
+    //   resp rate   4–60 /min
+    //   SpO2        50–100 %
+    if let Some(t) = request.temperature_c {
+        if !(30.0..=43.0).contains(&t) {
+            return Err(format!(
+                "Temperature {} °C is not physiologically plausible (expected 30–43). \
+                 Check for a missed decimal point.",
+                t
+            ));
+        }
+    }
+    if let Some(v) = request.systolic_bp {
+        if !(50..=260).contains(&v) {
+            return Err(format!(
+                "Systolic BP {} mmHg is not physiologically plausible (expected 50–260).",
+                v
+            ));
+        }
+    }
+    if let Some(v) = request.diastolic_bp {
+        if !(30..=150).contains(&v) {
+            return Err(format!(
+                "Diastolic BP {} mmHg is not physiologically plausible (expected 30–150).",
+                v
+            ));
+        }
+    }
+    if let Some(v) = request.pulse_bpm {
+        if !(20..=250).contains(&v) {
+            return Err(format!(
+                "Pulse {} bpm is not physiologically plausible (expected 20–250).",
+                v
+            ));
+        }
+    }
+    if let Some(v) = request.resp_rate {
+        if !(4..=60).contains(&v) {
+            return Err(format!(
+                "Respiratory rate {}/min is not physiologically plausible (expected 4–60).",
+                v
+            ));
+        }
+    }
+    if let Some(v) = request.spo2_pct {
+        if !(50..=100).contains(&v) {
+            return Err(format!(
+                "SpO2 {}% is not physiologically plausible (expected 50–100). \
+                 Check for a missed decimal point.",
+                v
+            ));
+        }
+    }
+
     // Guard: the admission must exist and be currently admitted (no vitals
     // on discharged/dead rows — data hygiene for the trend view).
     let active: Option<(i32,)> = sqlx::query_as(
@@ -297,6 +361,18 @@ pub async fn record_medication_administration(
 
 /// MAR-recording logic core (AERP Part G extraction pattern) — see
 /// `record_vitals_core` for the rationale.
+///
+/// RCTF-FULL-SYSTEM-2026-09-08 F-14: the previous implementation ran the
+/// patient-match SELECT on the pool and then a separate unconditional
+/// INSERT — (a) two nurses tapping "administered" within the same minute
+/// produced TWO rows (an accidental double dose left no system trace),
+/// (b) a discharge between the check and the insert landed a MAR row on a
+/// discharged admission, and (c) the prescription could be cancelled in
+/// that window. All checks now run inside ONE transaction with row locks:
+/// the admission and prescription rows are taken `FOR UPDATE`, the
+/// prescription must be ACTIVE (status 'active'), and an 'administered'
+/// entry within the last 15 minutes for the same (admission, item) is
+/// refused as a likely double-administration.
 pub async fn record_medication_administration_core(
     pool: &PgPool,
     session_state: &SessionState,
@@ -308,21 +384,60 @@ pub async fn record_medication_administration_core(
         return Err("MAR status must be administered, held, or refused.".to_string());
     }
 
-    // The prescription item must belong to the same patient as the admission —
-    // prevents cross-patient MAR entries via a tampered frontend.
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    // The prescription item must belong to the same patient as the
+    // admission, the admission must still be ACTIVE, and the prescription
+    // itself must still be ACTIVE — checked INSIDE the transaction with
+    // row locks on both, so a concurrent discharge or rx cancellation
+    // cannot slip a MAR entry in after the check.
     let patient_match: Option<(i32,)> = sqlx::query_as(
         "SELECT a.patient_id FROM ipd_admissions a \
          JOIN prescriptions rx ON rx.id = (SELECT prescription_id FROM prescription_items WHERE id = $2) \
-         WHERE a.id = $1 AND rx.patient_id = a.patient_id AND a.status = 'admitted'",
+         WHERE a.id = $1 AND rx.patient_id = a.patient_id \
+           AND a.status = 'admitted' \
+           AND rx.status = 'active' \
+         FOR UPDATE OF a, rx",
     )
     .bind(request.admission_id)
     .bind(request.prescription_item_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
     let patient_id = patient_match
-        .ok_or_else(|| "This medication does not belong to the patient on this admission (or the patient is not admitted).".to_string())?
+        .ok_or_else(|| "This medication does not belong to the patient on this admission, the admission is not active, or the prescription is not active.".to_string())?
         .0;
+
+    // Double-administration guard: an 'administered' entry for the same
+    // (admission, item) within the last 15 minutes is almost certainly a
+    // double-tap or a missed handover — refuse it so the nurse verifies
+    // before the dose is given. 'held'/'refused' entries are exempt (both
+    // can legitimately repeat) and a deliberate re-administration after
+    // the window (e.g. a 4-hourly PRN) passes.
+    if request.status == "administered" {
+        let recent: Option<(i32,)> = sqlx::query_as(
+            "SELECT id FROM medication_administrations \
+             WHERE admission_id = $1 AND prescription_item_id = $2 AND status = 'administered' \
+               AND administered_at >= NOW() - INTERVAL '15 minutes' \
+             LIMIT 1",
+        )
+        .bind(request.admission_id)
+        .bind(request.prescription_item_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+        if recent.is_some() {
+            return Err(
+                "This medication was already recorded as administered in the last 15 minutes \
+                 for this admission. Verify with the other nurse before recording again — \
+                 possible double administration."
+                    .to_string(),
+            );
+        }
+    }
 
     let row: (i32,) = sqlx::query_as(
         r#"INSERT INTO medication_administrations
@@ -336,9 +451,13 @@ pub async fn record_medication_administration_core(
     .bind(&request.status)
     .bind(s.user_id)
     .bind(request.notes.as_deref())
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     audit::for_session(
         pool,

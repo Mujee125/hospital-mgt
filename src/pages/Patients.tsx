@@ -7,7 +7,6 @@
  */
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { motion } from "motion/react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -21,20 +20,36 @@ import {
   PageHeader,
   SectionCard,
   EmptyState,
+  ErrorState,
   LoadingState,
   PageToolbar,
+  Pagination,
+  useDiscardGuard,
 } from "@/components/layout/shared";
 
 export function Patients() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [searchQuery, setSearchQuery] = useState("");
 
-  const { data: patients = [], isLoading } = usePatients();
+  // F-09: a failed load must show the ERROR state, never "No patients
+  // registered yet" (staff would re-register patients mid-outage).
+  const { data: patients = [], isLoading, isError, refetch, isFetching } = usePatients();
   const deletePatient = useDeletePatient();
+
+  // F-13: pagination. A 10k-patient DB previously rendered every row (with
+  // per-row animations — the motion import is gone too); now 25 rows are
+  // mounted at a time. Clamping page when the filter shrinks the result
+  // (e.g. searching) avoids an out-of-range page state.
+  const [page, setPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(25);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedPatient, setSelectedPatient] = useState<Patient | undefined>(undefined);
   const [deleteTarget, setDeleteTarget] = useState<Patient | null>(null);
+  // F-21: tracks unsaved edits in the open patient dialog so Esc/overlay
+  // clicks confirm instead of silently discarding a 20-field edit.
+  const [formDirty, setFormDirty] = useState(false);
+  const guardClose = useDiscardGuard();
 
   // Deep-linkable "add" trigger — Dashboard's quick-action button
   // navigates to /patients?add=1 instead of the old prop-drilled
@@ -84,6 +99,15 @@ export function Patients() {
     );
   });
 
+  // F-13: clamp the page into range (filter shrink / data refresh) and
+  // slice the visible window.
+  const pageCount = Math.max(1, Math.ceil(filteredPatients.length / rowsPerPage));
+  const safePage = Math.min(page, pageCount);
+  const pagePatients = filteredPatients.slice(
+    (safePage - 1) * rowsPerPage,
+    safePage * rowsPerPage,
+  );
+
   const isSearchActive = !!searchQuery.trim();
 
   return (
@@ -102,6 +126,8 @@ export function Patients() {
       <SectionCard>
         {isLoading ? (
           <LoadingState rows={6} />
+        ) : isError ? (
+          <ErrorState onRetry={() => void refetch()} retrying={isFetching} />
         ) : filteredPatients.length === 0 ? (
           <EmptyState
             icon={Users}
@@ -127,7 +153,10 @@ export function Patients() {
                 <Input
                   placeholder="Search by name, phone, email, or address…"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    setPage(1); // F-13: a new search starts on page 1
+                  }}
                   className="pl-9 h-10"
                 />
               </div>
@@ -149,12 +178,12 @@ export function Patients() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredPatients.map((patient, i) => (
-                  <motion.tr
+                {/* F-13: only the visible page's rows are mounted; the
+                    per-row motion animation is gone (10k staggered
+                    animations froze the reception workstation). */}
+                {pagePatients.map((patient) => (
+                  <TableRow
                     key={patient.id}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ duration: 0.15, delay: Math.min(i * 0.02, 0.3) }}
                     className="border-b border-border/70 transition-colors hover:bg-muted/40"
                   >
                     <TableCell className="font-semibold text-foreground">
@@ -192,15 +221,34 @@ export function Patients() {
                         </Button>
                       </div>
                     </TableCell>
-                  </motion.tr>
+                  </TableRow>
                 ))}
               </TableBody>
             </Table>
+            <Pagination
+              totalItems={filteredPatients.length}
+              page={safePage}
+              rowsPerPage={rowsPerPage}
+              onPageChange={setPage}
+              onRowsPerPageChange={(rows) => {
+                setRowsPerPage(rows);
+                setPage(1);
+              }}
+            />
           </>
         )}
       </SectionCard>
 
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+      {/* F-21: closing (Esc/overlay) with unsaved edits confirms first. */}
+      <Dialog
+        open={dialogOpen}
+        onOpenChange={(o) => {
+          guardClose(o, formDirty, () => {
+            setDialogOpen(false);
+            setFormDirty(false);
+          });
+        }}
+      >
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>{selectedPatient ? "Edit patient details" : "Register new patient"}</DialogTitle>
@@ -211,7 +259,12 @@ export function Patients() {
             </DialogDescription>
           </DialogHeader>
           <div className="pt-2">
-            <PatientForm patient={selectedPatient} onSuccess={handleFormSuccess} onCancel={() => setDialogOpen(false)} />
+            <PatientForm
+              patient={selectedPatient}
+              onSuccess={handleFormSuccess}
+              onCancel={() => setDialogOpen(false)}
+              onDirtyChange={setFormDirty}
+            />
           </div>
         </DialogContent>
       </Dialog>
