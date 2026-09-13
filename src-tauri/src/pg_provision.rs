@@ -335,7 +335,30 @@ fn restart_service_and_wait() -> Result<(), String> {
         }
     }
 
-    // Wait up to 15 seconds for service to be fully ready
-    std::thread::sleep(Duration::from_secs(4));
+    // Wait until the service is actually ready, not a fixed sleep: on slow
+    // clinic disks START_PENDING can outlast any fixed delay. Poll
+    // is-service-RUNNING, then pg_isready, up to 30 s total. (The caller
+    // additionally polls; this keeps restart_service_and_wait itself
+    // honest for every future caller.)
+    let bin_dir = default_pg_bin_dir();
+    for _ in 0..30 {
+        let running = Command::new("sc")
+            .args(["query", SERVICE_NAME])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("RUNNING"))
+            .unwrap_or(false);
+        if running {
+            if let Some(dir) = &bin_dir {
+                if wait_until_accepting_connections(dir, 5432, 1) {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+    // Not fully ready within 30 s — do not fail the whole provisioning here;
+    // the caller's readiness polling reports the final verdict.
     Ok(())
 }

@@ -23,6 +23,55 @@
 
 !include "LogicLib.nsh"
 
+; ── Service state polling ─────────────────────────────────────────────────
+; QA-2026-09-11 (live install failure, DESKTOP-UF64APU): the fixed
+; `Sleep 2000` after `sc start` lost the race against PostgreSQL's own
+; startup — on a 2008-era clinic HDD the service reports "running" within
+; 2 s but the cluster needs several more seconds before it accepts
+; connections; psql then died with "FATAL: the database system is
+; starting up" and the install aborted at "Failed to set the database
+; password". Poll pg_isready (exit 0 ONLY when the server truly accepts
+; connections) for up to 60 s instead of guessing a fixed delay.
+!macro PG_WAIT_READY
+  DetailPrint "Waiting for PostgreSQL to accept connections..."
+  StrCpy $9 0
+  ${Do}
+    nsExec::ExecToStack '"$APPDATA\HMS\pgsql\bin\pg_isready.exe" -h 127.0.0.1 -p 5432'
+    Pop $0
+    Pop $8
+    ${If} $0 == 0
+      ${ExitDo}
+    ${EndIf}
+    IntOp $9 $9 + 1
+    ${If} $9 >= 60
+      MessageBox MB_OK|MB_ICONSTOP "PostgreSQL did not become ready within 60 seconds after starting. Setup cannot continue.$\r$\n$\r$\nOpen services.msc and try starting 'HMS-PostgreSQL' by hand to see the real error (also check C:\ProgramData\HMS\pgdata\pg_log), then run this installer again."
+      Abort
+    ${EndIf}
+    Sleep 1000
+  ${Loop}
+!macroend
+
+; Wait until the service is fully stopped — `sc stop` is asynchronous, and
+; STOP_PENDING also counts as "not yet safe to proceed". Capped at 30 s;
+; on expiry we continue and let the PG_WAIT_READY that follows surface
+; any real failure with a clear message instead of a mystery.
+!macro PG_WAIT_STOPPED
+  StrCpy $9 0
+  ${Do}
+    nsExec::ExecToStack 'cmd /c sc query HMS-PostgreSQL | findstr /C:"RUNNING" /C:"STOP_PENDING"'
+    Pop $0
+    Pop $8
+    ${If} $0 != 0
+      ${ExitDo}
+    ${EndIf}
+    IntOp $9 $9 + 1
+    ${If} $9 >= 30
+      ${ExitDo}
+    ${EndIf}
+    Sleep 1000
+  ${Loop}
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
 
   ; Ensure $APPDATA resolves to the ALL USERS location (C:\ProgramData),
@@ -92,7 +141,7 @@ run_setup_repair:
 
   ; Stop service to overwrite pg_hba.conf safely
   nsExec::ExecToLog 'sc stop HMS-PostgreSQL'
-  Sleep 2000
+  !insertmacro PG_WAIT_STOPPED
 
 run_setup_common:
   DetailPrint "Generating database credentials..."
@@ -159,7 +208,7 @@ skip_initdb_and_register:
 
   DetailPrint "Starting PostgreSQL service..."
   nsExec::ExecToLog 'sc start HMS-PostgreSQL'
-  Sleep 2000 ; give the service a moment to come fully online before connecting
+  !insertmacro PG_WAIT_READY
 
   DetailPrint "Securing database credentials..."
   FileOpen $8 "$APPDATA\HMS\set_pw.sql" w
@@ -192,8 +241,12 @@ skip_initdb_and_register:
   ; time (observed live: listen_addresses x2 in postgresql.conf). Last-wins
   ; made it functionally harmless, but the file grew unboundedly and manual
   ; inspection became misleading. Guard: only append when not already there
-  ; (findstr: exit 0 = found, 1 = not found).
-  nsExec::ExecToLog 'findstr /C:"listen_addresses" "$APPDATA\HMS\pgdata\postgresql.conf"'
+  ; (findstr: exit 0 = found, 1 = not found). QA-2026-09-11: added /B
+  ; (beginning-of-line) — without it the guard matched the stock COMMENTED
+  ; default "#listen_addresses = 'localhost'" that initdb writes into every
+  ; fresh postgresql.conf, so fresh installs silently skipped the append and
+  ; the server stayed loopback-only (LAN clients could never connect).
+  nsExec::ExecToLog 'findstr /B /C:"listen_addresses" "$APPDATA\HMS\pgdata\postgresql.conf"'
   Pop $0
   ${If} $0 != 0
     FileOpen $3 "$APPDATA\HMS\pgdata\postgresql.conf" a
@@ -217,9 +270,9 @@ skip_initdb_and_register:
 
   DetailPrint "Restarting PostgreSQL to apply security settings..."
   nsExec::ExecToLog 'sc stop HMS-PostgreSQL'
-  Sleep 2000
+  !insertmacro PG_WAIT_STOPPED
   nsExec::ExecToLog 'sc start HMS-PostgreSQL'
-  Sleep 2000
+  !insertmacro PG_WAIT_READY
 
   ; ── Write the machine-wide config with the generated credentials ──
   DetailPrint "Saving configuration..."

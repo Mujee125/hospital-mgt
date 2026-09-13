@@ -442,8 +442,26 @@ async fn initialize_database(app_handle: tauri::AppHandle) -> Result<String, Str
         app_handle.manage(pool.as_ref().clone());
         if let Some(old) = existing {
             if !old.is_closed() {
-                log_info!(&app_handle, "Closing superseded DB pool (re-initialize)");
-                let _ = old.close().await;
+                // Live fix (2026-09-12): closing the superseded pool
+                // immediately made any query that had just resolved the OLD
+                // pool from Tauri state fail with "attempted to acquire a
+                // connection on a closed pool" (observed as "Couldn't load
+                // data — Failed to get queue" on a clinic PC's first boot
+                // after license install). Commands invoked after the
+                // manage() above already see the new pool; delay the close
+                // so in-flight work against the old pool finishes. The
+                // spawn is detached on purpose — app exit drops the pool
+                // anyway, and idle_timeout reaps leftovers if the close
+                // never runs.
+                log_info!(
+                    &app_handle,
+                    "Scheduling superseded DB pool close in 10s (grace for in-flight queries)"
+                );
+                let old_pool = old.inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    let _ = old_pool.close().await;
+                });
             }
         }
     }
@@ -482,6 +500,58 @@ async fn initialize_database(app_handle: tauri::AppHandle) -> Result<String, Str
     };
     log_info!(&app_handle, "initialize_database complete → {}", result);
     Ok(result)
+}
+
+/// Poll PostgreSQL until it truly accepts connections, for up to 60 s.
+///
+/// First-launch fix (2026-09-12, live clinic PC): the old fixed `sleep(5)`
+/// plus a single health check lost the race against the SSL-provisioning
+/// service restart on a 2008-era clinic HDD — the boot errored, and the
+/// retry that followed then raced the superseded-pool swap, surfacing as
+/// "attempted to acquire a connection on a closed pool" UI errors.
+/// `check_postgres_health` also early-returns without polling pg_isready
+/// while `sc query` still reports START_PENDING (not RUNNING), so a single
+/// call can see "not accepting" purely because the service is mid-start.
+/// Poll instead of guessing a fixed delay.
+#[cfg(feature = "server-build")]
+async fn wait_for_postgres_ready(
+    app_handle: &tauri::AppHandle,
+    port: u16,
+    context: &str,
+) -> Result<(), String> {
+    for attempt in 1..=60u32 {
+        let port_c = port;
+        let health = tauri::async_runtime::spawn_blocking(move || {
+            let bin_dir = pg_provision::default_pg_bin_dir().unwrap_or_else(|| {
+                std::path::PathBuf::from(r"C:\ProgramData\HMS\pgsql\bin")
+            });
+            pg_provision::check_postgres_health(&bin_dir, port_c)
+        })
+        .await
+        .map_err(|e| format!("Health check panicked: {}", e))??;
+
+        if health.accepting_connections {
+            log_info!(
+                app_handle,
+                "PostgreSQL accepting connections (attempt {}/60){}",
+                attempt,
+                context
+            );
+            return Ok(());
+        }
+        log_warn!(
+            app_handle,
+            "PostgreSQL not accepting yet (attempt {}/60){} — retrying in 1 s",
+            attempt,
+            context
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Err(format!(
+        "PostgreSQL did not accept connections within 60 seconds{}. \
+         Please restart this PC and try again.",
+        context
+    ))
 }
 
 // ── DB error diagnostics (pub so pairing.rs can reuse it) ────────────────────
@@ -731,27 +801,8 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
                 .await
                 .map_err(|e| format!("SSL repair panicked: {}", e))??;
 
-                log_info!(app_handle, "SSL repair done — re-checking health");
-                let port_r = cfg.db_port;
-                let health_r = tauri::async_runtime::spawn_blocking(move || {
-                    let bin_dir = pg_provision::default_pg_bin_dir().unwrap_or_else(|| {
-                        std::path::PathBuf::from(r"C:\ProgramData\HMS\pgsql\bin")
-                    });
-                    pg_provision::check_postgres_health(&bin_dir, port_r)
-                })
-                .await
-                .map_err(|e| format!("Post-repair health check panicked: {}", e))??;
-
-                log_info!(
-                    app_handle,
-                    "Post-repair accepting: {}",
-                    health_r.accepting_connections
-                );
-                if !health_r.accepting_connections {
-                    return Err("PostgreSQL did not recover after SSL repair. \
-                         Please restart this PC and try again."
-                        .to_string());
-                }
+                log_info!(app_handle, "SSL repair done — waiting for PostgreSQL to be ready");
+                wait_for_postgres_ready(app_handle, cfg.db_port, " (after SSL repair)").await?;
             } else if needs_setup {
                 log_info!(app_handle, "First-time SSL setup");
                 let (pd, cp, kp) = (pgdata_dir.clone(), cert_path.clone(), key_path.clone());
@@ -773,28 +824,14 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
                             "Waiting for PostgreSQL to restart with SSL...",
                         )
                         .ok();
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-                    let port_s = cfg.db_port;
-                    let health_s = tauri::async_runtime::spawn_blocking(move || {
-                        let bin_dir = pg_provision::default_pg_bin_dir().unwrap_or_else(|| {
-                            std::path::PathBuf::from(r"C:\ProgramData\HMS\pgsql\bin")
-                        });
-                        pg_provision::check_postgres_health(&bin_dir, port_s)
-                    })
-                    .await
-                    .map_err(|e| format!("Post-SSL health check panicked: {}", e))??;
-
-                    log_info!(
-                        app_handle,
-                        "Post-SSL accepting: {}",
-                        health_s.accepting_connections
-                    );
-                    if !health_s.accepting_connections {
-                        return Err("PostgreSQL did not come back after enabling SSL. \
-                             Please restart this PC and try again."
-                            .to_string());
-                    }
+                    // Live fix (2026-09-12): was a fixed sleep(5) + ONE health
+                    // check — on a 2008-era clinic HDD PostgreSQL needed
+                    // longer than that, the boot failed, and the subsequent
+                    // retry hit the pool-swap race ("closed pool" UI errors).
+                    // Poll up to 60 s instead.
+                    wait_for_postgres_ready(app_handle, cfg.db_port, " (after enabling SSL)")
+                        .await?;
                 }
             } else {
                 log_info!(app_handle, "SSL already fully configured — nothing to do");
