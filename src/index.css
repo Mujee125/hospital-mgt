@@ -63,20 +63,29 @@
   --muted-foreground: 214 40% 46%;    /* #476FA4 steel blue */
 
   /* ── Status colors ─────────────────────────────────────────────────── */
+  /* UX-U-08 (2026-09-13): success/warning darkened for WCAG 2.2 AA text
+     contrast on white surfaces. Verified with scripts/contrast_audit.py:
+       old --success (157 95% 35%) = 2.88:1 FAIL → new (156 84% 25%) = 5.72:1
+       old --warning (34 90% 44%)  = 3.09:1 FAIL → new (30 95% 33%)  = 5.45:1
+     Both now also pass on their own 10%-tint StatusBadge chips (4.96 /
+     4.74) and fix white-on-success/warning button text. Destructive (red,
+     6.55:1) and the scheduled blue (7.75:1) already passed. */
   --destructive: 356 68% 42%;         /* #B4242F red */
   --destructive-foreground: 0 0% 100%;
-  --success: 157 95% 35%;             /* #04AC6C success green */
+  --success: 156 84% 25%;             /* deep clinical green — AA text-safe */
   --success-foreground: 0 0% 100%;
-  --warning: 34 90% 44%;              /* #C87F0A amber */
+  --warning: 30 95% 33%;              /* deep amber — AA text-safe */
   --warning-foreground: 0 0% 100%;
   --info: 215 95% 33%;                /* #0447A4 primary blue */
 
-  /* Appointment/token/bill lifecycle — mapped to brand palette */
+  /* Appointment/token/bill lifecycle — mapped to brand palette.
+     Confirmed/no-show inherit the AA-darkened success/warning hues so the
+     shared StatusBadge text passes contrast in every usage context. */
   --status-scheduled: 215 95% 33%;    /* #0447A4 primary blue */
-  --status-confirmed: 157 95% 35%;    /* #04AC6C success green */
+  --status-confirmed: 156 84% 25%;    /* AA-safe clinical green */
   --status-completed: 214 40% 46%;    /* #476FA4 steel blue */
   --status-cancelled: 356 68% 42%;    /* #B4242F red */
-  --status-no-show: 34 90% 44%;       /* #C87F0A amber */
+  --status-no-show: 30 95% 33%;       /* AA-safe deep amber */
 
   /* ── Borders & rings ───────────────────────────────────────────────── */
   --border: 209 36% 88%;              /* pale blue-light gray */
@@ -167,17 +176,19 @@
   --muted: 198 60% 14%;
   --muted-foreground: 209 36% 65%;    /* #7EA1C2 soft blue */
 
-  --destructive: 356 60% 58%;
-  --destructive-foreground: 0 0% 100%;
-  --success: 157 95% 45%;             /* bright green */
+  /* UX-U-08: destructive brightened for AA text contrast on the dark navy
+     card (3.59:1 → 4.95:1, scripts/contrast_audit.py). */
+  --destructive: 356 70% 68%;
+  --destructive-foreground: 198 90% 13%;
+  --success: 157 84% 45%;             /* AA on dark: 8.28:1 */
   --success-foreground: 0 0% 100%;
-  --warning: 34 85% 55%;
-  --warning-foreground: 0 0% 100%;
+  --warning: 34 85% 55%;              /* AA on dark: 6.36:1 */
+  --warning-foreground: 198 90% 13%;
 
   --status-scheduled: 215 95% 58%;    /* brighter blue-dark */
-  --status-confirmed: 157 95% 50%;    /* brighter green */
+  --status-confirmed: 157 84% 50%;    /* brighter green */
   --status-completed: 209 36% 70%;    /* blue-light */
-  --status-cancelled: 356 60% 58%;
+  --status-cancelled: 356 70% 68%;
   --status-no-show: 34 85% 55%;
 
   --border: 198 60% 22%;

@@ -95,11 +95,15 @@ export function Queue() {
                     {has(PERMISSIONS.QueueManage) && (
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-1">
-                          {/* F-21: disabled while a mutation is in flight — a
-                              double-click previously advanced the queue past a
-                              patient (two completes/skips per tap-tap). */}
+                          {/* U-06: call_next_token(doctor_id) advances the
+                              NEXT waiting token for THIS ROW's doctor — it
+                              does NOT call the patient in this row. The
+                              control is labelled with exactly that
+                              behavior so the operator never believes they
+                              called a specific patient when they didn't
+                              (wrong-patient safety). */}
                           {t.status === "waiting" && (
-                            <Button size="icon" variant="ghost" aria-label={`Call token #${t.token_number}`} className="h-8 w-8 text-muted-foreground hover:text-foreground" disabled={callNext.isPending || setStatus.isPending} onClick={() => callNext.mutate({ doctor_id: t.doctor_id })} title="Call">
+                            <Button size="icon" variant="ghost" aria-label={`Call next waiting patient for ${t.doctor_name ?? "any practitioner"}`} className="h-8 w-8 text-muted-foreground hover:text-foreground" disabled={callNext.isPending || setStatus.isPending} onClick={() => callNext.mutate({ doctor_id: t.doctor_id })} title={`Call next waiting patient for ${t.doctor_name ?? "any practitioner"}`}>
                               <Play className="h-3.5 w-3.5" />
                             </Button>
                           )}

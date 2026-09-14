@@ -1,10 +1,31 @@
 import { useState } from "react";
+import { flushSync } from "react-dom";
+import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { toast } from "sonner";
-import { useCreateDoctor, useUpdateDoctor } from "@/lib/queries";
+import {
+  useCreateDoctor,
+  useUpdateDoctor,
+  useSpecializations,
+  useDoctors,
+} from "@/lib/queries";
 import { ActionBar, FormField } from "@/components/layout/shared";
+import { MultiSelectChips } from "@/components/forms/MultiSelectChips";
+import {
+  SPECIALIZATION_PRESETS,
+  QUALIFICATION_PRESETS,
+  mergeOptions,
+  parseSelection,
+} from "@/lib/clinicalPresets";
 
 interface Doctor {
   id?: number;
@@ -37,6 +58,48 @@ export function DoctorForm({ doctor, onSuccess, onCancel }: DoctorFormProps) {
   const [phone, setPhone] = useState(doctor?.phone || "");
   const [specialization, setSpecialization] = useState(doctor?.specialization || "");
   const [qualification, setQualification] = useState(doctor?.qualification || "");
+
+  // Selectable-option state (UX-2026-09-13): the specialization dropdown
+  // is curated presets ∪ the DB-distinct list (get_specializations is
+  // SELECT DISTINCT over doctors) ∪ options added inline this session —
+  // a newly typed option persists automatically once a doctor is saved
+  // with it. Qualification options are derived client-side from the
+  // registered roster (the backend exposes no get_qualifications command;
+  // each doctor's stored value is comma-separated) ∪ curated presets.
+  const { data: dbSpecializations = [] } = useSpecializations();
+  const { data: roster = [] } = useDoctors();
+  const [extraSpecOptions, setExtraSpecOptions] = useState<string[]>([]);
+  const [addingSpec, setAddingSpec] = useState(false);
+  const [specDraft, setSpecDraft] = useState("");
+
+  const specializationOptions = mergeOptions(
+    SPECIALIZATION_PRESETS,
+    dbSpecializations,
+    extraSpecOptions,
+  );
+  const qualificationOptions = mergeOptions(
+    QUALIFICATION_PRESETS,
+    roster.flatMap((d) => parseSelection(d.qualification)),
+  );
+
+
+  /** + Add (specialization): register the typed option and select it.
+   *  The option registration is flushed synchronously BEFORE the value
+   *  flips: Radix's hidden form-integration <select> (SelectBubbleInput)
+   *  reacts to a controlled value CHANGE by assigning the value and
+   *  dispatching a native change event — against whatever <option>s are
+   *  mounted at that moment. If the new option hasn't registered/remounted
+   *  yet, the browser clamps the value to "" and the change ECHOES
+   *  onValueChange(""), silently discarding the selection (reproduced
+   *  and caught by the unit test; same path in real browsers). */
+  const commitSpecDraft = () => {
+    const trimmed = specDraft.trim();
+    if (trimmed === "") return;
+    flushSync(() => setExtraSpecOptions((prev) => [...prev, trimmed]));
+    setSpecialization(trimmed);
+    setSpecDraft("");
+    setAddingSpec(false);
+  };
 
   const formatTimeForInput = (timeStr?: string) => {
     if (!timeStr) return "";
@@ -143,25 +206,93 @@ export function DoctorForm({ doctor, onSuccess, onCancel }: DoctorFormProps) {
         </FormField>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <FormField label="Specialization" htmlFor="specialization" required>
-          <Input
-            id="specialization"
-            placeholder="Cardiology"
-            value={specialization}
-            onChange={(e) => setSpecialization(e.target.value)}
-            disabled={loading}
-            required
-          />
+      {/* Specialization + Qualifications: selectable options with an
+          inline "+ Add" path for anything the lists don't cover. */}
+      <div className="grid grid-cols-1 gap-4">
+        <FormField
+          label="Specialization"
+          htmlFor="specialization"
+          required
+          hint="Pick from the list — or use the + button to add a new option."
+        >
+          <div className="flex gap-2">
+            <Select
+              value={specialization}
+              onValueChange={(val) => setSpecialization(val)}
+              disabled={loading}
+            >
+              <SelectTrigger id="specialization" className="flex-1">
+                <SelectValue placeholder="Select specialization" />
+              </SelectTrigger>
+              <SelectContent>
+                {specializationOptions.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              aria-label="Add new specialization option"
+              title="Add a new specialization option"
+              onClick={() => {
+                setAddingSpec((v) => !v);
+                setSpecDraft("");
+              }}
+              disabled={loading}
+              className="h-10 w-10 shrink-0"
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
+          </div>
+          {addingSpec && (
+            <div className="flex gap-2 mt-2">
+              <Input
+                id="specialization_new"
+                value={specDraft}
+                onChange={(e) => setSpecDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    // Never submit the parent form from this input.
+                    e.preventDefault();
+                    commitSpecDraft();
+                  }
+                }}
+                placeholder="Type the new specialization"
+                autoFocus
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={commitSpecDraft}
+                disabled={specDraft.trim() === ""}
+                className="shrink-0 gap-1"
+                aria-label="Add specialization option"
+              >
+                <Plus className="h-3.5 w-3.5" /> Add
+              </Button>
+            </div>
+          )}
         </FormField>
-        <FormField label="Qualifications" htmlFor="qualification" required>
-          <Input
+
+        <FormField
+          label="Qualifications"
+          htmlFor="qualification"
+          required
+          hint="Select one or more — or type others and click Add."
+        >
+          <MultiSelectChips
             id="qualification"
-            placeholder="MD, FACC"
+            label="Qualifications"
+            options={qualificationOptions}
             value={qualification}
-            onChange={(e) => setQualification(e.target.value)}
+            onChange={setQualification}
             disabled={loading}
-            required
+            placeholder="Add other qualification…"
           />
         </FormField>
       </div>

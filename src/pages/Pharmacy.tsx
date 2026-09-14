@@ -89,6 +89,7 @@ import {
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
 import { patientDescriptor } from "@/lib/utils";
+import { PatientSafetyBanner } from "@/components/clinical/PatientSafetyBanner";
 import type {
   Medication,
   CreateMedication,
@@ -108,6 +109,7 @@ import {
   LoadingState,
   PageToolbar,
   StatusBadge,
+  useDiscardGuard,
 } from "@/components/layout/shared";
 
 // ── Catalog constants ────────────────────────────────────────────────────────
@@ -650,7 +652,13 @@ function PrescriptionsSection({
   canPrescribe: boolean;
   canDispense: boolean;
 }) {
-  const [statusFilter, setStatusFilter] = useState<string>("");
+  // U-10b: the pharmacist's work queue is PENDING dispense — the filter
+  // defaults to "active" (the working set: created, awaiting dispense)
+  // instead of ALL historical prescriptions. One click restores the full
+  // history. Reception-visible "active" hides nothing clinical: the
+  // dispensing history remains fully reachable and the backend returns
+  // the same rows either way.
+  const [statusFilter, setStatusFilter] = useState<string>("active");
   const [createOpen, setCreateOpen] = useState(false);
   const [detailId, setDetailId] = useState<number | null>(null);
 
@@ -809,6 +817,8 @@ function CreatePrescriptionDialog({ onClose }: { onClose: () => void }) {
   const { data: doctors = [] } = useDoctors(true);
   const { data: medications = [] } = useMedications(null);
   const createRx = useCreatePrescription();
+  // U-11: Esc/overlay close with a half-entered prescription confirms.
+  const guardClose = useDiscardGuard();
 
   const [patientId, setPatientId] = useState<number | null>(null);
   const [doctorId, setDoctorId] = useState<number | null>(null);
@@ -822,6 +832,22 @@ function CreatePrescriptionDialog({ onClose }: { onClose: () => void }) {
     setItems((arr) => arr.filter((_, i) => i !== idx));
 
   const addItem = () => setItems((arr) => [...arr, emptyItemDraft()]);
+
+  // U-11: true once the operator has entered anything beyond the fresh
+  // form — used by the discard guard so Esc/overlay close with a
+  // half-entered prescription confirms instead of silently discarding.
+  const isDirty =
+    patientId != null ||
+    notes.trim() !== "" ||
+    items.some(
+      (it) =>
+        it.medication_name.trim() !== "" ||
+        it.dose.trim() !== "" ||
+        it.route !== "oral" ||
+        it.frequency !== "twice daily" ||
+        it.duration.trim() !== "" ||
+        it.quantity !== "1",
+    );
 
   // When a medication is selected from the dropdown, snapshot its name
   // into medication_name (the backend also reads medication_name to know
@@ -873,7 +899,10 @@ function CreatePrescriptionDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
+    <Dialog
+      open
+      onOpenChange={(o) => guardClose(o, isDirty, onClose)}
+    >
       <DialogContent className="max-w-3xl">
         <DialogHeader>
           <DialogTitle>New prescription</DialogTitle>
@@ -885,6 +914,12 @@ function CreatePrescriptionDialog({ onClose }: { onClose: () => void }) {
         </DialogHeader>
 
         <div className="space-y-4 py-2 max-h-[70vh] overflow-y-auto pr-1">
+          {/* U-01: the SRS §2.2 rule — allergy flags on every prescription
+              screen. The banner appears the moment a patient is selected,
+              BEFORE any medication is picked, so the prescribing decision
+              is made with the allergy information visible. */}
+          {patientId != null && <PatientSafetyBanner patientId={patientId} />}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <Label>Patient *</Label>
@@ -1160,6 +1195,12 @@ function PrescriptionDetailDialog({
           <LoadingState rows={4} />
         ) : (
           <>
+            {/* U-02: dispensing screen allergy warning (SRS §2.2). The
+                pharmacist verifies the patient's allergies BEFORE the
+                per-item Dispense buttons — the same screen the controlled-
+                substance and non-stock confirmations flow through. */}
+            <PatientSafetyBanner patientId={rx.patient_id} />
+
             {rx.notes && (
               <div className="rounded-[var(--radius-md)] border border-border bg-muted/40 px-4 py-3 text-sm">
                 <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">

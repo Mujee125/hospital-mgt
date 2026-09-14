@@ -13,6 +13,11 @@ import { toast } from "sonner";
 import { useCreatePatientEhr, useUpdatePatientEhr, usePatientEhr } from "@/lib/queries";
 import { ActionBar, FormField, FormSection } from "@/components/layout/shared";
 import { ConsentPanel } from "@/components/forms/ConsentPanel";
+import { MultiSelectChips } from "@/components/forms/MultiSelectChips";
+import {
+  ALLERGY_PRESETS,
+  CHRONIC_CONDITION_PRESETS,
+} from "@/lib/clinicalPresets";
 import type { Patient, PatientEhr } from "@/lib/models";
 
 // ── ARCH-03 ────────────────────────────────────────────────────────────────
@@ -378,32 +383,32 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
         <FormField
           label="Allergies"
           htmlFor="allergies"
-          hint="Comma-separated or free text. Enter 'None known' if applicable."
+          hint="Select all that apply — or type any others and click Add. Leave empty if none known."
         >
-          <Textarea
+          <MultiSelectChips
             id="allergies"
-            placeholder="Penicillin, Peanuts, Latex"
-            rows={2}
+            label="Allergies"
+            options={ALLERGY_PRESETS}
             value={allergies}
-            onChange={(e) => setAllergies(e.target.value)}
+            onChange={setAllergies}
             disabled={loading}
-            className="resize-none"
+            placeholder="Add other allergy…"
           />
         </FormField>
 
         <FormField
           label="Chronic conditions"
           htmlFor="chronic_conditions"
-          hint="Long-term diagnoses that affect care decisions."
+          hint="Long-term diagnoses that affect care decisions. Select all that apply."
         >
-          <Textarea
+          <MultiSelectChips
             id="chronic_conditions"
-            placeholder="Type 2 diabetes, Hypertension, Asthma"
-            rows={2}
+            label="Chronic conditions"
+            options={CHRONIC_CONDITION_PRESETS}
             value={chronicConditions}
-            onChange={(e) => setChronicConditions(e.target.value)}
+            onChange={setChronicConditions}
             disabled={loading}
-            className="resize-none"
+            placeholder="Add other condition…"
           />
         </FormField>
       </FormSection>

@@ -193,7 +193,13 @@ const DEFAULT_STAT_COLOR: { bg: string; icon: string } = STAT_COLORS.primary!;
  *  pages. Every instance renders at identical height: the label/icon
  *  row, the value, and the supporting-text slot are always present
  *  (the slot reserves its line-height even when `sub` is omitted) so a
- *  row of these never has one card taller than its neighbors. */
+ *  row of these never has one card taller than its neighbors.
+ *
+ *  UX-U-12 (2026-09-13): when `onClick` is set the interactive element is
+ *  a real <button> — keyboard-operable (Enter/Space), exposes a role, and
+ *  receives the :focus-visible ring — instead of a clickable div. WCAG
+ *  2.1.1 (keyboard) + 4.1.2 (name/role/value); KPI cards previously were
+ *  mouse-only. */
 export function StatCard({
   icon: Icon,
   label,
@@ -220,6 +226,34 @@ export function StatCard({
       : trendDirection === "neutral"
         ? "text-muted-foreground"
         : "text-success";
+  const body = (
+    <>
+      <div className="flex items-start justify-between mb-4">
+        <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
+          {label}
+        </span>
+        <div
+          className="h-9 w-9 rounded-[var(--radius-sm)] flex items-center justify-center shrink-0"
+          style={{ background: c.bg }}
+        >
+          <Icon className="h-4 w-4" style={{ color: c.icon }} />
+        </div>
+      </div>
+      <div className="text-display-xl text-foreground tabular-nums leading-none">
+        {value}
+      </div>
+      <div className="flex items-center justify-between mt-3 min-h-[1.1rem]">
+        <span className="text-[11px] text-muted-foreground">
+          {sub ?? "\u00A0"}
+        </span>
+        {trend && (
+          <span className={`text-[11px] font-semibold ${trendColor}`}>
+            {trend}
+          </span>
+        )}
+      </div>
+    </>
+  );
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -227,37 +261,20 @@ export function StatCard({
       transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
       className="h-full"
     >
-      <Card
-        className={`h-full flex flex-col rounded-[var(--radius-md)] border-border shadow-sm transition-all duration-200 ${onClick ? "cursor-pointer hover:shadow-md hover:border-primary/25 hover:-translate-y-0.5" : ""}`}
-        onClick={onClick}
-      >
-        <CardContent className="p-6 flex flex-col flex-1">
-          <div className="flex items-start justify-between mb-4">
-            <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
-              {label}
-            </span>
-            <div
-              className="h-9 w-9 rounded-[var(--radius-sm)] flex items-center justify-center shrink-0"
-              style={{ background: c.bg }}
-            >
-              <Icon className="h-4 w-4" style={{ color: c.icon }} />
-            </div>
-          </div>
-          <div className="text-display-xl text-foreground tabular-nums leading-none">
-            {value}
-          </div>
-          <div className="flex items-center justify-between mt-3 min-h-[1.1rem]">
-            <span className="text-[11px] text-muted-foreground">
-              {sub ?? "\u00A0"}
-            </span>
-            {trend && (
-              <span className={`text-[11px] font-semibold ${trendColor}`}>
-                {trend}
-              </span>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+      {onClick ? (
+        <button
+          type="button"
+          onClick={onClick}
+          className="h-full w-full flex flex-col rounded-[var(--radius-md)] border border-border bg-card p-6 text-left shadow-sm transition-all duration-200 cursor-pointer hover:shadow-md hover:border-primary/25 hover:-translate-y-0.5"
+          aria-label={`${label}: ${typeof value === "string" || typeof value === "number" ? value : ""}${sub ? ` (${sub})` : ""}. Open ${label.toLowerCase()} module`}
+        >
+          {body}
+        </button>
+      ) : (
+        <Card className="h-full flex flex-col rounded-[var(--radius-md)] border-border shadow-sm">
+          <CardContent className="p-6 flex flex-col flex-1">{body}</CardContent>
+        </Card>
+      )}
     </motion.div>
   );
 }

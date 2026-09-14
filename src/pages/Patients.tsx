@@ -12,7 +12,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from "@/components/ui/dialog";
 import { PatientForm } from "@/components/forms/PatientForm";
-import { Search, UserPlus, Edit, Trash2, Users } from "lucide-react";
+import { PatientProfileDialog } from "@/components/clinical/PatientProfileDialog";
+import { Search, UserPlus, Edit, Trash2, Users, User } from "lucide-react";
 import { usePatients, useDeletePatient } from "@/lib/queries";
 import type { Patient } from "@/lib/models";
 import {
@@ -46,6 +47,10 @@ export function Patients() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedPatient, setSelectedPatient] = useState<Patient | undefined>(undefined);
   const [deleteTarget, setDeleteTarget] = useState<Patient | null>(null);
+  // U-02: shared patient profile dialog (identity + safety banner +
+  // visit timeline + prescriptions) — opened by the row "View" button
+  // and by clicking the patient's name.
+  const [profileId, setProfileId] = useState<number | null>(null);
   // F-21: tracks unsaved edits in the open patient dialog so Esc/overlay
   // clicks confirm instead of silently discarding a 20-field edit.
   const [formDirty, setFormDirty] = useState(false);
@@ -187,7 +192,14 @@ export function Patients() {
                     className="border-b border-border/70 transition-colors hover:bg-muted/40"
                   >
                     <TableCell className="font-semibold text-foreground">
-                      {patient.first_name} {patient.last_name}
+                      <button
+                        type="button"
+                        onClick={() => setProfileId(patient.id)}
+                        className="font-semibold text-foreground hover:text-primary hover:underline text-left cursor-pointer"
+                        aria-label={`View medical profile for ${patient.first_name} ${patient.last_name}`}
+                      >
+                        {patient.first_name} {patient.last_name}
+                      </button>
                     </TableCell>
                     <TableCell className="capitalize text-xs font-medium text-muted-foreground">{patient.gender}</TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">{patient.date_of_birth}</TableCell>
@@ -198,6 +210,16 @@ export function Patients() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setProfileId(patient.id)}
+                          className="h-8 w-8 text-muted-foreground hover:text-primary"
+                          title="View medical profile"
+                          aria-label={`View medical profile for ${patient.first_name} ${patient.last_name}`}
+                        >
+                          <User className="h-4 w-4" />
+                        </Button>
                         <Button
                           variant="ghost"
                           size="icon"
@@ -239,7 +261,10 @@ export function Patients() {
         )}
       </SectionCard>
 
-      {/* F-21: closing (Esc/overlay) with unsaved edits confirms first. */}
+      {/* F-21: closing (Esc/overlay) with unsaved edits confirms first.
+          Width: capped at xl on desktop so the form's two-column rows have
+          room; on small screens the shared DialogContent handles the
+          full-width-minus-margins + internal-scroll behavior. */}
       <Dialog
         open={dialogOpen}
         onOpenChange={(o) => {
@@ -249,7 +274,7 @@ export function Patients() {
           });
         }}
       >
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-lg sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>{selectedPatient ? "Edit patient details" : "Register new patient"}</DialogTitle>
             <DialogDescription>
@@ -301,6 +326,14 @@ export function Patients() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {/* U-02: shared patient profile — identity, safety banner, visit
+          timeline, prescriptions (progressive disclosure, one consistent
+          patient surface across the app). */}
+      <PatientProfileDialog
+        patientId={profileId}
+        open={profileId !== null}
+        onOpenChange={(o) => !o && setProfileId(null)}
+      />
     </PageContainer>
   );
 }

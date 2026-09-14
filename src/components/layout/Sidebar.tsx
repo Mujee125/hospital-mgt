@@ -178,6 +178,7 @@ export function Sidebar({
 
   return (
     <aside
+      aria-label="Primary navigation"
       className="flex flex-col h-full border-white/10 select-none transition-[width] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]"
       style={{
         width: isMobileDrawer ? "100%" : showExpanded ? "264px" : "72px",
@@ -233,6 +234,9 @@ export function Sidebar({
               end={(item as NavItem & { end?: boolean }).end}
               onClick={onNavigate}
               title={showExpanded ? undefined : item.label}
+              // UX-U-16: collapsed icons expose their label as the accessible
+              // name — title-only fallbacks aren't announced reliably.
+              aria-label={showExpanded ? undefined : item.label}
               className={({ isActive }) =>
                 `${NAV_ITEM_BASE} ${!showExpanded ? "justify-center" : ""} ${
                   isActive

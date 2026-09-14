@@ -40,6 +40,7 @@ import {
   StatusBadge,
   LoadingState,
   PageToolbar,
+  Pagination,
 } from "@/components/layout/shared";
 
 // Editable subset of Appointment that the AppointmentForm expects
@@ -71,6 +72,12 @@ export function Appointments() {
   const [filterDoctor, setFilterDoctor] = useState<number | "all">("all");
   const [filterStatus, setFilterStatus] = useState<string>("all");
   const [filterDate, setFilterDate] = useState<string>("");
+  // U-09: pagination — the same unbounded-table freeze risk F-13 fixed on
+  // the Patients page (a multi-year appointment history is the same
+  // order of rows). 25 rows mounted at a time; the page clamps when the
+  // filters shrink the result set.
+  const [page, setPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(25);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedAppointment, setSelectedAppointment] = useState<EditableAppointment | undefined>(undefined);
@@ -195,6 +202,14 @@ export function Appointments() {
     return matchesQuery && matchesDoctor && matchesStatus && matchesDate;
   });
 
+  // U-09: clamp the page into range when filters shrink the result set.
+  const pageCount = Math.max(1, Math.ceil(filteredAppointments.length / rowsPerPage));
+  const safePage = Math.min(page, pageCount);
+  const pageAppointments = filteredAppointments.slice(
+    (safePage - 1) * rowsPerPage,
+    safePage * rowsPerPage,
+  );
+
   const formatTime = (timeStr: string) => timeStr.slice(0, 5);
 
   return (
@@ -240,7 +255,10 @@ export function Appointments() {
                 <Input
                   placeholder="Search patient or doctor…"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    setPage(1); // U-09: a new search starts on page 1
+                  }}
                   className="pl-9"
                 />
               </div>
@@ -300,8 +318,8 @@ export function Appointments() {
                   <TableHead scope="col" className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
-              <TableBody>
-                {filteredAppointments.map((appt, i) => (
+            <TableBody>
+              {pageAppointments.map((appt, i) => (
                   <motion.tr
                     key={appt.id}
                     initial={{ opacity: 0 }}
@@ -407,10 +425,20 @@ export function Appointments() {
                         </Button>
                       </div>
                     </TableCell>
-                  </motion.tr>
-                ))}
-              </TableBody>
-            </Table>
+              </motion.tr>
+              ))}
+            </TableBody>
+          </Table>
+          <Pagination
+            totalItems={filteredAppointments.length}
+            page={safePage}
+            rowsPerPage={rowsPerPage}
+            onPageChange={setPage}
+            onRowsPerPageChange={(rows) => {
+              setRowsPerPage(rows);
+              setPage(1);
+            }}
+          />
           </>
         )}
       </SectionCard>

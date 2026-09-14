@@ -61,8 +61,18 @@ export function AppShell({ children, serverMode, hospitalName }: AppShellProps) 
     setTimeout(() => setIsRefreshing(false), 600);
   };
 
+  // UX-2026-09-13 (app-frame fix): the shell root is pinned to the
+  // viewport height (h-dvh) instead of min-h-full. Previously the
+  // height chain was indefinite (min-height only), so main's
+  // overflow-y-auto never engaged — the DOCUMENT scrolled, carrying
+  // the sidebar + titlebar away with long content (25-row patient
+  // table, Settings, Pharmacy). With a definite viewport height:
+  // sidebar (h-full) and the right column (h-full) stay fixed while
+  // ONLY <main> scrolls — matching the pre-auth WithTitleBar
+  // h-screen pattern. dvh (not vh) so browser mobile chrome is
+  // accounted for; identical in the Tauri WebView2.
   return (
-    <div className="flex min-h-full w-full bg-background text-foreground overflow-hidden">
+    <div className="flex h-dvh w-full bg-background text-foreground overflow-hidden">
       {/* Desktop sidebar */}
       <div className="hidden lg:block h-full shrink-0">
         <Sidebar

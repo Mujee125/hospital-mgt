@@ -11,7 +11,7 @@
  * cross-patient MAR protection); this page is presentation + input only.
  */
 import { useState } from "react";
-import { HeartPulse, Loader2, Plus, StickyNote, Activity, Pill } from "lucide-react";
+import { HeartPulse, Loader2, Plus, StickyNote, Activity, Pill, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -29,7 +29,9 @@ import {
 } from "@/lib/queries";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
-import { PageContainer, PageHeader, SectionCard, EmptyState, ErrorState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
+import { PageContainer, PageHeader, SectionCard, EmptyState, ErrorState, StatusBadge, LoadingState, PageToolbar, useDiscardGuard } from "@/components/layout/shared";
+import { PatientSafetyBanner } from "@/components/clinical/PatientSafetyBanner";
+import { flagVital, describeFlag, type VitalFlag } from "@/lib/vitals";
 
 /**
  * Vitals entry fields: key → { label, placeholder, plausible range }.
@@ -128,7 +130,12 @@ export function Nursing() {
             </Button>
           }
         >
-          <div className="p-6">
+          <div className="p-6 space-y-4">
+            {/* U-03: ward-chart safety context. Allergies/chronic/blood
+                group follow the patient through the whole chart (vitals,
+                notes, MAR) — the MAR tab is where medication decisions
+                are made. */}
+            <PatientSafetyBanner patientId={selected.patient_id} />
             <Tabs defaultValue="vitals">
               <TabsList>
                 <TabsTrigger value="vitals"><Activity className="h-4 w-4 mr-1.5" /> Vitals & trend</TabsTrigger>
@@ -154,10 +161,42 @@ export function Nursing() {
 
 // ── Vitals panel ─────────────────────────────────────────────────────────────
 
+/** Inline flagged value (U-07): value + colored icon when abnormal —
+ *  color + icon + tooltip text, never color alone. */
+function FlaggedSpan({
+  flag,
+  label,
+  children,
+}: {
+  flag: VitalFlag;
+  label: string;
+  children: React.ReactNode;
+}) {
+  if (flag === "normal") return <>{children}</>;
+  const critical = flag === "critical";
+  return (
+    <span
+      className={`inline-flex items-center gap-1 ${critical ? "text-destructive font-bold" : "text-warning"}`}
+      title={label}
+    >
+      {children}
+      <TriangleAlert className="h-3.5 w-3.5" aria-hidden="true" />
+      <span className="sr-only">{label}</span>
+    </span>
+  );
+}
+
+const worseFlag = (a: VitalFlag, b: VitalFlag): VitalFlag =>
+  a === "critical" || b === "critical" ? "critical" : a === "warning" || b === "warning" ? "warning" : "normal";
+
 function VitalsPanel({ admissionId, canManage }: { admissionId: number; canManage: boolean }) {
   const { data: trend = [], isLoading } = useVitalsTrend(admissionId);
   const record = useRecordVitals();
   const [open, setOpen] = useState(false);
+  // U-11: closing the vitals dialog (Esc / overlay click) with typed
+  // readings confirms first — a nurse mid-round losing 7 readings to a
+  // stray Esc is a re-measure-and-retype tax on the ward.
+  const guardVitalsClose = useDiscardGuard();
   // Raw string state per field; converted to number|null on submit so empty
   // inputs stay "not recorded" rather than 0.
   const [form, setForm] = useState<Record<VitalFieldKey, string>>({
@@ -225,32 +264,98 @@ function VitalsPanel({ admissionId, canManage }: { admissionId: number; canManag
             </TableRow>
           </TableHeader>
           <TableBody>
-            {chronological.map((r) => (
-              <TableRow key={r.id}>
-                <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
-                  {new Date(r.recorded_at).toLocaleString()}
-                </TableCell>
-                <TableCell>{r.temperature_c ?? "—"}</TableCell>
-                <TableCell>
-                  {r.systolic_bp != null || r.diastolic_bp != null
-                    ? `${r.systolic_bp ?? "—"}/${r.diastolic_bp ?? "—"}`
-                    : "—"}
-                </TableCell>
-                <TableCell>{r.pulse_bpm ?? "—"}</TableCell>
-                <TableCell>{r.resp_rate ?? "—"}</TableCell>
-                <TableCell>{r.spo2_pct ?? "—"}</TableCell>
-                <TableCell>{r.pain_score ?? "—"}</TableCell>
-                <TableCell className="text-xs text-muted-foreground max-w-[220px] truncate">
-                  {r.notes ?? "—"}
-                </TableCell>
-              </TableRow>
-            ))}
+            {chronological.map((r) => {
+              // U-07: per-value flags + escalate the whole row when ANY
+              // recorded value is in the critical band.
+              const fTemp = flagVital("temperature_c", r.temperature_c);
+              const fSys = flagVital("systolic_bp", r.systolic_bp);
+              const fDia = flagVital("diastolic_bp", r.diastolic_bp);
+              const fPulse = flagVital("pulse_bpm", r.pulse_bpm);
+              const fResp = flagVital("resp_rate", r.resp_rate);
+              const fSpo2 = flagVital("spo2_pct", r.spo2_pct);
+              const fPain = flagVital("pain_score", r.pain_score);
+              const rowCritical = [fTemp, fSys, fDia, fPulse, fResp, fSpo2, fPain].some(
+                (f) => f === "critical",
+              );
+              return (
+                <TableRow key={r.id} className={rowCritical ? "bg-destructive/[0.06]" : ""}>
+                  <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
+                    {new Date(r.recorded_at).toLocaleString()}
+                  </TableCell>
+                  <TableCell>
+                    {r.temperature_c != null ? (
+                      <FlaggedSpan flag={fTemp} label={describeFlag("temperature_c", fTemp)}>
+                        {r.temperature_c}
+                      </FlaggedSpan>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {r.systolic_bp != null || r.diastolic_bp != null ? (
+                      <FlaggedSpan
+                        flag={worseFlag(fSys, fDia)}
+                        label={`${describeFlag("systolic_bp", fSys)} / ${describeFlag("diastolic_bp", fDia)}`}
+                      >
+                        {r.systolic_bp ?? "—"}/{r.diastolic_bp ?? "—"}
+                      </FlaggedSpan>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {r.pulse_bpm != null ? (
+                      <FlaggedSpan flag={fPulse} label={describeFlag("pulse_bpm", fPulse)}>
+                        {r.pulse_bpm}
+                      </FlaggedSpan>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {r.resp_rate != null ? (
+                      <FlaggedSpan flag={fResp} label={describeFlag("resp_rate", fResp)}>
+                        {r.resp_rate}
+                      </FlaggedSpan>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {r.spo2_pct != null ? (
+                      <FlaggedSpan flag={fSpo2} label={describeFlag("spo2_pct", fSpo2)}>
+                        {r.spo2_pct}
+                      </FlaggedSpan>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {r.pain_score != null ? (
+                      <FlaggedSpan flag={fPain} label={describeFlag("pain_score", fPain)}>
+                        {r.pain_score}
+                      </FlaggedSpan>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground max-w-[220px] truncate">
+                    {r.notes ?? "—"}
+                  </TableCell>
+                </TableRow>
+              );
+            })}
           </TableBody>
         </Table>
       )}
 
-      {/* Vitals entry dialog */}
-      <Dialog open={open} onOpenChange={setOpen}>
+      {/* Vitals entry dialog — U-11 discard guard on Esc/overlay close */}
+      <Dialog
+        open={open}
+        onOpenChange={(o) =>
+          guardVitalsClose(o, hasAnyValue, () => setOpen(false))
+        }
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Record vitals</DialogTitle>
@@ -260,21 +365,35 @@ function VitalsPanel({ admissionId, canManage }: { admissionId: number; canManag
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="grid grid-cols-2 gap-3">
-              {VITAL_FIELDS.map((f) => (
-                <div key={f.key} className="space-y-1.5">
-                  <Label htmlFor={`vital-${f.key}`}>{f.label}</Label>
-                  <Input
-                    id={`vital-${f.key}`}
-                    type="number"
-                    step="any"
-                    placeholder={f.placeholder}
-                    min={f.min}
-                    max={f.max}
-                    value={form[f.key]}
-                    onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
-                  />
-                </div>
-              ))}
+              {VITAL_FIELDS.map((f) => {
+                const typed = form[f.key];
+                const flag = typed.trim() === "" ? "normal" : flagVital(f.key, typed);
+                return (
+                  <div key={f.key} className="space-y-1.5">
+                    <Label htmlFor={`vital-${f.key}`}>{f.label}</Label>
+                    <Input
+                      id={`vital-${f.key}`}
+                      type="number"
+                      step="any"
+                      placeholder={f.placeholder}
+                      min={f.min}
+                      max={f.max}
+                      value={typed}
+                      onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
+                      aria-describedby={flag !== "normal" ? `vital-${f.key}-flag` : undefined}
+                    />
+                    {flag !== "normal" && (
+                      <p
+                        id={`vital-${f.key}-flag`}
+                        className={`text-[11px] font-medium flex items-center gap-1 ${flag === "critical" ? "text-destructive" : "text-warning"}`}
+                      >
+                        <TriangleAlert className="h-3 w-3" aria-hidden="true" />
+                        {describeFlag(f.key, flag)}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="vital-notes">Notes (optional)</Label>

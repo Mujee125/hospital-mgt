@@ -34,10 +34,13 @@ const pageTitles: Record<string, string> = {
   "/doctors": "Doctors",
   "/queue": "Patient Queue",
   "/ipd": "In-Patient Department",
+  "/nursing": "Nursing Station",
   "/laboratory": "Laboratory",
   "/radiology": "Radiology",
+  "/blood-bank": "Blood Bank",
   "/billing": "Billing & Invoices",
   "/inventory": "Inventory",
+  "/pharmacy": "Pharmacy",
   "/messaging": "Staff Chat",
   "/audit": "Audit Log",
   "/users": "Users & Roles",
@@ -475,6 +478,20 @@ function GlobalSearch() {
   const { data: hits, isFetching } = useGlobalSearch(debounced);
   const trimmed = debounced.trim();
 
+  // UX-U-15: Ctrl+K (and macOS ⌘K) opens + focuses the search box — the
+  // desktop-native affordance receptionists/doctors expect. preventDefault
+  // stops the WebView's own default handling.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // Honest placeholder: name only the sections this user can actually search.
   const scopes: string[] = [];
   if (has(PERMISSIONS.PatientsView)) scopes.push("patients, prescriptions");
@@ -512,6 +529,7 @@ function GlobalSearch() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={placeholder}
+              aria-label={`Global search — ${placeholder}`}
               className="w-full h-7 rounded-md bg-muted border border-border px-2.5 text-xs outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary/40"
             />
           </motion.div>
@@ -522,7 +540,7 @@ function GlobalSearch() {
           onClick={() => setOpen(true)}
           className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
           aria-label="Search"
-          title={placeholder}
+          title={`${placeholder} (Ctrl+K)`}
         >
           <Search className="h-[15px] w-[15px]" />
         </button>

@@ -20,7 +20,7 @@ import { useLabOrders, useLabCatalog, useCreateLabOrder, useLabOrderTests, useUp
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
 import { formatMoney, patientDescriptor } from "@/lib/utils";
-import { PageContainer, PageHeader, SectionCard, EmptyState, ErrorState, StatusBadge, LoadingState, PageToolbar } from "@/components/layout/shared";
+import { PageContainer, PageHeader, SectionCard, EmptyState, ErrorState, StatusBadge, LoadingState, PageToolbar, useDiscardGuard } from "@/components/layout/shared";
 
 const STATUS_FILTERS = [
   { value: "all", label: "All orders" },
@@ -47,6 +47,9 @@ export function Laboratory() {
   const [resultOrderId, setResultOrderId] = useState<number | null>(null);
   const [barcodeOrder, setBarcodeOrder] = useState<{ id: number; barcode: string } | null>(null);
   const [form, setForm] = useState({ patientId: null as number | null, doctorId: null as number | null, testIds: [] as number[] });
+  // U-11: Esc/overlay close with a half-configured order confirms first.
+  const guardOrderClose = useDiscardGuard();
+  const orderFormDirty = form.patientId != null || form.doctorId != null || form.testIds.length > 0;
 
   const submit = async () => {
     if (!form.patientId || form.testIds.length === 0) return;
@@ -134,8 +137,11 @@ export function Laboratory() {
         )}
       </SectionCard>
 
-      {/* New order dialog */}
-      <Dialog open={orderOpen} onOpenChange={setOrderOpen}>
+      {/* New order dialog — U-11 discard guard */}
+      <Dialog
+        open={orderOpen}
+        onOpenChange={(o) => guardOrderClose(o, orderFormDirty, () => setOrderOpen(false))}
+      >
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>New lab order</DialogTitle>
