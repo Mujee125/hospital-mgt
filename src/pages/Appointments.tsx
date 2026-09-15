@@ -29,6 +29,7 @@ import {
   useDoctors,
   useDeleteAppointment,
   useUpdateAppointmentStatus,
+  useIssueQueueTokenForAppointment,
 } from "@/lib/queries";
 import type { AppointmentWithDetails, Appointment } from "@/lib/models";
 import {
@@ -57,6 +58,9 @@ type EditableAppointment = Pick<
   | "status"
   | "reason"
   | "notes"
+  // PK-2026-09-14 gap-3: so editing a booking pre-fills the fee fields.
+  | "consultation_fee"
+  | "fee_paid"
 >;
 
 export function Appointments() {
@@ -67,6 +71,9 @@ export function Appointments() {
   const { data: doctors = [] } = useDoctors();
   const deleteAppointment = useDeleteAppointment();
   const updateStatus = useUpdateAppointmentStatus();
+  const issueQueueToken = useIssueQueueTokenForAppointment();
+  // PK-2026-09-14 gap-5: only offer "Issue token" for today's arrivals.
+  const todayStr = new Date().toISOString().split("T")[0];
 
   const [searchQuery, setSearchQuery] = useState("");
   const [filterDoctor, setFilterDoctor] = useState<number | "all">("all");
@@ -123,6 +130,10 @@ export function Appointments() {
       status: appt.status,
       reason: appt.reason,
       notes: appt.notes,
+      // PK-2026-09-14 gap-3: carry fee fields through so the edit form
+      // pre-fills them instead of resetting to empty/unpaid.
+      consultation_fee: appt.consultation_fee,
+      fee_paid: appt.fee_paid,
     });
     setDialogOpen(true);
   };
@@ -163,6 +174,7 @@ export function Appointments() {
         appointmentId: details.id,
         patientName: `${details.patient_first_name} ${details.patient_last_name}`,
         patientPhone: patient?.phone || "—",
+        patientCnic: details.patient_cnic,
         doctorName: `${details.doctor_first_name} ${details.doctor_last_name}`,
         doctorSpecialization: details.doctor_specialization,
         date: new Date(details.appointment_date).toLocaleDateString(undefined, {
@@ -174,6 +186,8 @@ export function Appointments() {
         durationMinutes: details.duration_minutes,
         reason: details.reason,
         status: details.status,
+        consultationFee: details.consultation_fee,
+        feePaid: details.fee_paid,
         bookedAt: new Date(details.created_at).toLocaleString(undefined, {
           dateStyle: "short",
           timeStyle: "short",
@@ -288,6 +302,7 @@ export function Appointments() {
                   <SelectItem value="all">All statuses</SelectItem>
                   <SelectItem value="scheduled">Scheduled</SelectItem>
                   <SelectItem value="confirmed">Confirmed</SelectItem>
+                  <SelectItem value="arrived">Arrived</SelectItem>
                   <SelectItem value="completed">Completed</SelectItem>
                   <SelectItem value="cancelled">Cancelled</SelectItem>
                   <SelectItem value="no-show">No-show</SelectItem>
@@ -337,6 +352,11 @@ export function Appointments() {
                     </TableCell>
                     <TableCell className="font-semibold text-foreground">
                       {appt.patient_first_name} {appt.patient_last_name}
+                      {appt.patient_cnic && (
+                        <span className="block text-[10px] font-normal text-muted-foreground font-mono">
+                          CNIC: {appt.patient_cnic}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       Dr. {appt.doctor_first_name} {appt.doctor_last_name}
@@ -346,6 +366,18 @@ export function Appointments() {
                     </TableCell>
                     <TableCell>
                       <StatusBadge status={appt.status} />
+                      {appt.consultation_fee && (
+                        <span
+                          className={`block mt-1 text-[10px] font-mono ${
+                            appt.fee_paid
+                              ? "text-status-confirmed"
+                              : "text-status-cancelled"
+                          }`}
+                        >
+                          Rs. {Number(appt.consultation_fee).toFixed(0)}{" "}
+                          {appt.fee_paid ? "(paid)" : "(unpaid)"}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell
                       className="max-w-[150px] truncate text-xs text-muted-foreground"
@@ -356,6 +388,7 @@ export function Appointments() {
                     <TableCell>
                       <div className="flex flex-wrap gap-1">
                         {appt.status !== "confirmed" &&
+                          appt.status !== "arrived" &&
                           appt.status !== "completed" &&
                           appt.status !== "cancelled" && (
                             <Button
@@ -365,6 +398,36 @@ export function Appointments() {
                               onClick={() => handleQuickStatusChange(appt.id, "confirmed")}
                             >
                               Confirm
+                            </Button>
+                          )}
+                        {/* PK-2026-09-14 gap-1: distinct check-in step — front
+                            desk marks a patient "arrived" once physically
+                            present, separately from a prior phone/WhatsApp
+                            confirmation. */}
+                        {(appt.status === "scheduled" || appt.status === "confirmed") && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2.5 text-[11px] font-semibold text-status-arrived border-status-arrived/30 hover:bg-status-arrived/10"
+                            onClick={() => handleQuickStatusChange(appt.id, "arrived")}
+                          >
+                            Mark arrived
+                          </Button>
+                        )}
+                        {/* PK-2026-09-14 gap-5: skip re-entering the patient
+                            into the walk-in token queue on the day of the
+                            visit — issue the token straight from here. */}
+                        {appt.status === "arrived" &&
+                          !appt.queue_token_id &&
+                          appt.appointment_date === todayStr && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 px-2.5 text-[11px] font-semibold"
+                              onClick={() => issueQueueToken.mutate(appt.id)}
+                              disabled={issueQueueToken.isPending}
+                            >
+                              Issue token
                             </Button>
                           )}
                         {appt.status !== "completed" && appt.status !== "cancelled" && (

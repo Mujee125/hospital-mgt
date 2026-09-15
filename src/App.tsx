@@ -79,6 +79,12 @@ export interface AppConfig {
   auto_backup_hour?: number;
   backup_retention_count?: number;
   usb_backup_path?: string;
+  // PK-2026-09-14 gap-7: advisory (non-blocking) Friday-break/holiday
+  // scheduling awareness. Empty strings = feature disabled.
+  friday_break_start?: string;
+  friday_break_end?: string;
+  /** Raw JSON string: array of {"date":"YYYY-MM-DD","label":"..."} */
+  clinic_closures_json?: string;
 }
 
 type BootPhase =
@@ -168,7 +174,17 @@ function App() {
       setServerMode(role === "server");
       setServerIp(ip || "127.0.0.1");
 
-      const cfg = cfgArg ?? (await invoke<AppConfig | null>("get_config"));
+      // The post-initialize config re-read must never brick boot: the
+      // shell tolerates a null config (only the Settings page degrades),
+      // so on any read failure fall back to what we already have.
+      let cfg = cfgArg;
+      if (!cfg) {
+        try {
+          cfg = await invoke<AppConfig | null>("get_config");
+        } catch (err) {
+          console.error("Config re-read during boot failed:", err);
+        }
+      }
       setConfig(cfg);
       setPhase("ready");
     } catch (err) {

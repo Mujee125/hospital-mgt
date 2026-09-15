@@ -116,6 +116,17 @@ export function Settings({ config, onSaved }: SettingsProps) {
   const [usbBackupPath, setUsbBackupPath] = useState(
     config?.usb_backup_path ?? "",
   );
+  // PK-2026-09-14 gap-7: advisory-only Friday-break/holiday scheduling
+  // config. Both default empty = feature disabled.
+  const [fridayBreakStart, setFridayBreakStart] = useState(
+    config?.friday_break_start ?? "",
+  );
+  const [fridayBreakEnd, setFridayBreakEnd] = useState(
+    config?.friday_break_end ?? "",
+  );
+  const [clinicClosuresJson, setClinicClosuresJson] = useState(
+    config?.clinic_closures_json ?? "",
+  );
   const [saving, setSaving] = useState(false);
   const [testPhone, setTestPhone] = useState("");
 
@@ -177,6 +188,20 @@ export function Settings({ config, onSaved }: SettingsProps) {
   };
 
   const handleSave = async () => {
+    // PK-2026-09-14 gap-7: validate the closures JSON client-side so a typo
+    // doesn't silently disable the advisory warning — but never block
+    // saving the rest of the form over it.
+    const trimmedClosures = clinicClosuresJson.trim();
+    if (trimmedClosures !== "") {
+      try {
+        JSON.parse(trimmedClosures);
+      } catch {
+        toast.error(
+          'Clinic closures must be valid JSON, e.g. [{"date":"2026-12-25","label":"Christmas"}]',
+        );
+        return;
+      }
+    }
     setSaving(true);
     try {
       const updated: AppConfig = {
@@ -187,6 +212,9 @@ export function Settings({ config, onSaved }: SettingsProps) {
         auto_backup_hour: autoBackupHour,
         backup_retention_count: backupRetention,
         usb_backup_path: usbBackupPath.trim(),
+        friday_break_start: fridayBreakStart.trim(),
+        friday_break_end: fridayBreakEnd.trim(),
+        clinic_closures_json: trimmedClosures,
       };
       await invoke("save_config", { config: updated });
       onSaved(updated);
@@ -296,6 +324,47 @@ export function Settings({ config, onSaved }: SettingsProps) {
               value={groupName}
               onChange={(e) => setGroupName(e.target.value)}
               placeholder="Doctors Team — VitalFlow"
+            />
+          </FormField>
+
+          {/* PK-2026-09-14 gap-7: advisory-only, non-blocking. Reception can
+              always book anyway — this just surfaces a warning in the
+              booking form. */}
+          <div className="grid grid-cols-2 gap-4">
+            <FormField
+              label="Friday break start"
+              htmlFor="friday-break-start"
+              hint="Leave blank to disable the Jummah-break warning."
+            >
+              <Input
+                id="friday-break-start"
+                type="time"
+                value={fridayBreakStart}
+                onChange={(e) => setFridayBreakStart(e.target.value)}
+              />
+            </FormField>
+            <FormField label="Friday break end" htmlFor="friday-break-end">
+              <Input
+                id="friday-break-end"
+                type="time"
+                value={fridayBreakEnd}
+                onChange={(e) => setFridayBreakEnd(e.target.value)}
+              />
+            </FormField>
+          </div>
+
+          <FormField
+            label="Clinic closures"
+            htmlFor="clinic-closures"
+            hint='JSON array, e.g. [{"date":"2026-12-25","label":"Christmas"}]. Leave blank to disable.'
+          >
+            <Textarea
+              id="clinic-closures"
+              rows={3}
+              value={clinicClosuresJson}
+              onChange={(e) => setClinicClosuresJson(e.target.value)}
+              placeholder='[{"date":"2026-03-23","label":"Pakistan Day"}]'
+              className="font-mono text-xs resize-none"
             />
           </FormField>
 

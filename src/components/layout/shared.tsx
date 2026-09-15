@@ -544,6 +544,9 @@ const STATUS_COLORS: Record<string, string> = {
   // Appointments
   scheduled: "var(--status-scheduled)",
   confirmed: "var(--status-confirmed)",
+  // PK-2026-09-14 gap-1: distinct from "confirmed" — phone-confirmed vs.
+  // physically checked in at the counter.
+  arrived: "var(--status-arrived)",
   completed: "var(--status-completed)",
   cancelled: "var(--status-cancelled)",
   "no-show": "var(--status-no-show)",

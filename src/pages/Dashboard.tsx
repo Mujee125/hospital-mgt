@@ -26,6 +26,7 @@ import {
   Calendar, UserPlus, Users, PlusCircle, CheckCircle,
   BedDouble, FlaskConical, ListOrdered, DollarSign,
   ArrowRight, TrendingUp, Clock, Activity, ShieldCheck, HeartPulse,
+  AlertTriangle,
 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -33,7 +34,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import {
   useAppointmentStats, useTodayAppointments, useDashboardKpis,
-  useQueue, useLabOrders, useAdmissions,
+  useQueue, useLabOrders, useAdmissions, useFailedNotifications,
 } from "@/lib/queries";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
@@ -69,6 +70,10 @@ export function Dashboard({ onNavigate, triggerAddPatient, triggerAddAppointment
   const queue = useQueue().data ?? [];
   const labOrders = useLabOrders().data ?? [];
   const admitted = useAdmissions("admitted").data ?? [];
+  // PK-2026-09-14 gap-6: recent failed WhatsApp sends, for front-desk
+  // follow-up (whatsapp_notifications.success was already persisted,
+  // just never read back anywhere before this).
+  const failedNotifications = useFailedNotifications().data ?? [];
 
   const canOpenPatient = has(PERMISSIONS.PatientsView);
   const [profileId, setProfileId] = useState<number | null>(null);
@@ -109,6 +114,9 @@ export function Dashboard({ onNavigate, triggerAddPatient, triggerAddAppointment
     ? [
         { name: "Scheduled", value: stats.scheduled, color: "hsl(var(--status-scheduled))" },
         { name: "Confirmed", value: stats.confirmed, color: "hsl(var(--status-confirmed))" },
+        // PK-2026-09-14 gap-1: distinct "arrived" (physically checked in)
+        // segment, separate from "confirmed" (phone/WhatsApp confirmed).
+        { name: "Arrived", value: stats.arrived, color: "hsl(var(--status-arrived))" },
         { name: "Completed", value: stats.completed, color: "hsl(var(--status-completed))" },
         { name: "Cancelled", value: cancelledTotal, color: "hsl(var(--status-cancelled))" },
       ].filter((d) => d.value > 0)
@@ -303,6 +311,30 @@ export function Dashboard({ onNavigate, triggerAddPatient, triggerAddAppointment
     </SectionCard>
   );
 
+  // PK-2026-09-14 gap-6: surfaces whatsapp_notifications.success = FALSE
+  // rows, which were previously only visible as a server stderr log line.
+  // Only rendered when there's something to show, same as appointmentMixCard.
+  const failedRemindersCard = has(PERMISSIONS.AppointmentsView) &&
+    failedNotifications.length > 0 && (
+      <SectionCard icon={AlertTriangle} title="Failed reminders">
+        <div className="p-4 space-y-2 max-h-[200px] overflow-y-auto">
+          {failedNotifications.slice(0, 6).map((n) => (
+            <div key={n.id} className="flex items-center gap-3 px-4 py-2.5 rounded-[var(--radius)] hover:bg-muted/50 transition-colors">
+              <span className="truncate text-sm flex-1">
+                {n.patient_name || n.recipient}
+                <span className="block text-[10px] text-muted-foreground">
+                  {n.notification_type} · {new Date(n.sent_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}
+                </span>
+              </span>
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-status-cancelled shrink-0">
+                Failed
+              </span>
+            </div>
+          ))}
+        </div>
+      </SectionCard>
+    );
+
   return (
     <PageContainer>
       <PageHeader
@@ -334,6 +366,7 @@ export function Dashboard({ onNavigate, triggerAddPatient, triggerAddAppointment
               {isDoctor && labApprovalsCard}
               {isNurse && wardCard}
               {queueCard}
+              {failedRemindersCard}
             </div>
           </div>
           {kpiGrid}
@@ -347,6 +380,7 @@ export function Dashboard({ onNavigate, triggerAddPatient, triggerAddAppointment
             <div className="space-y-7">
               {appointmentMixCard}
               {queueCard}
+              {failedRemindersCard}
             </div>
           </div>
         </>

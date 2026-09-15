@@ -1486,6 +1486,8 @@ pub fn run() {
             commands::appointments::delete_appointment,
             commands::appointments::get_today_appointments,
             commands::appointments::get_appointment_stats,
+            commands::appointments::issue_queue_token_for_appointment,
+            commands::appointments::get_failed_notifications,
             // Encounters / visits
             commands::encounters::get_encounters,
             commands::encounters::create_encounter,

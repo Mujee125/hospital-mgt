@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -25,6 +26,9 @@ interface Appointment {
   status: string;
   reason: string | null;
   notes: string | null;
+  // PK-2026-09-14 gap-3: booking-time consultation fee capture.
+  consultation_fee?: string | null;
+  fee_paid?: boolean;
 }
 
 interface AppointmentFormProps {
@@ -33,6 +37,49 @@ interface AppointmentFormProps {
   doctors: Doctor[];
   onSuccess: (newAppointmentId?: number) => void;
   onCancel: () => void;
+}
+
+// PK-2026-09-14 gap-7: pure helper so it's easy to unit test independently
+// of the fetch/effect wiring. Returns a short human-readable warning, or
+// null if nothing applies. Never throws — malformed config just means no
+// warning is shown, not a broken form.
+function checkClosureWarning(
+  config: {
+    friday_break_start?: string;
+    friday_break_end?: string;
+    clinic_closures_json?: string;
+  },
+  date: string | undefined,
+  time: string | undefined,
+): string | null {
+  if (!date) return null;
+
+  if (config.clinic_closures_json) {
+    try {
+      const closures: Array<{ date: string; label: string }> = JSON.parse(
+        config.clinic_closures_json,
+      );
+      const hit = closures.find((c) => c.date === date);
+      if (hit) {
+        return `${date} is marked as a clinic closure (${hit.label}). You can still book, but confirm with the patient.`;
+      }
+    } catch {
+      /* malformed JSON in config — silently skip, advisory only */
+    }
+  }
+
+  if (config.friday_break_start && config.friday_break_end && time) {
+    const isFriday = new Date(`${date}T00:00:00`).getDay() === 5;
+    if (
+      isFriday &&
+      time >= config.friday_break_start &&
+      time < config.friday_break_end
+    ) {
+      return `This falls in the Friday (Jummah) break window (${config.friday_break_start}–${config.friday_break_end}). Double-check the doctor is available.`;
+    }
+  }
+
+  return null;
 }
 
 export function AppointmentForm({
@@ -71,6 +118,39 @@ export function AppointmentForm({
   const [status, setStatus] = useState(appointment?.status || "scheduled");
   const [reason, setReason] = useState(appointment?.reason || "");
   const [notes, setNotes] = useState(appointment?.notes || "");
+  // PK-2026-09-14 gap-3: booking-time consultation fee capture.
+  const [fee, setFee] = useState<string>(
+    appointment?.consultation_fee ?? "",
+  );
+  const [feePaid, setFeePaid] = useState<boolean>(
+    appointment?.fee_paid ?? false,
+  );
+
+  // PK-2026-09-14 gap-7: advisory-only Friday-break/holiday warning. Fetched
+  // directly here (rather than threaded down as a prop) so this stays a
+  // self-contained, read-only addition that doesn't touch App.tsx's config
+  // prop-passing chain. Never blocks submission — reception may have a
+  // legitimate reason to book anyway (emergency slot, etc.).
+  const [closureWarning, setClosureWarning] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    invoke<{
+      friday_break_start?: string;
+      friday_break_end?: string;
+      clinic_closures_json?: string;
+    }>("get_config")
+      .then((config) => {
+        if (cancelled || !config) return;
+        const warning = checkClosureWarning(config, date, time);
+        setClosureWarning(warning);
+      })
+      .catch(() => {
+        /* advisory only — if config can't be read, just skip the warning */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [date, time]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -87,6 +167,8 @@ export function AppointmentForm({
       duration_minutes: Number(duration),
       reason: reason.trim() === "" ? null : reason,
       notes: notes.trim() === "" ? null : notes,
+      consultation_fee: fee.trim() === "" ? null : fee,
+      fee_paid: feePaid,
     };
 
     try {
@@ -199,6 +281,15 @@ export function AppointmentForm({
         </FormField>
       </div>
 
+      {closureWarning && (
+        <div
+          role="status"
+          className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200"
+        >
+          {closureWarning}
+        </div>
+      )}
+
       {isEdit && (
         <FormField label="Appointment status" htmlFor="status_select" required>
           <Select
@@ -212,6 +303,7 @@ export function AppointmentForm({
             <SelectContent>
               <SelectItem value="scheduled">Scheduled</SelectItem>
               <SelectItem value="confirmed">Confirmed</SelectItem>
+              <SelectItem value="arrived">Arrived</SelectItem>
               <SelectItem value="completed">Completed</SelectItem>
               <SelectItem value="cancelled">Cancelled</SelectItem>
               <SelectItem value="no-show">No-show</SelectItem>
@@ -219,6 +311,38 @@ export function AppointmentForm({
           </Select>
         </FormField>
       )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <FormField label="Consultation fee (Rs.)" htmlFor="consultation_fee">
+          <Input
+            id="consultation_fee"
+            type="number"
+            inputMode="decimal"
+            step="0.01"
+            min={0}
+            placeholder="e.g. 1500"
+            value={fee}
+            onChange={(e) => setFee(e.target.value)}
+            disabled={loading}
+          />
+        </FormField>
+        <FormField label="Payment" htmlFor="fee_paid">
+          <label
+            htmlFor="fee_paid"
+            className="flex h-9 items-center gap-2 text-sm"
+          >
+            <input
+              id="fee_paid"
+              type="checkbox"
+              checked={feePaid}
+              onChange={(e) => setFeePaid(e.target.checked)}
+              disabled={loading}
+              className="h-4 w-4 rounded border-input"
+            />
+            Fee collected at booking
+          </label>
+        </FormField>
+      </div>
 
       <FormField label="Reason for appointment" htmlFor="reason">
         <Input

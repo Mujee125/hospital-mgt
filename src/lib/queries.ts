@@ -20,6 +20,7 @@ import type {
   Doctor,
   AppointmentWithDetails,
   AppointmentStats,
+  FailedNotification,
   ChatMessage,
   Encounter,
   QueueToken,
@@ -340,6 +341,32 @@ export function useDeleteAppointment() {
       toast.success("Appointment removed.");
     },
     onError: (err) => toast.error(`Failed to delete appointment: ${err}`),
+  });
+}
+
+// PK-2026-09-14 gap-5: issue a walk-in queue token directly from an
+// "arrived" appointment, reusing the Queue module's own token-numbering
+// command — see issue_queue_token_for_appointment in appointments.rs.
+export function useIssueQueueTokenForAppointment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (appointmentId: number) =>
+      invoke<number>("issue_queue_token_for_appointment", { appointmentId }),
+    onSuccess: (tokenId) => {
+      invalidateAppointmentQueries(qc);
+      qc.invalidateQueries({ queryKey: ["queue"] });
+      toast.success(`Queue token #${tokenId} issued.`);
+    },
+    onError: (err) => toast.error(`Failed to issue queue token: ${err}`),
+  });
+}
+
+// PK-2026-09-14 gap-6: recent failed WhatsApp sends, for front-desk
+// follow-up (see get_failed_notifications in appointments.rs).
+export function useFailedNotifications() {
+  return useQuery({
+    queryKey: ["appointments", "failed-notifications"],
+    queryFn: () => invoke<FailedNotification[]>("get_failed_notifications"),
   });
 }
 

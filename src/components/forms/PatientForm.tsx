@@ -67,6 +67,8 @@ export interface PatientFormValue {
   emergency_contact_phone?: string | null;
   insurance_provider?: string | null;
   insurance_policy_number?: string | null;
+  // PK-2026-09-14 gap-4: national ID, for identity confirmation.
+  cnic?: string | null;
 }
 
 interface PatientFormProps {
@@ -125,6 +127,10 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
   const [insurancePolicyNumber, setInsurancePolicyNumber] = useState(
     seed.insurance_policy_number ?? "",
   );
+  // PK-2026-09-14 gap-4: national ID, for identity confirmation at
+  // reception/check-in. Optional — older records, minors, or foreign
+  // nationals may not have one.
+  const [cnic, setCnic] = useState(seed.cnic ?? "");
 
   // If the EHR record arrives AFTER first paint (it's a separate query),
   // re-seed the EHR-only fields. We avoid clobbering fields the operator
@@ -140,6 +146,7 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
     setEmergencyPhone(ehrRecord.emergency_contact_phone ?? "");
     setInsuranceProvider(ehrRecord.insurance_provider ?? "");
     setInsurancePolicyNumber(ehrRecord.insurance_policy_number ?? "");
+    setCnic(ehrRecord.cnic ?? "");
   }, [ehrRecord]);
 
   // F-21: dirty = any field differing from the (loaded) seed. In create
@@ -160,7 +167,8 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
         emergencyName !== (seed.emergency_contact_name ?? "") ||
         emergencyPhone !== (seed.emergency_contact_phone ?? "") ||
         insuranceProvider !== (seed.insurance_provider ?? "") ||
-        insurancePolicyNumber !== (seed.insurance_policy_number ?? "")
+        insurancePolicyNumber !== (seed.insurance_policy_number ?? "") ||
+        cnic !== (seed.cnic ?? "")
       );
     }
     return (
@@ -176,7 +184,8 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
       emergencyName.trim() !== "" ||
       emergencyPhone.trim() !== "" ||
       insuranceProvider.trim() !== "" ||
-      insurancePolicyNumber.trim() !== ""
+      insurancePolicyNumber.trim() !== "" ||
+      cnic.trim() !== ""
     );
   })();
   useEffect(() => {
@@ -220,6 +229,7 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
       emergency_contact_phone: nullable(emergencyPhone),
       insurance_provider: nullable(insuranceProvider),
       insurance_policy_number: nullable(insurancePolicyNumber),
+      cnic: nullable(cnic),
     };
 
     try {
@@ -435,6 +445,26 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
               onChange={(e) => setEmergencyPhone(e.target.value)}
               disabled={loading}
               inputMode="tel"
+            />
+          </FormField>
+        </div>
+      </FormSection>
+
+      {/* PK-2026-09-14 gap-4: CNIC, for identity confirmation at
+          reception/check-in — common practice at Pakistani clinics. */}
+      <FormSection
+        title="Identification"
+        description="Used to confirm identity at check-in. Optional."
+      >
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <FormField label="CNIC" htmlFor="cnic">
+            <Input
+              id="cnic"
+              placeholder="12345-1234567-1"
+              value={cnic}
+              onChange={(e) => setCnic(e.target.value)}
+              disabled={loading}
+              inputMode="numeric"
             />
           </FormField>
         </div>

@@ -135,6 +135,11 @@ pub struct CreateAppointment {
     pub reason: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    // PK-2026-09-14 gap-3: booking-time consultation fee capture.
+    #[serde(default)]
+    pub consultation_fee: Option<rust_decimal::Decimal>,
+    #[serde(default)]
+    pub fee_paid: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -150,6 +155,11 @@ pub struct UpdateAppointment {
     pub reason: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    // PK-2026-09-14 gap-3: booking-time consultation fee capture.
+    #[serde(default)]
+    pub consultation_fee: Option<rust_decimal::Decimal>,
+    #[serde(default)]
+    pub fee_paid: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
@@ -172,6 +182,32 @@ pub struct AppointmentWithDetails {
     pub doctor_first_name: String,
     pub doctor_last_name: String,
     pub doctor_specialization: String,
+    // PK-2026-09-14 gap-3: booking-time consultation fee capture.
+    #[serde(default)]
+    pub consultation_fee: Option<rust_decimal::Decimal>,
+    pub fee_paid: bool,
+    // PK-2026-09-14 gap-4: patient CNIC, surfaced for identity confirmation.
+    #[serde(default)]
+    pub patient_cnic: Option<String>,
+    // PK-2026-09-14 gap-5: link to an issued walk-in queue token, if any.
+    #[serde(default)]
+    pub queue_token_id: Option<i32>,
+}
+
+// PK-2026-09-14 gap-6: `whatsapp_notifications.success` was already
+// persisted but never read back anywhere — a failed reminder/confirmation
+// send was only ever visible in the server's stderr log. This surfaces
+// recent failures to the front desk so a human can follow up by phone.
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct FailedNotification {
+    pub id: i32,
+    pub appointment_id: Option<i32>,
+    pub notification_type: String,
+    pub recipient: String,
+    pub message: String,
+    pub sent_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    pub patient_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -179,6 +215,10 @@ pub struct AppointmentStats {
     pub total: i64,
     pub scheduled: i64,
     pub confirmed: i64,
+    // PK-2026-09-14 gap-1: distinct "arrived" count (see appointments.rs
+    // APPOINTMENT_STATUSES doc comment for why arrived is separate from
+    // confirmed).
+    pub arrived: i64,
     pub completed: i64,
     pub cancelled: i64,
     pub no_show: i64,
@@ -239,6 +279,11 @@ pub struct PatientEhr {
     pub insurance_provider: Option<String>,
     #[serde(default)]
     pub insurance_policy_number: Option<String>,
+    // PK-2026-09-14 gap-4: national ID, for identity confirmation at
+    // reception/check-in. Optional — not every patient has one on file
+    // (older records, minors, foreign nationals).
+    #[serde(default)]
+    pub cnic: Option<String>,
     pub status: String,
     #[serde(default)]
     pub created_by_user_id: Option<i32>,
@@ -286,6 +331,8 @@ pub struct CreatePatientEhr {
     pub insurance_provider: Option<String>,
     #[serde(default)]
     pub insurance_policy_number: Option<String>,
+    #[serde(default)]
+    pub cnic: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -316,6 +363,8 @@ pub struct UpdatePatientEhr {
     pub insurance_provider: Option<String>,
     #[serde(default)]
     pub insurance_policy_number: Option<String>,
+    #[serde(default)]
+    pub cnic: Option<String>,
     pub status: String,
 }
 

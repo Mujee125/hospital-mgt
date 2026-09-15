@@ -45,6 +45,9 @@ export interface Appointment {
   notes: string | null;
   created_at: string;
   updated_at: string;
+  // PK-2026-09-14 gap-3: booking-time consultation fee capture.
+  consultation_fee?: string | null;
+  fee_paid?: boolean;
 }
 
 export interface AppointmentWithDetails {
@@ -64,15 +67,37 @@ export interface AppointmentWithDetails {
   doctor_first_name: string;
   doctor_last_name: string;
   doctor_specialization: string;
+  // PK-2026-09-14 gap-3: booking-time consultation fee capture. Rust's
+  // rust_decimal serializes as a JSON string, not a number.
+  consultation_fee: string | null;
+  fee_paid: boolean;
+  // PK-2026-09-14 gap-4: patient CNIC, for identity confirmation.
+  patient_cnic: string | null;
+  // PK-2026-09-14 gap-5: linked walk-in queue token, if one was issued.
+  queue_token_id: number | null;
 }
 
 export interface AppointmentStats {
   total: number;
   scheduled: number;
   confirmed: number;
+  // PK-2026-09-14 gap-1: distinct "arrived" (physically checked in) count.
+  arrived: number;
   completed: number;
   cancelled: number;
   no_show: number;
+}
+
+// PK-2026-09-14 gap-6: recent failed WhatsApp sends, surfaced for reception
+// follow-up (the success flag was already persisted, just never read back).
+export interface FailedNotification {
+  id: number;
+  appointment_id: number | null;
+  notification_type: string;
+  recipient: string;
+  message: string;
+  sent_at: string;
+  patient_name: string | null;
 }
 
 export interface ChatMessage {
@@ -102,6 +127,10 @@ export interface PatientEhr {
   emergency_contact_phone: string | null;
   insurance_provider: string | null;
   insurance_policy_number: string | null;
+  // PK-2026-09-14 gap-4: national ID, for identity confirmation. Optional
+  // so existing PatientEhr literals (test fixtures, etc.) that predate
+  // this field still typecheck without every call site needing an update.
+  cnic?: string | null;
   status: string;
   created_by_user_id: number | null;
 }
@@ -122,6 +151,7 @@ export interface CreatePatientEhr {
   emergency_contact_phone: string | null;
   insurance_provider: string | null;
   insurance_policy_number: string | null;
+  cnic?: string | null;
 }
 
 export interface UpdatePatientEhr extends CreatePatientEhr {

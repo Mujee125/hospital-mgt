@@ -25,7 +25,7 @@ const SELECT_EHR: &str = r#"
     SELECT id, first_name, last_name, email, phone, date_of_birth, gender, address,
            created_at, mrn, blood_group, allergies, chronic_conditions,
            emergency_contact_name, emergency_contact_phone,
-           insurance_provider, insurance_policy_number, status, created_by_user_id,
+           insurance_provider, insurance_policy_number, cnic, status, created_by_user_id,
            is_active, deleted_at
     FROM patients
 "#;
@@ -106,9 +106,9 @@ pub async fn create_patient_core(
             first_name, last_name, email, phone, date_of_birth, gender, address,
             mrn, blood_group, allergies, chronic_conditions,
             emergency_contact_name, emergency_contact_phone,
-            insurance_provider, insurance_policy_number, status, created_by_user_id
+            insurance_provider, insurance_policy_number, cnic, status, created_by_user_id
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'active',$16)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'active',$17)
         RETURNING id
         "#,
     )
@@ -127,6 +127,7 @@ pub async fn create_patient_core(
     .bind(&patient.emergency_contact_phone)
     .bind(&patient.insurance_provider)
     .bind(&patient.insurance_policy_number)
+    .bind(&patient.cnic)
     .bind(s.user_id)
     .fetch_one(pool)
     .await
@@ -169,8 +170,8 @@ pub async fn update_patient(
             gender=$6, address=$7, mrn=$8, blood_group=$9, allergies=$10,
             chronic_conditions=$11, emergency_contact_name=$12,
             emergency_contact_phone=$13, insurance_provider=$14,
-            insurance_policy_number=$15, status=$16, updated_at=NOW()
-        WHERE id=$17
+            insurance_policy_number=$15, cnic=$16, status=$17, updated_at=NOW()
+        WHERE id=$18
         "#,
     )
     .bind(&patient.first_name)
@@ -188,6 +189,7 @@ pub async fn update_patient(
     .bind(&patient.emergency_contact_phone)
     .bind(&patient.insurance_provider)
     .bind(&patient.insurance_policy_number)
+    .bind(&patient.cnic)
     .bind(&patient.status)
     .bind(patient.id)
     .execute(pool.inner())

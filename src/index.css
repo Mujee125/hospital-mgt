@@ -83,6 +83,12 @@
      shared StatusBadge text passes contrast in every usage context. */
   --status-scheduled: 215 95% 33%;    /* #0447A4 primary blue */
   --status-confirmed: 156 84% 25%;    /* AA-safe clinical green */
+  /* PK-2026-09-14 gap-1: "arrived" (physically checked in) — violet,
+     distinct from the other status hues. Not run through
+     scripts/contrast_audit.py — worth checking against that script
+     since the rest of this token set was recently tuned for AA
+     contrast. */
+  --status-arrived: 262 60% 42%;      /* violet, darkened for AA contrast */
   --status-completed: 214 40% 46%;    /* #476FA4 steel blue */
   --status-cancelled: 356 68% 42%;    /* #B4242F red */
   --status-no-show: 30 95% 33%;       /* AA-safe deep amber */
@@ -187,6 +193,7 @@
 
   --status-scheduled: 215 95% 58%;    /* brighter blue-dark */
   --status-confirmed: 157 84% 50%;    /* brighter green */
+  --status-arrived: 262 65% 68%;      /* brighter violet-dark */
   --status-completed: 209 36% 70%;    /* blue-light */
   --status-cancelled: 356 70% 68%;
   --status-no-show: 34 85% 55%;
@@ -238,6 +245,7 @@
   --color-info: hsl(var(--info));
   --color-status-scheduled: hsl(var(--status-scheduled));
   --color-status-confirmed: hsl(var(--status-confirmed));
+  --color-status-arrived: hsl(var(--status-arrived));
   --color-status-completed: hsl(var(--status-completed));
   --color-status-cancelled: hsl(var(--status-cancelled));
   --color-status-no-show: hsl(var(--status-no-show));

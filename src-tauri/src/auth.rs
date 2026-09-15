@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashSet;
 use std::sync::Mutex;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::rbac::{self, Permission, Session, SessionState, ROLE_SUPER_ADMIN};
 
@@ -748,10 +748,23 @@ pub async fn me(
     me_core(pool.inner(), &session_state).await
 }
 
+/// Re-resolve the DB pool from app state if it was closed by a
+/// concurrent `initialize_database` pool swap. Returns a fresh handle
+/// to the current pool so that in-flight queries against the old
+/// (now-closed) pool don't fail with "closed pool".
+fn resolve_pool(app_handle: &tauri::AppHandle, pool: &PgPool) -> PgPool {
+    if pool.is_closed() {
+        app_handle.state::<PgPool>().inner().clone()
+    } else {
+        pool.clone()
+    }
+}
+
 #[tauri::command]
 pub async fn change_password(
     pool: tauri::State<'_, PgPool>,
     session_state: tauri::State<'_, std::sync::Arc<Mutex<Option<Session>>>>,
+    app_handle: tauri::AppHandle,
     request: ChangePasswordRequest,
 ) -> Result<(), String> {
     if request.new_password.len() < 8 {
@@ -759,9 +772,13 @@ pub async fn change_password(
     }
     let session = rbac::require_session(&session_state)?;
 
+    // Re-resolve if a concurrent pool swap already closed the one
+    // we resolved from Tauri state at invocation time.
+    let fresh_pool = resolve_pool(&app_handle, pool.inner());
+
     let hash: (String,) = sqlx::query_as("SELECT password_hash FROM users WHERE id = $1")
         .bind(session.user_id)
-        .fetch_one(pool.inner())
+        .fetch_one(&fresh_pool)
         .await
         .map_err(|e| format!("Load password: {}", e))?;
 
@@ -773,12 +790,12 @@ pub async fn change_password(
     sqlx::query("UPDATE users SET password_hash = $1, must_change_password = FALSE, updated_at = NOW() WHERE id = $2")
         .bind(&new_hash)
         .bind(session.user_id)
-        .execute(pool.inner())
+        .execute(&fresh_pool)
         .await
         .map_err(|e| format!("Update password: {}", e))?;
 
     crate::audit::record(
-        pool.inner(),
+        &fresh_pool,
         Some(session.user_id),
         Some(&session.username),
         "password_change",
@@ -1015,7 +1032,10 @@ pub async fn reset_user_password(
     id: i32,
     new_password: String,
 ) -> Result<(), String> {
-    let result = reset_user_password_core(pool.inner(), &session_state, id, new_password).await;
+    // Re-resolve if a concurrent pool swap already closed the one
+    // we resolved from Tauri state at invocation time.
+    let pool = resolve_pool(&app_handle, pool.inner());
+    let result = reset_user_password_core(&pool, &session_state, id, new_password).await;
     // WP-2.2 Layer 2: emit session_invalidated for the target user.
     if result.is_ok() {
         let _ = app_handle.emit("session_invalidated", serde_json::json!({"user_id": id}));

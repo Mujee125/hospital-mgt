@@ -49,8 +49,10 @@ const ALLOWLIST: &[&str] = &[
     "initialize_database",
     "check_db_connection",
     "complete_pairing_and_connect",
-    // reads config with require_if_session inside its own body (pre-login
-    // allowed because db_password is skip_serializing)
+    // permission-free redacted READ (db_password is skip_serializing; boot
+    // screens need it pre-login, receipts/closure warnings need it for any
+    // signed-in non-admin — config WRITES stay fail-closed in
+    // save_config/repair_server_config/clear_config)
     "get_config",
 ];
 

@@ -98,6 +98,22 @@ pub struct AppConfig {
     /// ransomware. Empty = disabled.
     #[serde(default)]
     pub usb_backup_path: String,
+    // PK-2026-09-14 gap-7: advisory (non-blocking) scheduling awareness.
+    // Many Pakistani clinics run a reduced-hours break around Friday
+    // (Jummah) prayers and observe local holidays that don't map to a
+    // fixed Gregorian recurrence, so these can't be hard-coded. Both
+    // default empty = feature disabled, matching the additive-optional
+    // pattern the Phase 7 fields above use — no config_version bump
+    // needed. `clinic_closures_json` is a raw JSON string (array of
+    // {"date":"YYYY-MM-DD","label":"..."}) rather than a nested struct,
+    // to match this file's existing flat-field style; the frontend
+    // parses/stringifies it directly.
+    #[serde(default)]
+    pub friday_break_start: String,
+    #[serde(default)]
+    pub friday_break_end: String,
+    #[serde(default)]
+    pub clinic_closures_json: String,
 }
 
 fn default_auto_backup_enabled() -> bool {
@@ -142,6 +158,9 @@ impl Default for AppConfig {
             auto_backup_hour: 2,
             backup_retention_count: 14,
             usb_backup_path: String::new(),
+            friday_break_start: String::new(),
+            friday_break_end: String::new(),
+            clinic_closures_json: String::new(),
         }
     }
 }
@@ -823,38 +842,21 @@ impl AppConfig {
 // ── Tauri commands ───────────────────────────────────────────────────────────
 //
 // RBAC policy (CR-4, per SRS NFR-15 / Security Matrix A.5.15):
-//   - `get_config`: returns a REDACTED view (db_password is skip_serializing),
-//     so it is safe to call pre-login during first-run setup AND the boot
-//     flow. Once a user IS logged in, only SettingsManage holders may call
-//     it. Pre-login (no session) access is allowed so the boot screen can
-//     read the config to determine server/client mode.
-//   - `save_config` / `repair_server_config` / `clear_config`: require
-//     SettingsManage once setup_complete is true AND a session exists.
-//     Pre-login (no session) access is allowed for first-run Setup.
-//
-// The `require_if_session` helper returns Ok(None) when there's no session
-// (pre-login boot/setup) and Ok(Some(session)) when authorized. This fixes
-// the boot-flow regression where `get_config` was called during startup
-// before any user logged in.
+//   - `get_config`: permission-free READ. The payload is already redacted
+//     (`db_password` is skip_serializing), and callers include the pre-login
+//     boot/setup screens, appointment receipts (clinic_name for any
+//     signed-in user), and the appointment form's closure warnings. Gating
+//     the read behind SettingsManage deadlocked boot for signed-in
+//     non-admins whose webview reloaded while their Rust-side session
+//     stayed alive — do NOT re-add a permission check here.
+//   - `save_config` / `repair_server_config` / `clear_config`: config
+//     WRITES stay fail-closed — they require SettingsManage once the
+//     machine is configured (see `require_config_mutation`); pre-login
+//     access is allowed only for first-run Setup.
 
 #[tauri::command]
-pub async fn get_config(
-    app_handle: tauri::AppHandle,
-    session_state: tauri::State<'_, crate::rbac::SessionState>,
-) -> Result<Option<AppConfig>, String> {
-    let cfg = AppConfig::load(&app_handle);
-    // Once setup is complete, require SettingsManage to read config — but
-    // ONLY if a session exists. Pre-login (boot screen) access is allowed
-    // because db_password is skip_serializing (never sent to frontend).
-    if let Some(c) = &cfg {
-        if c.setup_complete {
-            let _ = crate::rbac::require_if_session(
-                &session_state,
-                crate::rbac::Permission::SettingsManage,
-            )?;
-        }
-    }
-    Ok(cfg)
+pub async fn get_config(app_handle: tauri::AppHandle) -> Result<Option<AppConfig>, String> {
+    Ok(AppConfig::load(&app_handle))
 }
 
 #[tauri::command]

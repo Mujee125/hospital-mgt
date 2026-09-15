@@ -379,13 +379,19 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // Normalize any legacy garbage to 'cancelled' (the conservative default:
     // a rescheduled booking is recoverable, a phantom 'confirmed' is not),
     // then attach the CHECK. DROP IF EXISTS first keeps the ADD idempotent.
-    sqlx::query("UPDATE appointments SET status = 'cancelled' WHERE status NOT IN ('scheduled','confirmed','completed','cancelled','no-show')")
+    sqlx::query("UPDATE appointments SET status = 'cancelled' WHERE status NOT IN ('scheduled','confirmed','arrived','completed','cancelled','no-show')")
         .execute(pool).await.map_err(|e| format!("appointments status normalize: {}", e))?;
     sqlx::query("ALTER TABLE appointments DROP CONSTRAINT IF EXISTS chk_appointments_status")
         .execute(pool)
         .await
         .map_err(|e| format!("appointments chk drop: {}", e))?;
-    sqlx::query("ALTER TABLE appointments ADD CONSTRAINT chk_appointments_status CHECK (status IN ('scheduled','confirmed','completed','cancelled','no-show'))")
+    // PK-2026-09-14 gap-1: added 'arrived' between 'confirmed' and
+    // 'completed' — Pakistani front-desk workflow tracks phone/WhatsApp
+    // confirmation (a day ahead) separately from physical check-in at the
+    // counter (same day). Previously both collapsed into "confirmed",
+    // so reception had no signal of who was actually present in the
+    // waiting area vs. who had merely confirmed by phone.
+    sqlx::query("ALTER TABLE appointments ADD CONSTRAINT chk_appointments_status CHECK (status IN ('scheduled','confirmed','arrived','completed','cancelled','no-show'))")
         .execute(pool).await.map_err(|e| format!("appointments chk: {}", e))?;
 
     // RCTF-FULL-SYSTEM-2026-09-08 F-23 (H3 remainder): the app-level
@@ -427,8 +433,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
           FROM appointments earlier
          WHERE later.doctor_id = earlier.doctor_id
            AND later.id > earlier.id
-           AND later.status IN ('scheduled', 'confirmed')
-           AND earlier.status IN ('scheduled', 'confirmed')
+           AND later.status IN ('scheduled', 'confirmed', 'arrived')
+           AND earlier.status IN ('scheduled', 'confirmed', 'arrived')
            AND later.appointment_date = earlier.appointment_date
            AND hms_appt_tsrange(later.appointment_date, later.appointment_time, later.duration_minutes)
                && hms_appt_tsrange(earlier.appointment_date, earlier.appointment_time, earlier.duration_minutes)
@@ -449,7 +455,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             appointment_date WITH =,
             (hms_appt_tsrange(appointment_date, appointment_time, duration_minutes)) WITH &&
           )
-          WHERE (status IN ('scheduled', 'confirmed'))
+          WHERE (status IN ('scheduled', 'confirmed', 'arrived'))
         "#,
     )
     .execute(pool)
@@ -863,6 +869,30 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     .execute(pool)
     .await
     .ok();
+
+    // PK-2026-09-14 gap-3: consultation fee capture at booking time.
+    // Pakistani private clinics overwhelmingly collect payment at/before
+    // the visit rather than after (unlike the insurance-billed-after-care
+    // model the standalone Billing module otherwise assumes). This is
+    // booking-time capture only — it does not replace or feed Billing.
+    sqlx::query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS consultation_fee NUMERIC(10,2)")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("appointments.consultation_fee: {}", e))?;
+    sqlx::query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS fee_paid BOOLEAN NOT NULL DEFAULT FALSE")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("appointments.fee_paid: {}", e))?;
+
+    // PK-2026-09-14 gap-4: national ID (CNIC) on the patient record.
+    // Reception routinely confirms identity by CNIC before check-in;
+    // nullable so existing rows are unaffected and it stays optional
+    // going forward (older patients, minors, or foreign nationals may
+    // not have one).
+    sqlx::query("ALTER TABLE patients ADD COLUMN IF NOT EXISTS cnic VARCHAR(15)")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("patients.cnic: {}", e))?;
 
     sqlx::query(
         r#"
@@ -2540,6 +2570,66 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
         .execute(pool)
         .await
         .ok();
+
+    // ── AUDIT-2026-09-11 F-03: Bed occupancy integrity ────────────────────────
+    //
+    // The audit (commit 4fd9bf4, 2026-09-11) verified that two `status='admitted'`
+    // rows can be inserted for the same bed via direct SQL (rolled back by the
+    // auditor). The app's conditional-UPDATE / rows_affected==1 guard in ipd.rs
+    // is the primary gate, but it is check-then-act — a concurrent admission
+    // pair can race through it just as appointments could before F-23.
+    //
+    // Fix 1: normalize any beds.status values that aren't in the vocabulary
+    //        BEFORE attaching the CHECK (same pattern as chk_appointments_status).
+    // Fix 2: add CHECK(status IN ('available','occupied','maintenance')) on beds.
+    // Fix 3: add a PARTIAL UNIQUE INDEX so at most one 'admitted' row may exist
+    //        per bed at the DB level (the exact backstop the auditor requested).
+    //
+    // All three steps are idempotent: normalize uses UPDATE … WHERE NOT IN,
+    // DROP CONSTRAINT IF EXISTS guards the ADD CONSTRAINT, and CREATE UNIQUE
+    // INDEX IF NOT EXISTS handles re-runs.
+    sqlx::query(
+        "UPDATE beds SET status = 'available' WHERE status NOT IN ('available','occupied','maintenance')",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("beds status normalize: {}", e))?;
+
+    sqlx::query("ALTER TABLE beds DROP CONSTRAINT IF EXISTS chk_beds_status")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("beds chk drop: {}", e))?;
+
+    sqlx::query("ALTER TABLE beds ADD CONSTRAINT chk_beds_status CHECK (status IN ('available','occupied','maintenance'))")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("beds chk: {}", e))?;
+
+    // Pre-attach heal: if any bed somehow has two 'admitted' rows (shouldn't
+    // happen through the app, but possible via direct SQL or a stale buggy
+    // client), keep the EARLIER admission and set later ones to 'discharged'
+    // so the index attaches without error.
+    sqlx::query(
+        r#"
+        UPDATE ipd_admissions later
+           SET status = 'discharged'
+          FROM ipd_admissions earlier
+         WHERE later.bed_id = earlier.bed_id
+           AND later.id > earlier.id
+           AND later.status = 'admitted'
+           AND earlier.status = 'admitted'
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("ipd_admissions double-bed heal: {}", e))?;
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_bed_admission ON ipd_admissions(bed_id) WHERE status = 'admitted'",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("uq_active_bed_admission index: {}", e))?;
 
     // Seed default roles, permissions, and a bootstrap admin once.
     crate::auth::seed_defaults(pool)

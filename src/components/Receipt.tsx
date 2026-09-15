@@ -23,6 +23,8 @@ export interface ReceiptData {
   appointmentId: number;
   patientName: string;
   patientPhone: string;
+  // PK-2026-09-14 gap-4: optional — not every patient has a CNIC on file.
+  patientCnic?: string | null;
   doctorName: string;
   doctorSpecialization: string;
   date: string; // already formatted, e.g. "21 Jun 2026"
@@ -31,6 +33,9 @@ export interface ReceiptData {
   reason: string | null;
   status: string;
   bookedAt: string; // formatted timestamp
+  // PK-2026-09-14 gap-3: booking-time consultation fee capture.
+  consultationFee?: string | null;
+  feePaid?: boolean;
 }
 
 export function Receipt({ data }: { data: ReceiptData }) {
@@ -73,6 +78,7 @@ export function Receipt({ data }: { data: ReceiptData }) {
 
         <Row label="Patient" value={data.patientName} />
         <Row label="Phone" value={data.patientPhone} />
+        {data.patientCnic ? <Row label="CNIC" value={data.patientCnic} /> : null}
         <div className="border-t border-dashed border-black/30 my-2" />
 
         <Row label="Doctor" value={`Dr. ${data.doctorName}`} />
@@ -81,6 +87,12 @@ export function Receipt({ data }: { data: ReceiptData }) {
         <Row label="Time" value={data.time} />
         <Row label="Duration" value={`${data.durationMinutes} min`} />
         {data.reason ? <Row label="Reason" value={data.reason} /> : null}
+        {data.consultationFee ? (
+          <Row
+            label="Fee"
+            value={`Rs. ${Number(data.consultationFee).toFixed(0)} (${data.feePaid ? "paid" : "unpaid"})`}
+          />
+        ) : null}
         <Row label="Status" value={data.status.toUpperCase()} />
 
         <div className="border-t border-dashed border-black/30 my-2" />

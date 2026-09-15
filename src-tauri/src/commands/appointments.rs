@@ -7,7 +7,8 @@ use sqlx::PgPool;
 use crate::audit;
 use crate::config::AppConfig;
 use crate::models::{
-    AppointmentStats, AppointmentWithDetails, CreateAppointment, UpdateAppointment,
+    AppointmentStats, AppointmentWithDetails, CreateAppointment, CreateQueueToken,
+    FailedNotification, UpdateAppointment,
 };
 use crate::rbac::{self, Permission, SessionState};
 use crate::whatsapp::{self, WhatsAppMessage};
@@ -20,9 +21,10 @@ use crate::whatsapp::{self, WhatsAppMessage};
 /// letting Postgres raise the constraint error (or worse, in older DBs
 /// without the CHECK, persisting a garbage status that silently skips
 /// the confirmed/cancelled WhatsApp triggers and the stats FILTERs).
-const APPOINTMENT_STATUSES: [&str; 5] = [
+const APPOINTMENT_STATUSES: [&str; 6] = [
     "scheduled",
     "confirmed",
+    "arrived",
     "completed",
     "cancelled",
     "no-show",
@@ -83,6 +85,59 @@ async fn check_doctor_overlap(
     if overlap.is_some() {
         return Err(
             "This doctor already has an appointment that overlaps the selected time. Choose a different time or doctor.".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// PK-2026-09-14 gap-2: the doctor-overlap guard above only ever catches
+/// one direction of the problem. A single relative frequently books for
+/// several family members in one visit, and it's easy to fat-finger the
+/// same patient into two different doctors' slots at the same time
+/// (e.g. a walk-in reschedule into a second specialist while the first
+/// booking is still active). Nothing previously caught that — the
+/// patient would show two simultaneous "active" appointments with no
+/// error. This mirrors check_doctor_overlap exactly, scoped to
+/// patient_id instead of doctor_id. Not backed by a DB-level EXCLUDE
+/// constraint (unlike the doctor case) since a patient legitimately
+/// *can* have back-to-back appointments across days without a hard
+/// invariant to enforce atomically — this is a same-time double-booking
+/// guard, not a scheduling capacity constraint.
+async fn check_patient_overlap(
+    pool: &PgPool,
+    patient_id: i32,
+    date: chrono::NaiveDate,
+    start_min: i32,
+    duration_minutes: i32,
+    exclude_appointment_id: Option<i32>,
+) -> Result<(), String> {
+    let end_min = start_min + duration_minutes.max(1);
+    let id_clause = match exclude_appointment_id {
+        Some(_id) => " AND a.id != $5",
+        None => "",
+    };
+    let overlap: Option<(i64,)> = sqlx::query_as(&format!(
+        r#"
+        SELECT 1 FROM appointments a
+        WHERE a.patient_id = $1
+          AND a.appointment_date = $2
+          AND a.status NOT IN ('cancelled', 'no-show')
+          AND EXTRACT(EPOCH FROM a.appointment_time) / 60 < $4
+          AND (EXTRACT(EPOCH FROM a.appointment_time) / 60) + a.duration_minutes > $3
+          {id_clause}
+        LIMIT 1
+        "#,
+    ))
+    .bind(patient_id)
+    .bind(date)
+    .bind(start_min)
+    .bind(end_min)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    if overlap.is_some() {
+        return Err(
+            "This patient already has another appointment that overlaps the selected time. Choose a different time, or check the patient's existing bookings.".to_string(),
         );
     }
     Ok(())
@@ -151,7 +206,10 @@ const SELECT_WITH_DETAILS: &str = r#"
         p.last_name  AS patient_last_name,
         d.first_name AS doctor_first_name,
         d.last_name  AS doctor_last_name,
-        d.specialization AS doctor_specialization
+        d.specialization AS doctor_specialization,
+        a.consultation_fee, a.fee_paid,
+        p.cnic AS patient_cnic,
+        a.queue_token_id
     FROM appointments a
     JOIN patients p ON p.id = a.patient_id
     JOIN doctors  d ON d.id = a.doctor_id
@@ -185,14 +243,26 @@ pub async fn create_appointment(
             None,
         )
         .await?;
+        // PK-2026-09-14 gap-2: same-patient double-booking guard (see
+        // check_patient_overlap doc comment).
+        check_patient_overlap(
+            pool.inner(),
+            appointment.patient_id,
+            date,
+            start_min,
+            duration,
+            None,
+        )
+        .await?;
     }
 
     let row: (i32,) = sqlx::query_as(
         r#"
         INSERT INTO appointments
             (patient_id, doctor_id, appointment_date, appointment_time,
-             duration_minutes, reason, notes, created_by_user_id)
-        VALUES ($1, $2, $3, $4::TIME, $5, $6, $7, $8)
+             duration_minutes, reason, notes, created_by_user_id,
+             consultation_fee, fee_paid)
+        VALUES ($1, $2, $3, $4::TIME, $5, $6, $7, $8, $9, $10)
         RETURNING id
         "#,
     )
@@ -204,6 +274,8 @@ pub async fn create_appointment(
     .bind(&appointment.reason)
     .bind(&appointment.notes)
     .bind(s.user_id)
+    .bind(&appointment.consultation_fee)
+    .bind(appointment.fee_paid.unwrap_or(false))
     .fetch_one(pool.inner())
     .await
     .map_err(|e| {
@@ -373,6 +445,17 @@ pub async fn update_appointment(
             Some(appointment.id),
         )
         .await?;
+        // PK-2026-09-14 gap-2: same-patient double-booking guard (see
+        // check_patient_overlap doc comment).
+        check_patient_overlap(
+            pool.inner(),
+            appointment.patient_id,
+            date,
+            start_min,
+            duration,
+            Some(appointment.id),
+        )
+        .await?;
     }
 
     sqlx::query(
@@ -381,7 +464,8 @@ pub async fn update_appointment(
             patient_id = $1, doctor_id = $2,
             appointment_date = $3, appointment_time = $4::TIME,
             duration_minutes = $5, status = $6,
-            reason = $7, notes = $8, updated_at = NOW()
+            reason = $7, notes = $8, updated_at = NOW(),
+            consultation_fee = $10, fee_paid = $11
         WHERE id = $9
         "#,
     )
@@ -394,6 +478,8 @@ pub async fn update_appointment(
     .bind(&appointment.reason)
     .bind(&appointment.notes)
     .bind(appointment.id)
+    .bind(&appointment.consultation_fee)
+    .bind(appointment.fee_paid.unwrap_or(false))
     .execute(pool.inner())
     .await
     .map_err(|e| {
@@ -594,12 +680,13 @@ pub async fn get_appointment_stats(
     session: tauri::State<'_, SessionState>,
 ) -> Result<AppointmentStats, String> {
     let _ = rbac::require(&session, Permission::AppointmentsView)?;
-    let row: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let row: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
             COUNT(*)                                          AS total,
             COUNT(*) FILTER (WHERE status = 'scheduled')     AS scheduled,
             COUNT(*) FILTER (WHERE status = 'confirmed')     AS confirmed,
+            COUNT(*) FILTER (WHERE status = 'arrived')       AS arrived,
             COUNT(*) FILTER (WHERE status = 'completed')     AS completed,
             COUNT(*) FILTER (WHERE status = 'cancelled')     AS cancelled,
             COUNT(*) FILTER (WHERE status = 'no-show')       AS no_show
@@ -614,8 +701,107 @@ pub async fn get_appointment_stats(
         total: row.0,
         scheduled: row.1,
         confirmed: row.2,
-        completed: row.3,
-        cancelled: row.4,
-        no_show: row.5,
+        arrived: row.3,
+        completed: row.4,
+        cancelled: row.5,
+        no_show: row.6,
     })
+}
+
+// ── PK-2026-09-14 gap-5: appointment → queue token linkage ────────────────
+//
+// `appointments.queue_token_id` has existed in the schema since the
+// scheduling/queue expansion migration but was never read or written
+// anywhere — Appointments and Queue were built as two disconnected
+// modules, so a booked patient had to be re-entered into the walk-in
+// token queue by hand on the day of the visit. This wires the existing
+// column up: issuing a token from an appointment reuses the SAME
+// race-free token-numbering core the Queue page's own "Issue token"
+// button uses (`create_queue_token_core`), then records the resulting
+// token id back onto the appointment.
+#[tauri::command]
+pub async fn issue_queue_token_for_appointment(
+    pool: tauri::State<'_, PgPool>,
+    session: tauri::State<'_, SessionState>,
+    appointment_id: i32,
+) -> Result<i32, String> {
+    // Gate on the queue permission up front — create_queue_token_core
+    // checks it again internally, which is intentional belt-and-suspenders
+    // (the same pattern the doctor-overlap app check + EXCLUDE constraint
+    // already use elsewhere in this module) rather than redundancy to trim.
+    let _ = rbac::require(&session, Permission::QueueManage)?;
+
+    let appt: (i32, i32, String, Option<i32>) = sqlx::query_as(
+        "SELECT patient_id, doctor_id, status, queue_token_id FROM appointments WHERE id = $1",
+    )
+    .bind(appointment_id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| format!("Appointment not found: {}", e))?;
+
+    let (patient_id, doctor_id, status, existing_token_id) = appt;
+
+    if let Some(existing) = existing_token_id {
+        return Err(format!(
+            "This appointment already has a queue token (#{}).",
+            existing
+        ));
+    }
+    if status != "arrived" {
+        return Err(
+            "Only mark the patient as arrived before issuing a queue token.".to_string(),
+        );
+    }
+
+    let token_id = crate::commands::queue::create_queue_token_core(
+        pool.inner(),
+        &session,
+        CreateQueueToken {
+            patient_id,
+            department_id: None,
+            doctor_id: Some(doctor_id),
+            priority: None,
+        },
+    )
+    .await?;
+
+    sqlx::query("UPDATE appointments SET queue_token_id = $1, updated_at = NOW() WHERE id = $2")
+        .bind(token_id)
+        .bind(appointment_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to link queue token to appointment: {}", e))?;
+
+    Ok(token_id)
+}
+
+// ── PK-2026-09-14 gap-6: surface failed WhatsApp sends ────────────────────
+//
+// `whatsapp_notifications.success` has always been persisted (see db.rs);
+// nothing previously read it back — a failed reminder/confirmation send
+// was only ever visible as an `eprintln!` in the server process log,
+// invisible to reception. Read-only, no retry logic in this pass.
+#[tauri::command]
+pub async fn get_failed_notifications(
+    pool: tauri::State<'_, PgPool>,
+    session: tauri::State<'_, SessionState>,
+) -> Result<Vec<FailedNotification>, String> {
+    let _ = rbac::require(&session, Permission::AppointmentsView)?;
+    sqlx::query_as::<_, FailedNotification>(
+        r#"
+        SELECT
+            wn.id, wn.appointment_id, wn.notification_type,
+            wn.recipient, wn.message, wn.sent_at,
+            (p.first_name || ' ' || p.last_name) AS patient_name
+        FROM whatsapp_notifications wn
+        LEFT JOIN appointments a ON a.id = wn.appointment_id
+        LEFT JOIN patients p ON p.id = a.patient_id
+        WHERE wn.success = FALSE
+        ORDER BY wn.sent_at DESC
+        LIMIT 50
+        "#,
+    )
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to load failed notifications: {}", e))
 }
