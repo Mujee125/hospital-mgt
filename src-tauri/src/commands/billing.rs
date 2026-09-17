@@ -30,7 +30,7 @@ use crate::models::{
     Bill, BillItem, CreateAdvance, CreateBill, CreateInsuranceClaim, CreatePayment, CreateRefund,
     InsuranceClaim, PatientAdvance, Payment, Refund, UpdateClaimStatus,
 };
-use crate::rbac::{self, Permission, SessionState};
+use crate::rbac::{self, Permission, Session, SessionState};
 
 /// A discount (absolute amount) larger than this fraction of the bill gross
 /// needs manager approval (BillingApprove). Two-level discount control per
@@ -421,6 +421,176 @@ pub async fn record_payment_core(
     )
     .await;
     Ok(row.0)
+}
+
+/// BILLING-LINK-2026-09-16: the system-generated consultation charge raised
+/// when an appointment is marked `completed`.
+///
+/// Called from `appointments::update_appointment_status` (not a Tauri
+/// command), so it deliberately does NOT re-check BillingCreate /
+/// PaymentsManage. The caller already holds `AppointmentsUpdate`, which is
+/// the correct authorisation for completing a consult; the charge is a
+/// consequence of that action, not a separately-granted capability. gating
+/// it on BillingCreate would make it impossible for a doctor (who holds
+/// AppointmentsUpdate but not BillingCreate) to complete an appointment
+/// without a billing clerk present — the exact workflow gap that left the
+/// Billing section empty and revenue flat.
+///
+/// Semantics:
+///   • Skipped silently when `consultation_fee` is NULL or <= 0 — a free or
+///     unpriced consult must never invent a charge.
+///   • Idempotent: an explicit pre-check plus the UNIQUE on
+///     `bills.appointment_id` mean a re-completion or an IPC retry can never
+///     create a second bill or double-charge the patient.
+///   • Records a payment for the full fee so the appointment lands in the
+///     revenue KPIs (which SUM `payments.amount`) and flags
+///     `appointments.fee_paid`, giving the desk a single source of truth for
+///     "was this consult charged".
+///   • Every query is parameter-bound; no external input is interpolated.
+pub async fn bill_completed_appointment(
+    pool: &PgPool,
+    session: &Session,
+    appointment_id: i32,
+) -> Result<(), String> {
+    // Patient + doctor name + priced fee for the consult being completed.
+    let row: Option<(i32, Option<String>, Option<Decimal>)> = sqlx::query_as(
+        r#"SELECT a.patient_id,
+                  d.first_name || ' ' || d.last_name,
+                  a.consultation_fee
+             FROM appointments a
+             LEFT JOIN doctors d ON d.id = a.doctor_id
+            WHERE a.id = $1"#,
+    )
+    .bind(appointment_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    let (patient_id, doctor_name, fee) = match row {
+        // The appointment was deleted between the status update and this
+        // call — nothing to bill, and not an error.
+        None => return Ok(()),
+        Some(r) => r,
+    };
+
+    // A NULL/zero fee is a free or unpriced consult — never invent a charge.
+    let fee = match fee {
+        Some(f) if f > Decimal::ZERO => f,
+        _ => return Ok(()),
+    };
+
+    // Idempotency pre-check; bills.appointment_id UNIQUE is the race-safe
+    // backstop if two completions slip past this lookup concurrently.
+    let already_billed: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM bills WHERE appointment_id = $1")
+            .bind(appointment_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    if already_billed.is_some() {
+        return Ok(());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    // Same sequential, immutable invoice number as create_bill_core.
+    let seq: (i64,) = sqlx::query_as("SELECT NEXTVAL('bill_number_seq')")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let bill_number = format!("INV-{}-{:0>6}", chrono::Utc::now().format("%Y"), seq.0);
+
+    let bill_id: (i32,) = sqlx::query_as(
+        r#"INSERT INTO bills
+             (patient_id, appointment_id, bill_number, bill_type,
+              total_amount, discount, tax, net_amount, status, created_by_user_id)
+           VALUES ($1,$2,$3,'opd',$4,0,0,$4,'unpaid',$5)
+           RETURNING id"#,
+    )
+    .bind(patient_id)
+    .bind(appointment_id)
+    .bind(&bill_number)
+    .bind(fee)
+    .bind(session.user_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    // Single consultation line item — the amount is the server-loaded fee,
+    // never a client-supplied figure.
+    sqlx::query(
+        r#"INSERT INTO bill_items
+             (bill_id, item_type, description, quantity, unit_price, total)
+           VALUES ($1,'consultation',$2,1,$3,$3)"#,
+    )
+    .bind(bill_id.0)
+    .bind(format!(
+        "OPD consultation — Dr. {}",
+        doctor_name.as_deref().unwrap_or("Unassigned")
+    ))
+    .bind(fee)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    // Record the collection. The reference ties the payment to its origin
+    // so reconciliation can trace it back to the appointment.
+    let payment_ref = format!("APPT-{}", appointment_id);
+    sqlx::query(
+        r#"INSERT INTO payments
+             (bill_id, amount, payment_method, reference_number, received_by_user_id)
+           VALUES ($1,$2,'cash',$3,$4)"#,
+    )
+    .bind(bill_id.0)
+    .bind(fee)
+    .bind(&payment_ref)
+    .bind(session.user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    // Same roll-up as record_payment_core: full coverage → 'paid'.
+    sqlx::query(
+        r#"UPDATE bills SET status =
+             CASE WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE bill_id = $1)
+                    - (SELECT COALESCE(SUM(amount),0) FROM refunds WHERE bill_id = $1) >= net_amount
+                  THEN 'paid' ELSE 'partial' END,
+             updated_at = NOW()
+           WHERE id = $1"#,
+    )
+    .bind(bill_id.0)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    // Flag the consult as charged so the appointment view agrees with billing.
+    sqlx::query("UPDATE appointments SET fee_paid = TRUE WHERE id = $1")
+        .bind(appointment_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    audit::for_session(
+        pool,
+        session,
+        "appointment_billed",
+        "bills",
+        Some(&bill_id.0.to_string()),
+        Some(serde_json::json!({
+            "appointment_id": appointment_id,
+            "bill_number": bill_number,
+            "consultation_fee": fee.to_string()
+        })),
+    )
+    .await;
+    Ok(())
 }
 
 #[tauri::command]

@@ -16,6 +16,8 @@ import { PatientProfileDialog } from "@/components/clinical/PatientProfileDialog
 import { Search, UserPlus, Edit, Trash2, Users, User } from "lucide-react";
 import { usePatients, useDeletePatient } from "@/lib/queries";
 import type { Patient } from "@/lib/models";
+import { useAuth } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/rbac";
 import {
   PageContainer,
   PageHeader,
@@ -29,6 +31,21 @@ import {
 } from "@/components/layout/shared";
 
 export function Patients() {
+  const { has } = useAuth();
+  // RBAC: the "Add patient" affordances require patients.create. The route
+  // only guards patients.view, so without this gate a role that can browse
+  // the directory but not register (nurse, lab_technician, pharmacist,
+  // billing_clerk) would see the button and only discover the refusal on
+  // submit — "Access denied: … 'patients.create' permission". The backend
+  // remains the source of truth; this is the UX affordance matching it.
+  const canCreate = has(PERMISSIONS.PatientsCreate);
+  // Row affordances: edit needs patients.update (doctor, nurse,
+  // receptionist), delete needs patients.delete (no seeded role but
+  // super_admin). Without these gates the icons render for every role
+  // that can merely browse the directory and fail at submit.
+  const canUpdate = has(PERMISSIONS.PatientsUpdate);
+  const canDelete = has(PERMISSIONS.PatientsDelete);
+
   const [searchParams, setSearchParams] = useSearchParams();
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -58,9 +75,11 @@ export function Patients() {
 
   // Deep-linkable "add" trigger — Dashboard's quick-action button
   // navigates to /patients?add=1 instead of the old prop-drilled
-  // shouldTriggerAdd/onResetTrigger pattern.
+  // shouldTriggerAdd/onResetTrigger pattern. Guarded on patients.create so
+  // a hand-crafted URL can't open the registration form for a role whose
+  // submit the backend would refuse.
   useEffect(() => {
-    if (searchParams.get("add") === "1") {
+    if (canCreate && searchParams.get("add") === "1") {
       handleAddPatient();
       searchParams.delete("add");
       setSearchParams(searchParams, { replace: true });
@@ -122,9 +141,11 @@ export function Patients() {
         title="Patient directory"
         description="Manage patient records, demographics, and contact history."
         actions={
-          <Button onClick={handleAddPatient} className="gap-2">
-            <UserPlus className="h-4 w-4" /> Add patient
-          </Button>
+          canCreate && (
+            <Button onClick={handleAddPatient} className="gap-2">
+              <UserPlus className="h-4 w-4" /> Add patient
+            </Button>
+          )
         }
       />
 
@@ -143,7 +164,7 @@ export function Patients() {
                 : "Register your first patient to start building the clinic's records."
             }
             action={
-              !isSearchActive && (
+              !isSearchActive && canCreate && (
                 <Button onClick={handleAddPatient} size="sm" className="gap-2">
                   <UserPlus className="h-3.5 w-3.5" /> Add patient
                 </Button>
@@ -220,27 +241,31 @@ export function Patients() {
                         >
                           <User className="h-4 w-4" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleEditPatient(patient)}
-                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                          title="Edit patient details"
-                          aria-label={`Edit ${patient.first_name} ${patient.last_name}`}
-                        >
-                          <Edit className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleDeletePatient(patient)}
-                          disabled={deletePatient.isPending}
-                          className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
-                          title="Delete patient record"
-                          aria-label={`Delete ${patient.first_name} ${patient.last_name}`}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
+                        {canUpdate && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleEditPatient(patient)}
+                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            title="Edit patient details"
+                            aria-label={`Edit ${patient.first_name} ${patient.last_name}`}
+                          >
+                            <Edit className="h-4 w-4" />
+                          </Button>
+                        )}
+                        {canDelete && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleDeletePatient(patient)}
+                            disabled={deletePatient.isPending}
+                            className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
+                            title="Delete patient record"
+                            aria-label={`Delete ${patient.first_name} ${patient.last_name}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>

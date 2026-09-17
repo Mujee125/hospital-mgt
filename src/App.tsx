@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense, type ReactNode } from "react";
+import { useState, useEffect, useRef, lazy, Suspense, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
@@ -105,13 +105,26 @@ function App() {
   const [serverMode, setServerMode] = useState(false);
   const [serverIp, setServerIp] = useState("");
   const [config, setConfig] = useState<AppConfig | null>(null);
+  // ROOT-CAUSE FIX (2026-09-16): React StrictMode double-invokes effects in
+  // dev (mount → effect → cleanup → effect again). The previous unguarded
+  // `checkSetupThenBoot()` therefore started the WHOLE boot chain twice —
+  // two concurrent `initialize_database` IPCs racing to swap the DB pool,
+  // which is what surfaced as "attempted to acquire a connection on a
+  // closed pool". The backend is now idempotent (see INIT_STATE in
+  // src-tauri/src/lib.rs); this ref guard stops the duplicate at the source.
+  // The ref persists across StrictMode's simulated remount (same fiber),
+  // so the second effect run is a no-op.
+  const bootStartedRef = useRef(false);
 
   useEffect(() => {
     let unlistenFn: (() => void) | null = null;
     listen<string>("init_status", (e) => setInitStatus(e.payload)).then((f) => {
       unlistenFn = f;
     });
-    checkSetupThenBoot();
+    if (!bootStartedRef.current) {
+      bootStartedRef.current = true;
+      checkSetupThenBoot();
+    }
     return () => {
       unlistenFn?.();
     };

@@ -59,21 +59,50 @@ function greetingFor(now: Date): string {
 
 export function Dashboard({ onNavigate, triggerAddPatient, triggerAddAppointment }: DashboardProps) {
   const { session, has } = useAuth();
+  const canAppointments = has(PERMISSIONS.AppointmentsView);
   const { data: kpis } = useDashboardKpis();
-  const { data: stats } = useAppointmentStats();
+  const { data: stats } = useAppointmentStats(canAppointments);
+
+  const primaryRole = session?.roles?.[0];
+  const firstName = (session?.user.full_name ?? "").split(" ")[0] || "there";
+  const isDoctor = primaryRole === "doctor";
+  const isNurse = primaryRole === "nurse";
+
+  // RBAC fetch gates. The cards below are already hidden by these same
+  // permissions, but hiding a card does not stop its query: an ungated
+  // invoke hits the backend `require` guard and returns "Access denied…",
+  // which the global QueryCache onError in main.tsx toasts to the user as
+  // "Couldn't load data" — reading to staff like a system fault rather than
+  // correct least-privilege behaviour. Each read is enabled only when the
+  // caller holds the exact permission that read's command enforces, so a
+  // forbidden module never errors in the first place.
+  const canQueue = has(PERMISSIONS.QueueView);
+  const canIpd = has(PERMISSIONS.IpdView);
+  // The approvals card renders on LabApprove, but `get_lab_orders` requires
+  // LabView — gate on both so the fetch can never be rejected. Every seeded
+  // LabApprove holder also has LabView; the AND keeps that invariant true if
+  // an admin edits role grants in the UI.
+  const canLab = has(PERMISSIONS.LabApprove) && has(PERMISSIONS.LabView);
+
   // Null-safe: a `= []` destructure default only covers `undefined`; a
   // successful fetch that returns JSON null leaves data === null and
   // crashed the page on .length/.filter (caught live by the e2e debug
   // run — a backend null on any of these commands white-screened the
-  // dashboard behind the ErrorBoundary). `?? []` guards both.
-  const todaySchedule = useTodayAppointments().data ?? [];
-  const queue = useQueue().data ?? [];
-  const labOrders = useLabOrders().data ?? [];
-  const admitted = useAdmissions("admitted").data ?? [];
+  // dashboard behind the ErrorBoundary). A disabled (permission-gated)
+  // query also yields data === undefined — `?? []` guards both cases.
+  const todaySchedule = useTodayAppointments(canAppointments).data ?? [];
+  const queue = useQueue(null, canQueue).data ?? [];
+  const { data: labOrdersData, isLoading: labOrdersLoading } = useLabOrders(null, canLab);
+  const labOrders = labOrdersData ?? [];
+  const { data: admittedData, isLoading: admittedLoading } = useAdmissions(
+    "admitted",
+    canIpd && isNurse,
+  );
+  const admitted = admittedData ?? [];
   // PK-2026-09-14 gap-6: recent failed WhatsApp sends, for front-desk
   // follow-up (whatsapp_notifications.success was already persisted,
   // just never read back anywhere before this).
-  const failedNotifications = useFailedNotifications().data ?? [];
+  const failedNotifications = useFailedNotifications(canAppointments).data ?? [];
 
   const canOpenPatient = has(PERMISSIONS.PatientsView);
   const [profileId, setProfileId] = useState<number | null>(null);
@@ -81,22 +110,16 @@ export function Dashboard({ onNavigate, triggerAddPatient, triggerAddAppointment
     if (canOpenPatient) setProfileId(id);
   };
 
-  const primaryRole = session?.roles?.[0];
-  const firstName = (session?.user.full_name ?? "").split(" ")[0] || "there";
-  const isDoctor = primaryRole === "doctor";
-  const isNurse = primaryRole === "nurse";
-
   // Doctor's lab-approval work queue (LabApprove holders only — matches
   // the backend's approve gate; lab_technician deliberately lacks it).
-  const showLabApprovals = has(PERMISSIONS.LabApprove);
-  const { isLoading: labOrdersLoading } = useLabOrders();
+  // Tied to `canLab` so the card renders exactly when its data can load.
+  const showLabApprovals = canLab;
   const awaitingApproval = showLabApprovals
     ? labOrders.filter((o) => o.status === "resulted").slice(0, 6)
     : [];
 
   // Nurse's ward census.
-  const showWard = has(PERMISSIONS.IpdView);
-  const { isLoading: admittedLoading } = useAdmissions("admitted");
+  const showWard = canIpd;
 
   // Guard: if no patients exist, "New appointment" should redirect to patient
   // registration instead of showing an error toast on the Appointments page.

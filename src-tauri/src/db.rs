@@ -35,6 +35,64 @@ pub fn sanitize_db_error(e: &sqlx::Error) -> String {
     "Database operation failed. Please contact support.".to_string()
 }
 
+/// MRN-2026-09-16: curated, actionable hints for the constraint violations a
+/// user can trigger by *normal data entry*. Before this, registering a
+/// patient with a duplicate MRN failed with the generic sanitized message
+/// "Database operation failed. Please contact support." — technically safe
+/// (SEC-18) but useless at the front desk: the receptionist/doctor has no
+/// way to tell their MRN was already used, so the same save fails repeatedly
+/// and gets reported as a system fault.
+///
+/// This follows the documented SEC-18 exception pattern used by
+/// `diagnose_db_error`: hand-written strings keyed to specific expected
+/// conditions, NOT raw sqlx output, so no table/column/constraint names or
+/// SQL fragments reach the client. Anything not listed here still falls
+/// through to the generic sanitized message.
+pub fn friendly_db_error(e: &sqlx::Error) -> Option<String> {
+    let db_err = match e {
+        sqlx::Error::Database(d) => d,
+        _ => return None,
+    };
+    curated_hint(db_err.code().as_deref(), db_err.constraint())
+}
+
+/// Pure (sqlstate, constraint) → curated-hint mapping, split out so the
+/// policy can be unit-tested without constructing a `sqlx::Error`.
+fn curated_hint(sqlstate: Option<&str>, constraint: Option<&str>) -> Option<String> {
+    match sqlstate {
+        // SQLSTATE 23505 = unique_violation.
+        Some("23505") => match constraint {
+            // patients.mrn is UNIQUE; a taken MRN is a data-entry mistake the
+            // user can fix themselves, so tell them plainly. MRN is optional —
+            // NULL is allowed and is not subject to the constraint.
+            Some("patients_mrn_key") => Some(
+                "A patient with this MRN already exists. Use a different MRN, \
+                 or leave the field blank to skip it."
+                    .to_string(),
+            ),
+            _ => None,
+        },
+        // SQLSTATE 22001 = string_data_right_truncation — a typed value
+        // exceeded its column width. The patient form caps every field to
+        // the schema width, but other write paths can still reach this;
+        // naming the long fields in plain language beats "contact support"
+        // and reveals no table/column names.
+        Some("22001") => Some(
+            "One of the entered values is too long. Please shorten the longer \
+             fields (name, MRN, CNIC, phone, insurance) and try again."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+/// Sanitize a query error for the user, preferring a curated actionable hint
+/// (see `friendly_db_error`) and falling back to the generic message. The
+/// full error is still logged to stderr in either path.
+pub fn explain_db_error(e: &sqlx::Error) -> String {
+    friendly_db_error(e).unwrap_or_else(|| sanitize_db_error(e))
+}
+
 /// Builds a Postgres connection URL.
 ///
 /// SSL behaviour by connection type:
@@ -736,6 +794,15 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
             "created_by_user_id",
             "INT REFERENCES users(id) ON DELETE SET NULL",
         ),
+        // FIX-2026-09-16: `update_patient` sets `updated_at = NOW()`, but this
+        // column was never created on `patients` (every other core table has
+        // one). The UPDATE therefore failed with "column updated_at of
+        // relation patients does not exist" for EVERY role holding
+        // patients.update — reproduced against the live DB — which the
+        // sanitizer surfaced as the opaque "Database operation failed.
+        // Please contact support." NOT NULL + DEFAULT NOW() keeps existing
+        // rows valid without a backfill.
+        ("updated_at", "TIMESTAMPTZ NOT NULL DEFAULT NOW()"),
     ] {
         sqlx::query(&format!(
             "ALTER TABLE patients ADD COLUMN IF NOT EXISTS {} {}",
@@ -884,6 +951,21 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
         .await
         .map_err(|e| format!("appointments.fee_paid: {}", e))?;
 
+    // BILLING-LINK-2026-09-16: the appointment→billing bridge. Bills
+    // previously had no reference back to the appointment they arose from,
+    // so completing an appointment could never produce (or be reconciled
+    // against) an invoice — the Billing section showed "No invoices" and
+    // dashboard revenue never moved. The UNIQUE constraint is the
+    // idempotency guarantee: at most one bill per appointment, so a
+    // re-completion or an IPC retry can never double-charge a patient.
+    sqlx::query(
+        "ALTER TABLE bills ADD COLUMN IF NOT EXISTS appointment_id \
+         INT UNIQUE REFERENCES appointments(id) ON DELETE SET NULL",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("bills.appointment_id: {}", e))?;
+
     // PK-2026-09-14 gap-4: national ID (CNIC) on the patient record.
     // Reception routinely confirms identity by CNIC before check-in;
     // nullable so existing rows are unaffected and it stays optional
@@ -893,6 +975,23 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
         .execute(pool)
         .await
         .map_err(|e| format!("patients.cnic: {}", e))?;
+
+    // DOC-LINK-2026-09-16: the practitioner↔login bridge. `doctors` (the
+    // schedulable directory the appointment form lists) and `users` (login
+    // accounts) were entirely separate tables — a super-admin could create
+    // a user with the doctor role, and it would appear in Users & Roles but
+    // never in the practitioner dropdown, because that dropdown reads
+    // `get_doctors`. Conversely a practitioner added in the Doctors module
+    // had no login at all. UNIQUE means one login maps to at most one
+    // practitioner profile; nullable means a profile can exist without a
+    // login (a visiting consultant who isn't a system user).
+    sqlx::query(
+        "ALTER TABLE doctors ADD COLUMN IF NOT EXISTS \
+         user_id INT UNIQUE REFERENCES users(id) ON DELETE SET NULL",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("doctors.user_id: {}", e))?;
 
     sqlx::query(
         r#"
@@ -2656,4 +2755,49 @@ pub async fn initialize(
     let pool = connect_app(host, port, user, password, db_name, sslrootcert_path).await?;
     run_migrations(&pool).await?;
     Ok(pool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // MRN-2026-09-16: a duplicate MRN on patient create/update must surface
+    // an actionable hint, not the generic "contact support" message — the
+    // doctor/receptionist can fix a taken MRN themselves.
+    #[test]
+    fn duplicate_mrn_yields_actionable_hint() {
+        let msg = curated_hint(Some("23505"), Some("patients_mrn_key"));
+        let msg = msg.expect("duplicate MRN should map to a hint");
+        assert!(msg.contains("MRN"), "hint should name the field: {msg}");
+        // SEC-18: the hint is a curated string — it must not echo back the
+        // raw constraint name or SQLSTATE to the client.
+        assert!(!msg.contains("patients_mrn_key"));
+        assert!(!msg.contains("23505"));
+    }
+
+    #[test]
+    fn unknown_unique_constraints_get_no_hint() {
+        // A unique violation we haven't curated stays generic on purpose —
+        // we won't guess at a constraint we don't have a hint for.
+        assert!(curated_hint(Some("23505"), Some("users_email_key")).is_none());
+        assert!(curated_hint(Some("23505"), None).is_none());
+    }
+
+    #[test]
+    fn truncation_yields_actionable_hint() {
+        let msg = curated_hint(Some("22001"), None);
+        let msg = msg.expect("truncation should map to a hint");
+        assert!(msg.contains("too long"), "hint should say too long: {msg}");
+        // SEC-18: curated only — never the raw SQLSTATE or column names.
+        assert!(!msg.contains("22001"));
+        assert!(!msg.contains("varchar"));
+    }
+
+    #[test]
+    fn non_unique_errors_get_no_hint() {
+        // 23502 = not_null_violation — we deliberately do not hint at these
+        // (they indicate a bug, not user data entry).
+        assert!(curated_hint(Some("23502"), Some("patients_mrn_key")).is_none());
+        assert!(curated_hint(None, Some("patients_mrn_key")).is_none());
+    }
 }

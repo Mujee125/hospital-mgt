@@ -12,6 +12,7 @@ use crate::models::{
 };
 use crate::rbac::{self, Permission, SessionState};
 use crate::whatsapp::{self, WhatsAppMessage};
+use crate::commands::billing;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -619,6 +620,23 @@ pub async fn update_appointment_status(
                 )
                 .await;
             }
+        }
+    }
+
+    // BILLING-LINK-2026-09-16: a completed consult is the hospital's charge
+    // event. Raise the consultation bill + payment so it appears in the
+    // Billing section and in the revenue KPIs. Best-effort by design — the
+    // status change has already succeeded, so a billing failure must NOT
+    // roll the appointment back to its prior state (a completed visit is a
+    // clinical fact independent of whether the printer worked). The error is
+    // logged for ops instead; the helper is idempotent, so re-completing the
+    // appointment retries the charge safely.
+    if status == "completed" {
+        if let Err(e) = billing::bill_completed_appointment(pool.inner(), &s, id).await {
+            eprintln!(
+                "[HMS BILLING] appointment {} completed but auto-billing failed: {}",
+                id, e
+            );
         }
     }
 

@@ -683,6 +683,7 @@ async fn wp2_c02_concurrent_create_patient_vs_deactivation() {
                         emergency_contact_phone: None,
                         insurance_provider: None,
                         insurance_policy_number: None,
+                        cnic: None,
                     };
                     hospital_mgmt_lib::commands::patients::create_patient_core(&p, &s, patient)
                         .await

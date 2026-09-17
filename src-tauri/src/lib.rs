@@ -79,6 +79,32 @@ static BROADCAST_RUNNING: AtomicBool = AtomicBool::new(false);
 #[allow(dead_code)]
 static PAIRING_LISTENER_STARTED: AtomicBool = AtomicBool::new(false);
 
+// ── ROOT-CAUSE FIX (2026-09-16): initialize_database idempotency ─────────────
+//
+// The frontend can call `initialize_database` several times per process:
+//   * React StrictMode double-invokes App.tsx's boot useEffect in dev
+//     (two CONCURRENT calls racing each other),
+//   * the client setup flow calls it once inside complete_pairing_and_connect
+//     AND again via onSetupComplete → verifyLicenseAndBoot → bootApp,
+//   * "Try again" on the init-error screen, license install, and Vite HMR
+//     full reloads each re-run the boot chain.
+// Every call previously built a fresh pool, re-ran the whole migration
+// batch and swapped the managed pool — the swap being what got the old
+// pool closed under in-flight commands ("attempted to acquire a
+// connection on a closed pool"). This sentinel makes a repeat call for
+// the SAME connection target a no-op that returns the cached result:
+// no second pool, no swap, no migrations, no scheduler restart attempt.
+// A genuine re-pair to a DIFFERENT target (host/port/user/db/password)
+// still takes the full re-init path — and with the close() removed above,
+// that swap can no longer break in-flight commands either.
+//
+// tokio::sync::Mutex (not std) because the guard is held across .await
+// points: a concurrent StrictMode duplicate blocks here until the first
+// call finishes, then takes the cached fast path. Inner value is
+// Option<(fingerprint, result)> — None until the first successful init.
+static INIT_STATE: std::sync::OnceLock<tokio::sync::Mutex<Option<(String, String)>>> =
+    std::sync::OnceLock::new();
+
 // ── REL-03: graceful-shutdown flags ───────────────────────────────────────────
 //
 // `ShutdownFlags` is created in the `setup` closure and managed as Tauri app
@@ -405,6 +431,52 @@ async fn initialize_database(app_handle: tauri::AppHandle) -> Result<String, Str
         ),
     }
 
+    // ── ROOT-CAUSE FIX (2026-09-16): idempotency gate ─────────────────────
+    //
+    // Serialize concurrent inits (React StrictMode double-effect fires two
+    // `initialize_database` IPCs at once) and turn repeat calls for the SAME
+    // target into a cached no-op. A repeat call previously built a second
+    // pool, re-ran the migration batch, and swapped the managed pool — the
+    // exact window in which in-flight commands got PoolClosed. See the
+    // INIT_STATE declaration above for the full rationale.
+    let target_fingerprint = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(host.as_bytes());
+        hasher.update(port.to_le_bytes());
+        hasher.update(cfg.db_user.as_bytes());
+        hasher.update(cfg.db_password.as_bytes());
+        hasher.update(cfg.db_name.as_bytes());
+        hasher.update(
+            sslrootcert_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().as_bytes().to_vec())
+                .unwrap_or_default(),
+        );
+        hex::encode(hasher.finalize())
+    };
+
+    let init_lock = INIT_STATE.get_or_init(Default::default);
+    // tokio Mutex held across the whole init: a racing duplicate call parks
+    // here until the winner finishes, then takes the cached fast path.
+    let mut guard = init_lock.lock().await;
+
+    if let Some((cached_fp, cached_result)) = guard.as_ref() {
+        if *cached_fp == target_fingerprint {
+            log_info!(
+                &app_handle,
+                "initialize_database: target already initialized in this process — \
+                 returning cached result (no pool swap, no re-migration)"
+            );
+            app_handle.emit("init_status", "Ready!").ok();
+            return Ok(cached_result.clone());
+        }
+        log_info!(
+            &app_handle,
+            "initialize_database: target changed since last init — re-initializing"
+        );
+    }
+
     log_info!(&app_handle, "Calling db::initialize...");
     let pool = db::initialize(
         &host,
@@ -431,40 +503,30 @@ async fn initialize_database(app_handle: tauri::AppHandle) -> Result<String, Str
     log_info!(&app_handle, "db::initialize OK — pool acquired");
 
     let pool = Arc::new(pool);
-    // QA-2026-09-08 H4: initialize_database can run again (re-pair, retry,
-    // StrictMode double-effect) — `manage` silently REPLACES the previous
-    // pool without closing it, leaking its connections until idle_timeout
-    // (added in db.rs) eventually reaps them. Close the old pool explicitly:
-    // graceful pool.close() drains active queries first, so in-flight work
-    // finishes instead of getting yanked.
-    {
-        let existing = app_handle.try_state::<sqlx::PgPool>();
-        app_handle.manage(pool.as_ref().clone());
-        if let Some(old) = existing {
-            if !old.is_closed() {
-                // Live fix (2026-09-12): closing the superseded pool
-                // immediately made any query that had just resolved the OLD
-                // pool from Tauri state fail with "attempted to acquire a
-                // connection on a closed pool" (observed as "Couldn't load
-                // data — Failed to get queue" on a clinic PC's first boot
-                // after license install). Commands invoked after the
-                // manage() above already see the new pool; delay the close
-                // so in-flight work against the old pool finishes. The
-                // spawn is detached on purpose — app exit drops the pool
-                // anyway, and idle_timeout reaps leftovers if the close
-                // never runs.
-                log_info!(
-                    &app_handle,
-                    "Scheduling superseded DB pool close in 10s (grace for in-flight queries)"
-                );
-                let old_pool = old.inner().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    let _ = old_pool.close().await;
-                });
-            }
-        }
-    }
+    // ROOT-CAUSE FIX (2026-09-16, "attempted to acquire a connection on a
+    // closed pool"): NEVER close the superseded pool while the app runs.
+    //
+    // Every command resolves `tauri::State<'_, PgPool>` at IPC dispatch
+    // time and may execute its query seconds later. sqlx's acquire_timeout
+    // (15 s in db.rs::connect_app) is LONGER than any close "grace" delay,
+    // so a command parked in the old pool's acquire queue — or queued on a
+    // congested async runtime behind the concurrent re-init's migration
+    // batch — gets woken by close() with PoolClosed. That surfaced as:
+    //     "Failed to register patient: Session validation query failed:
+    //      attempted to acquire a connection on a closed pool"
+    // (create_patient → rbac::require_strong's session query is the first
+    // DB touch, so it fails first), and previously as "Failed to get
+    // queue" / the change_password failures that the `resolve_pool` band-
+    // aid in auth.rs papered over.
+    //
+    // A superseded-but-OPEN pool is harmless by design: db.rs::connect_app
+    // pins idle_timeout (300 s) and max_lifetime (1800 s) precisely so a
+    // dropped pool handle reaps its own connections. The background
+    // scheduler holding an Arc to it also keeps working against the same
+    // database. Leaking <= 10 idle connections for <= 5 minutes is
+    // strictly safer than yanking the pool out from under in-flight
+    // commands and the scheduler.
+    app_handle.manage(pool.as_ref().clone());
 
     app_handle
         .emit("init_status", "Verifying tables are up to date")
@@ -499,6 +561,13 @@ async fn initialize_database(app_handle: tauri::AppHandle) -> Result<String, Str
         Role::Client { server_ip, .. } => format!("client:{}", server_ip),
     };
     log_info!(&app_handle, "initialize_database complete → {}", result);
+
+    // ROOT-CAUSE FIX (2026-09-16): cache the successful result so duplicate
+    // calls for the same target short-circuit above. Only written on
+    // success — a failed init leaves the cache untouched so "Try again"
+    // retries the full path.
+    *guard = Some((target_fingerprint, result.clone()));
+
     Ok(result)
 }
 

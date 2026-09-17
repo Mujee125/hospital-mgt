@@ -264,6 +264,7 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
               onChange={(e) => setFirstName(e.target.value)}
               disabled={loading}
               required
+              maxLength={100}
             />
           </FormField>
           <FormField label="Last name" htmlFor="last_name" required>
@@ -274,6 +275,7 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
               onChange={(e) => setLastName(e.target.value)}
               disabled={loading}
               required
+              maxLength={100}
             />
           </FormField>
         </div>
@@ -293,6 +295,7 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
               disabled={loading}
               required
               inputMode="tel"
+              maxLength={30}
             />
           </FormField>
           <FormField label="Email address" htmlFor="email">
@@ -303,6 +306,7 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               disabled={loading}
+              maxLength={255}
             />
           </FormField>
         </div>
@@ -367,6 +371,10 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
               value={mrn}
               onChange={(e) => setMrn(e.target.value)}
               disabled={loading}
+              // patients.mrn is VARCHAR(20) UNIQUE — the browser cap stops a
+              // too-long value before submit; the backend still reports a
+              // taken MRN plainly (see db::friendly_db_error).
+              maxLength={20}
             />
           </FormField>
           <FormField label="Blood group" htmlFor="blood_group">
@@ -435,6 +443,7 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
               value={emergencyName}
               onChange={(e) => setEmergencyName(e.target.value)}
               disabled={loading}
+              maxLength={120}
             />
           </FormField>
           <FormField label="Contact phone" htmlFor="emergency_contact_phone">
@@ -445,6 +454,7 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
               onChange={(e) => setEmergencyPhone(e.target.value)}
               disabled={loading}
               inputMode="tel"
+              maxLength={30}
             />
           </FormField>
         </div>
@@ -465,6 +475,10 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
               onChange={(e) => setCnic(e.target.value)}
               disabled={loading}
               inputMode="numeric"
+              // patients.cnic is VARCHAR(15); the placeholder is already the
+              // full width, so a longer typed value used to hit a DB
+              // truncation error behind the generic "contact support" toast.
+              maxLength={15}
             />
           </FormField>
         </div>
@@ -482,6 +496,7 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
               value={insuranceProvider}
               onChange={(e) => setInsuranceProvider(e.target.value)}
               disabled={loading}
+              maxLength={120}
             />
           </FormField>
           <FormField label="Policy number" htmlFor="insurance_policy_number">
@@ -491,6 +506,7 @@ export function PatientForm({ patient, onSuccess, onCancel, onDirtyChange }: Pat
               value={insurancePolicyNumber}
               onChange={(e) => setInsurancePolicyNumber(e.target.value)}
               disabled={loading}
+              maxLength={60}
             />
           </FormField>
         </div>

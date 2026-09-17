@@ -71,6 +71,12 @@ pub struct Doctor {
     pub available_to: NaiveTime,
     pub is_active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    // DOC-LINK-2026-09-16: the login account this practitioner profile
+    // belongs to, if any. `get_doctors` does `SELECT *`, so FromRow needs
+    // the field present; None for practitioners created directly in the
+    // Doctors module that have no system login.
+    #[serde(default)]
+    pub user_id: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -855,6 +855,28 @@ pub async fn create_user(
 
     sync_user_roles(pool.inner(), id.0, &request.roles).await?;
 
+    // DOC-LINK-2026-09-16: a doctor-role account must also exist in the
+    // practitioner directory, otherwise the user can log in but never be
+    // booked for an appointment (the dropdown reads `get_doctors`). Silent
+    // best-effort: a directory-profile failure must not undo a successful
+    // login creation. If it fails, the admin gets a clear error next time
+    // they edit the user, and the account itself is fully usable.
+    if request.roles.iter().any(|r| r == rbac::ROLE_DOCTOR) {
+        if let Err(e) = crate::commands::doctors::ensure_doctor_profile(
+            pool.inner(),
+            id.0,
+            &request.full_name,
+            request.email.as_deref(),
+        )
+        .await
+        {
+            eprintln!(
+                "[HMS DOCTORS] user {} ({}) granted doctor role but directory profile failed: {}",
+                id.0, request.username, e
+            );
+        }
+    }
+
     crate::audit::record(
         pool.inner(),
         Some(session.user_id),
@@ -918,6 +940,34 @@ pub async fn update_user_core(
             .execute(pool)
             .await
             .map_err(|e| format!("Invalidate target sessions: {}", e))?;
+
+        // DOC-LINK-2026-09-16: promoting an existing account to the doctor
+        // role must bridge it into the practitioner directory too — same
+        // gap as create_user. Best-effort for the same reason; the role
+        // change itself has already succeeded.
+        if roles.iter().any(|r| r == rbac::ROLE_DOCTOR) {
+            let name_email: Option<(String, Option<String>)> =
+                sqlx::query_as("SELECT full_name, email FROM users WHERE id = $1")
+                    .bind(request.id)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|e| format!("Load user for doctor bridge: {}", e))?;
+            if let Some((full_name, email)) = name_email {
+                if let Err(e) = crate::commands::doctors::ensure_doctor_profile(
+                    pool,
+                    request.id,
+                    &full_name,
+                    email.as_deref(),
+                )
+                .await
+                {
+                    eprintln!(
+                        "[HMS DOCTORS] user {} promoted to doctor but directory profile failed: {}",
+                        request.id, e
+                    );
+                }
+            }
+        }
     }
 
     crate::audit::record(

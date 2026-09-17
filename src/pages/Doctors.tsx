@@ -17,6 +17,8 @@ import { DoctorForm } from "@/components/forms/DoctorForm";
 import { Search, UserPlus, Edit, Trash2, Stethoscope } from "lucide-react";
 import { useDoctors, useDeleteDoctor } from "@/lib/queries";
 import type { Doctor } from "@/lib/models";
+import { useAuth } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/rbac";
 import {
   PageContainer,
   PageHeader,
@@ -31,6 +33,12 @@ export function Doctors() {
   const [searchQuery, setSearchQuery] = useState("");
   const { data: doctors = [], isLoading } = useDoctors();
   const deleteDoctor = useDeleteDoctor();
+  // RBAC: the directory is readable with doctors.view, but creating,
+  // editing and deleting practitioner profiles require doctors.manage
+  // (super_admin only in the seed). Without these gates a receptionist
+  // sees the buttons and is refused only at submit.
+  const { has } = useAuth();
+  const canManage = has(PERMISSIONS.DoctorsManage);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedDoctor, setSelectedDoctor] = useState<Doctor | undefined>(undefined);
@@ -97,9 +105,11 @@ export function Doctors() {
         title="Practitioners directory"
         description="Medical staff profiles, specialties, and duty timings."
         actions={
-          <Button onClick={handleAddDoctor} className="gap-2">
-            <UserPlus className="h-4 w-4" /> Add doctor
-          </Button>
+          canManage && (
+            <Button onClick={handleAddDoctor} className="gap-2">
+              <UserPlus className="h-4 w-4" /> Add doctor
+            </Button>
+          )
         }
       />
 
@@ -116,7 +126,7 @@ export function Doctors() {
                 : "Add your first doctor to begin scheduling appointments."
             }
             action={
-              !isSearchActive && (
+              !isSearchActive && canManage && (
                 <Button onClick={handleAddDoctor} size="sm" className="gap-2">
                   <UserPlus className="h-3.5 w-3.5" /> Add doctor
                 </Button>
@@ -190,27 +200,31 @@ export function Doctors() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-1">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleEditDoctor(doc)}
-                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                            title="Edit doctor details"
-                            aria-label={`Edit Dr. ${doc.first_name} ${doc.last_name}`}
-                          >
-                            <Edit className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleDeleteDoctor(doc)}
-                            disabled={deleteDoctor.isPending}
-                            className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
-                            title="Delete doctor profile"
-                            aria-label={`Delete Dr. ${doc.first_name} ${doc.last_name}`}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
+                          {canManage && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleEditDoctor(doc)}
+                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                              title="Edit doctor details"
+                              aria-label={`Edit Dr. ${doc.first_name} ${doc.last_name}`}
+                            >
+                              <Edit className="h-4 w-4" />
+                            </Button>
+                          )}
+                          {canManage && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleDeleteDoctor(doc)}
+                              disabled={deleteDoctor.isPending}
+                              className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
+                              title="Delete doctor profile"
+                              aria-label={`Delete Dr. ${doc.first_name} ${doc.last_name}`}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          )}
                         </div>
                       </TableCell>
                     </motion.tr>

@@ -19,10 +19,28 @@ const isAuthProbe = (queryKey: readonly unknown[]) =>
   Array.isArray(queryKey) &&
   queryKey[0] === "auth";
 
+// RBAC: a permission denial is an expected authorization outcome, not a
+// data-loading failure. When a query is rejected with "Access denied…"
+// the correct UX is silence (the UI must not have offered that data —
+// see the per-query `enabled` gates), never a red "Couldn't load data"
+// toast, which reads to clinical staff as a system fault. Surface it to
+// the console instead so a missing gate is still caught in development.
+const isAccessDenied = (error: unknown) =>
+  String(error ?? "").startsWith("Access denied:");
+
 const queryClient = new QueryClient({
   queryCache: new QueryCache({
     onError: (error, query) => {
       if (isAuthProbe(query.queryKey)) return;
+      if (isAccessDenied(error)) {
+        console.warn(
+          "[rbac] query denied by backend — a component is fetching data " +
+            "its rendered UI does not gate:",
+          query.queryKey,
+          String(error),
+        );
+        return;
+      }
       toast.error("Couldn't load data", {
         description: String(error),
         duration: 6000,

@@ -131,7 +131,7 @@ pub async fn create_patient_core(
     .bind(s.user_id)
     .fetch_one(pool)
     .await
-    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    .map_err(|e| crate::db::explain_db_error(&e))?;
 
     audit::for_session(
         pool,
@@ -194,7 +194,7 @@ pub async fn update_patient(
     .bind(patient.id)
     .execute(pool.inner())
     .await
-    .map_err(|e| format!("Update failed: {}", e))?;
+    .map_err(|e| crate::db::explain_db_error(&e))?;
 
     audit::for_session(
         pool.inner(),

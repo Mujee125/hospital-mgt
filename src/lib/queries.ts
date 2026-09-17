@@ -276,17 +276,23 @@ export function useAppointment(id: number | null) {
   });
 }
 
-export function useTodayAppointments() {
+export function useTodayAppointments(enabled = true) {
   return useQuery({
     queryKey: qk.todayAppointments(),
     queryFn: () => invoke<AppointmentWithDetails[]>("get_today_appointments"),
+    // RBAC: `get_today_appointments` requires AppointmentsView. Callers whose
+    // role lacks it must pass enabled=false — the backend would otherwise
+    // deny the invoke and the global QueryCache onError would toast it.
+    enabled,
   });
 }
 
-export function useAppointmentStats() {
+export function useAppointmentStats(enabled = true) {
   return useQuery({
     queryKey: qk.appointmentStats(),
     queryFn: () => invoke<AppointmentStats>("get_appointment_stats"),
+    // RBAC: as above — `get_appointment_stats` requires AppointmentsView.
+    enabled,
   });
 }
 
@@ -363,10 +369,13 @@ export function useIssueQueueTokenForAppointment() {
 
 // PK-2026-09-14 gap-6: recent failed WhatsApp sends, for front-desk
 // follow-up (see get_failed_notifications in appointments.rs).
-export function useFailedNotifications() {
+export function useFailedNotifications(enabled = true) {
   return useQuery({
     queryKey: ["appointments", "failed-notifications"],
     queryFn: () => invoke<FailedNotification[]>("get_failed_notifications"),
+    // RBAC: `get_failed_notifications` requires AppointmentsView — the card
+    // that consumes this is already gated on that permission.
+    enabled,
   });
 }
 
@@ -530,6 +539,11 @@ export function useCreateUser() {
     }) => invoke<number>("create_user", { request: req }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["users"] });
+      // DOC-LINK-2026-09-16: a doctor-role user is auto-provisioned into the
+      // practitioner directory, so the doctors list (appointment dropdown,
+      // Doctors page) must be refreshed too — otherwise the new doctor stays
+      // invisible until a manual refetch.
+      qc.invalidateQueries({ queryKey: ["doctors"] });
       toast.success("User created.");
     },
     onError: (err) => toast.error(String(err)),
@@ -548,6 +562,9 @@ export function useUpdateUser() {
     }) => invoke("update_user", { request: req }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["users"] });
+      // DOC-LINK-2026-09-16: role changes can promote to/from the doctor
+      // role, which adds/removes a practitioner directory profile.
+      qc.invalidateQueries({ queryKey: ["doctors"] });
       toast.success("User updated.");
     },
     onError: (err) => toast.error(String(err)),
@@ -721,11 +738,16 @@ export function useCreateEncounter() {
 
 // ── Queue ────────────────────────────────────────────────────────────────
 
-export function useQueue(statusFilter?: string | null) {
+export function useQueue(statusFilter?: string | null, enabled = true) {
   return useQuery({
     queryKey: ["queue", statusFilter ?? null],
     queryFn: () => invoke<QueueToken[]>("get_queue", { statusFilter: statusFilter ?? null }),
     refetchInterval: 10_000,
+    // RBAC: leave disabled when the caller lacks `queue.view` — the backend
+    // `require` guard would otherwise reject the invoke and the global
+    // QueryCache onError would toast an "Access denied" error for data the
+    // user is correctly forbidden to see.
+    enabled,
   });
 }
 
@@ -829,10 +851,13 @@ export function useCreateBed() {
   });
 }
 
-export function useAdmissions(statusFilter?: string | null) {
+export function useAdmissions(statusFilter?: string | null, enabled = true) {
   return useQuery({
     queryKey: ["ipd", "admissions", statusFilter ?? null],
     queryFn: () => invoke<IpdAdmission[]>("get_admissions", { statusFilter: statusFilter ?? null }),
+    // RBAC: callers without `ipd.view` must pass enabled=false (see the
+    // Dashboard, which fetches only for the ward card it actually renders).
+    enabled,
   });
 }
 
@@ -971,10 +996,13 @@ export function useLabCatalog() {
   });
 }
 
-export function useLabOrders(statusFilter?: string | null) {
+export function useLabOrders(statusFilter?: string | null, enabled = true) {
   return useQuery({
     queryKey: ["lab", "orders", statusFilter ?? null],
     queryFn: () => invoke<LabOrder[]>("get_lab_orders", { statusFilter: statusFilter ?? null }),
+    // RBAC: `get_lab_orders` requires `lab.view`; callers who only render it
+    // for the approvals card must gate on the permission, not on LabApprove.
+    enabled,
   });
 }
 

@@ -63,6 +63,67 @@ fn validate_doctor_fields(
     Ok(())
 }
 
+/// DOC-LINK-2026-09-16: ensure a user with the `doctor` role has a linked
+/// practitioner profile in the `doctors` directory.
+///
+/// Why this exists: `users` (login accounts) and `doctors` (the schedulable
+/// directory the appointment form lists via `get_doctors`) were unrelated
+/// tables. Creating a doctor-role user in Users & Roles made them able to
+/// log in but they never appeared in the practitioner dropdown, so they
+/// could not be booked for appointments. This bridges the two.
+///
+/// Behaviour:
+///   • Idempotent — the UNIQUE on `doctors.user_id` plus this pre-check mean
+///     granting the role twice (or re-saving a user) never creates a second
+///     profile. An existing profile is left untouched, so an admin's manual
+///     edits to specialization/duty hours survive a role re-save.
+///   • Only called from the user create/update paths (which already hold
+///     UsersManage), so it performs no RBAC check of its own. The profile is
+///     a consequence of the role grant the admin is already authorised to
+///     make — gating it on DoctorsManage would make it impossible to create
+///     a usable doctor account without a second privileged step.
+///   • Every query is parameter-bound; no interpolation of external input.
+pub async fn ensure_doctor_profile(
+    pool: &PgPool,
+    user_id: i32,
+    full_name: &str,
+    email: Option<&str>,
+) -> Result<(), String> {
+    // Already linked? Nothing to do — preserve any manual profile edits.
+    let linked: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM doctors WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    if linked.is_some() {
+        return Ok(());
+    }
+
+    // Split the account's full name into the two NOT NULL directory fields.
+    // A single-token name (common) lands wholly in first_name with an empty
+    // last_name rather than failing the insert.
+    let mut parts = full_name.split_whitespace();
+    let first_name = parts.next().unwrap_or("Doctor").to_string();
+    let last_name = parts.collect::<Vec<&str>>().join(" ");
+
+    sqlx::query(
+        r#"INSERT INTO doctors
+             (user_id, first_name, last_name, email, phone,
+              specialization, qualification)
+           VALUES ($1, $2, $3, $4, '', 'General Practice', 'Not specified yet')"#,
+    )
+    .bind(user_id)
+    .bind(&first_name)
+    .bind(&last_name)
+    .bind(email)
+    .execute(pool)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn create_doctor(
     pool: tauri::State<'_, PgPool>,
