@@ -25,22 +25,44 @@ export function Users() {
 
   const [open, setOpen] = useState(false);
   const [edit, setEdit] = useState<{ id: number; full_name: string; email: string; roles: string[]; is_active: boolean } | null>(null);
-  const [form, setForm] = useState({ username: "", full_name: "", email: "", password: "", roles: [] as string[] });
+  const [form, setForm] = useState({ username: "", full_name: "", email: "", password: "", roles: [] as string[], phone: "", qualification: "" });
   const [pwdResetTarget, setPwdResetTarget] = useState<{ id: number; username: string } | null>(null);
   const [pwdDraft, setPwdDraft] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; username: string; full_name: string } | null>(null);
 
-  const openCreate = () => { setEdit(null); setForm({ username: "", full_name: "", email: "", password: "", roles: [] }); setOpen(true); };
+  const openCreate = () => { setEdit(null); setForm({ username: "", full_name: "", email: "", password: "", roles: [], phone: "", qualification: "" }); setOpen(true); };
   const openEdit = (u: { id: number; full_name: string; email: string | null; is_active: boolean }) => {
     setEdit({ id: u.id, full_name: u.full_name, email: u.email ?? "", roles: [], is_active: u.is_active });
+    setForm((f) => ({ ...f, phone: "", qualification: "" }));
     setOpen(true);
   };
 
+  // RCTF follow-up: the doctor role auto-provisions a practitioner
+  // directory profile (DOC-LINK-2026-09-16) — collect phone/qualification
+  // here whenever that role is selected so the profile isn't created with
+  // placeholder values, instead of silently dropping them.
+  const isDoctorRoleSelected = form.roles.includes("doctor");
+
   const submit = async () => {
     if (edit) {
-      await update.mutateAsync({ id: edit.id, full_name: form.full_name || undefined, email: form.email || undefined, roles: form.roles.length ? form.roles : undefined });
+      await update.mutateAsync({
+        id: edit.id,
+        full_name: form.full_name || undefined,
+        email: form.email || undefined,
+        roles: form.roles.length ? form.roles : undefined,
+        phone: isDoctorRoleSelected ? (form.phone || undefined) : undefined,
+        qualification: isDoctorRoleSelected ? (form.qualification || undefined) : undefined,
+      });
     } else {
-      await create.mutateAsync({ username: form.username, full_name: form.full_name, email: form.email || null, password: form.password, roles: form.roles });
+      await create.mutateAsync({
+        username: form.username,
+        full_name: form.full_name,
+        email: form.email || null,
+        password: form.password,
+        roles: form.roles,
+        phone: isDoctorRoleSelected ? (form.phone || undefined) : undefined,
+        qualification: isDoctorRoleSelected ? (form.qualification || undefined) : undefined,
+      });
     }
     setOpen(false);
   };
@@ -177,6 +199,23 @@ export function Users() {
                 ))}
               </div>
             </div>
+            {isDoctorRoleSelected && (
+              <>
+                {/* RCTF follow-up: shown only while the doctor role is
+                    selected — feeds the auto-created practitioner directory
+                    profile so it isn't left with placeholder values. Both
+                    optional; leave blank to keep/use the defaults, editable
+                    later from the Doctors page either way. */}
+                <div className="space-y-1.5">
+                  <Label>Phone <span className="text-muted-foreground font-normal">(practitioner directory)</span></Label>
+                  <Input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="e.g. 555-0100" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Qualification <span className="text-muted-foreground font-normal">(practitioner directory)</span></Label>
+                  <Input value={form.qualification} onChange={(e) => setForm({ ...form, qualification: e.target.value })} placeholder="e.g. MBBS, MD" />
+                </div>
+              </>
+            )}
           </div>
           <DialogFooter>
             <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>

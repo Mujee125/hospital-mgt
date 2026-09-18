@@ -88,6 +88,8 @@ pub async fn ensure_doctor_profile(
     user_id: i32,
     full_name: &str,
     email: Option<&str>,
+    phone: Option<&str>,
+    qualification: Option<&str>,
 ) -> Result<(), String> {
     // Already linked? Nothing to do — preserve any manual profile edits.
     let linked: Option<(i32,)> =
@@ -107,16 +109,27 @@ pub async fn ensure_doctor_profile(
     let first_name = parts.next().unwrap_or("Doctor").to_string();
     let last_name = parts.collect::<Vec<&str>>().join(" ");
 
+    // RCTF follow-up: phone/qualification are now taken from the Users-page
+    // form when it collects them (doctor role selected) — falls back to the
+    // original placeholders when the caller doesn't supply them (e.g. the
+    // promote-to-doctor path on an existing account with no fields to
+    // re-enter). An admin can always fix these afterward via the Doctors
+    // page either way.
+    let phone = phone.unwrap_or("");
+    let qualification = qualification.unwrap_or("Not specified yet");
+
     sqlx::query(
         r#"INSERT INTO doctors
              (user_id, first_name, last_name, email, phone,
               specialization, qualification)
-           VALUES ($1, $2, $3, $4, '', 'General Practice', 'Not specified yet')"#,
+           VALUES ($1, $2, $3, $4, $5, 'General Practice', $6)"#,
     )
     .bind(user_id)
     .bind(&first_name)
     .bind(&last_name)
     .bind(email)
+    .bind(phone)
+    .bind(qualification)
     .execute(pool)
     .await
     .map_err(|e| crate::db::sanitize_db_error(&e))?;

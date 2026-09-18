@@ -413,8 +413,8 @@ pub async fn create_appointment(
                 user_id: None,
                 role_target: Some("receptionist".into()),
                 kind: "appointment_booked".into(),
-                title,
-                body,
+                title: title.clone(),
+                body: body.clone(),
                 entity_type: Some("appointment".into()),
                 entity_id: Some(appt_id),
             },
@@ -425,6 +425,41 @@ pub async fn create_appointment(
                 "[HMS Appointments] notification emit failed (non-fatal): {}",
                 e
             );
+        }
+
+        // RCTF follow-up: also notify the assigned doctor directly, if their
+        // profile is linked to a login (DOC-LINK-2026-09-16 / the
+        // create_login_for_doctor flow). A practitioner-directory entry with
+        // no linked user simply has nowhere to deliver an in-app
+        // notification — skip silently rather than erroring the booking.
+        // Best-effort, same as the receptionist emit above: never fails the
+        // booking itself.
+        let doctor_user_id: Option<(Option<i32>,)> =
+            sqlx::query_as("SELECT user_id FROM doctors WHERE id = $1")
+                .bind(appointment.doctor_id)
+                .fetch_optional(pool.inner())
+                .await
+                .unwrap_or(None);
+        if let Some((Some(doctor_user_id),)) = doctor_user_id {
+            if let Err(e) = crate::commands::notifications::emit(
+                pool.inner(),
+                crate::commands::notifications::NotificationOut {
+                    user_id: Some(doctor_user_id),
+                    role_target: None,
+                    kind: "appointment_booked".into(),
+                    title,
+                    body,
+                    entity_type: Some("appointment".into()),
+                    entity_id: Some(appt_id),
+                },
+            )
+            .await
+            {
+                eprintln!(
+                    "[HMS Appointments] doctor notification emit failed (non-fatal): {}",
+                    e
+                );
+            }
         }
     }
 

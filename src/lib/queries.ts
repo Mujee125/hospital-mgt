@@ -559,6 +559,11 @@ export function useCreateUser() {
       password: string;
       roles: string[];
       must_change_password?: boolean;
+      // RCTF follow-up: only read by the backend when `roles` includes
+      // "doctor" — feeds the directory-profile bridge (DOC-LINK-2026-09-16)
+      // instead of leaving phone/qualification as placeholders.
+      phone?: string;
+      qualification?: string;
     }) => invoke<number>("create_user", { request: req }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["users"] });
@@ -582,6 +587,10 @@ export function useUpdateUser() {
       email?: string;
       is_active?: boolean;
       roles?: string[];
+      // RCTF follow-up: same as useCreateUser — only read by the backend
+      // when `roles` is being changed to include "doctor".
+      phone?: string;
+      qualification?: string;
     }) => invoke("update_user", { request: req }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["users"] });

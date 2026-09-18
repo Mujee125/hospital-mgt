@@ -221,6 +221,13 @@ pub struct CreateUserRequest {
     pub roles: Vec<String>,
     #[serde(default)]
     pub must_change_password: Option<bool>,
+    // RCTF follow-up: only used when `roles` includes the doctor role (fed
+    // into the DOC-LINK-2026-09-16 directory-profile bridge below); ignored
+    // otherwise, so non-doctor user creation is unaffected.
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub qualification: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -234,6 +241,12 @@ pub struct UpdateUserRequest {
     pub is_active: Option<bool>,
     #[serde(default)]
     pub roles: Option<Vec<String>>,
+    // RCTF follow-up: same as CreateUserRequest — only used when `roles`
+    // is being changed to include the doctor role.
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub qualification: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -871,6 +884,8 @@ pub async fn create_user(
             id.0,
             &request.full_name,
             request.email.as_deref(),
+            request.phone.as_deref(),
+            request.qualification.as_deref(),
         )
         .await
         {
@@ -962,6 +977,8 @@ pub async fn update_user_core(
                     request.id,
                     &full_name,
                     email.as_deref(),
+                    request.phone.as_deref(),
+                    request.qualification.as_deref(),
                 )
                 .await
                 {
