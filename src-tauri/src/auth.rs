@@ -97,7 +97,11 @@ fn random_token() -> String {
 /// Generate a 24-character random password from the CSPRNG. Uses an
 /// unambiguous alphabet (no 0/O/1/l/I) so it can be transcribed from the
 /// bootstrap-credentials file by hand if needed.
-fn generate_bootstrap_password() -> String {
+/// RCTF Step 7: visibility widened from private to `pub(crate)` so
+/// `commands::doctors::create_login_for_doctor` can reuse the SAME
+/// CSPRNG-backed generator instead of a second implementation. No entropy
+/// change — the algorithm and alphabet are untouched.
+pub(crate) fn generate_bootstrap_password() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
     let mut bytes = [0u8; 24];
     RandOsRng.fill_bytes(&mut bytes);

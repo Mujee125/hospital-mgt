@@ -14,6 +14,85 @@ use crate::rbac::{self, Permission, SessionState};
 use crate::whatsapp::{self, WhatsAppMessage};
 use crate::commands::billing;
 
+// ── RCTF own-appointment scoping ────────────────────────────────────────────
+//
+// Two authorization tiers exist for appointment data:
+//   Full  — Permission::AppointmentsView. System-wide visibility across every
+//           practitioner (super_admin, receptionist, billing_clerk, nurse).
+//   Own   — Permission::AppointmentsViewOwn. The caller may only read/update
+//           appointments whose doctor_id equals the doctor profile linked to
+//           their OWN account (doctor role). Resolved server-side via
+//           `doctors::doctor_id_for_user` — a client-supplied doctor_id /
+//           doctor_filter is NEVER trusted for this purpose.
+//
+// `AppointmentsViewOwn` is read-only by itself. Doctors also separately hold
+// `AppointmentsUpdate` (unchanged from before this change) — the ownership
+// scoping below applies to THAT permission too, so a doctor-role session can
+// still update appointments, but only their own, and cannot reassign one to
+// another doctor.
+
+#[derive(Debug, Clone, Copy)]
+enum AppointmentScope {
+    /// Full, system-wide appointment visibility (existing behavior).
+    Full,
+    /// Restricted to the given doctor.id — the caller's own linked profile.
+    Own(i32),
+}
+
+/// Resolves which scope a session with read access to appointment data gets.
+/// Requires the session to hold `AppointmentsView` (full) or
+/// `AppointmentsViewOwn` (own only); anything else is an access-denied error.
+/// A `AppointmentsViewOwn` session whose account has no linked practitioner
+/// profile gets a clear domain error, never unrestricted access.
+async fn require_appointment_read_scope(
+    pool: &PgPool,
+    state: &SessionState,
+) -> Result<(rbac::Session, AppointmentScope), String> {
+    let session = rbac::require_session(state)?;
+    if session.has(Permission::AppointmentsView) {
+        return Ok((session, AppointmentScope::Full));
+    }
+    if session.has(Permission::AppointmentsViewOwn) {
+        let doctor_id =
+            crate::commands::doctors::doctor_id_for_user(pool, session.user_id).await?;
+        return match doctor_id {
+            Some(id) => Ok((session, AppointmentScope::Own(id))),
+            None => Err(
+                "Your account is not linked to a practitioner profile.".to_string(),
+            ),
+        };
+    }
+    Err(format!(
+        "Access denied: this action requires the '{}' permission.",
+        Permission::AppointmentsView.as_str()
+    ))
+}
+
+/// Resolves the scope for a MUTATING command already gated on `perm`
+/// (AppointmentsUpdate / AppointmentsDelete). A session that additionally
+/// holds full `AppointmentsView` retains today's unrestricted behavior
+/// (receptionist, super_admin). A session that holds `perm` but NOT full
+/// `AppointmentsView` (the doctor role) is scoped to its own linked
+/// practitioner profile — never trust the request body's doctor_id for
+/// authorization.
+async fn require_appointment_mutation_scope(
+    pool: &PgPool,
+    state: &SessionState,
+    perm: Permission,
+) -> Result<(rbac::Session, AppointmentScope), String> {
+    let session = rbac::require(state, perm)?;
+    if session.has(Permission::AppointmentsView) {
+        return Ok((session, AppointmentScope::Full));
+    }
+    let doctor_id = crate::commands::doctors::doctor_id_for_user(pool, session.user_id).await?;
+    match doctor_id {
+        Some(id) => Ok((session, AppointmentScope::Own(id))),
+        None => Err(
+            "Your account is not linked to a practitioner profile.".to_string(),
+        ),
+    }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// QA-2026-09-08 H3 (3.2-1): valid appointment statuses. Mirrors the
@@ -365,7 +444,17 @@ pub async fn get_appointments(
     status_filter: Option<String>,
     doctor_filter: Option<i32>,
 ) -> Result<Vec<AppointmentWithDetails>, String> {
-    let _ = rbac::require(&session, Permission::AppointmentsView)?;
+    let (_session, scope) = require_appointment_read_scope(pool.inner(), &session).await?;
+
+    // RCTF: a client-supplied doctor_filter is a convenience for FULL-scope
+    // callers (receptionist narrowing the list) but is NEVER trusted for
+    // authorization. An Own-scope session's effective doctor filter is
+    // always its own resolved doctor id, overriding whatever the client
+    // sent — this is the fix for "Doctor A calls with doctor_filter = B".
+    let effective_doctor_filter = match scope {
+        AppointmentScope::Full => doctor_filter,
+        AppointmentScope::Own(my_doctor_id) => Some(my_doctor_id),
+    };
 
     let mut query = format!("{} WHERE 1=1", SELECT_WITH_DETAILS);
     if date_filter.is_some() {
@@ -378,7 +467,7 @@ pub async fn get_appointments(
             " AND a.status = $1"
         });
     }
-    if doctor_filter.is_some() {
+    if effective_doctor_filter.is_some() {
         let n = 1 + date_filter.is_some() as i32 + status_filter.is_some() as i32;
         query.push_str(&format!(" AND a.doctor_id = ${}", n));
     }
@@ -391,7 +480,7 @@ pub async fn get_appointments(
     if let Some(ref s) = status_filter {
         q = q.bind(s);
     }
-    if let Some(doc) = doctor_filter {
+    if let Some(doc) = effective_doctor_filter {
         q = q.bind(doc);
     }
 
@@ -406,10 +495,25 @@ pub async fn get_appointment(
     session: tauri::State<'_, SessionState>,
     id: i32,
 ) -> Result<AppointmentWithDetails, String> {
-    let _ = rbac::require(&session, Permission::AppointmentsView)?;
-    let q = format!("{} WHERE a.id = $1", SELECT_WITH_DETAILS);
-    sqlx::query_as::<_, AppointmentWithDetails>(&q)
-        .bind(id)
+    let (_session, scope) = require_appointment_read_scope(pool.inner(), &session).await?;
+
+    // RCTF: ownership is enforced IN SQL, not by loading the row and
+    // checking it afterwards — a doctor guessing another doctor's
+    // appointment id gets the same "not found" as a nonexistent id (Test D),
+    // never a 403 that would confirm the id exists.
+    let (q, bind_own): (String, Option<i32>) = match scope {
+        AppointmentScope::Full => (format!("{} WHERE a.id = $1", SELECT_WITH_DETAILS), None),
+        AppointmentScope::Own(my_doctor_id) => (
+            format!("{} WHERE a.id = $1 AND a.doctor_id = $2", SELECT_WITH_DETAILS),
+            Some(my_doctor_id),
+        ),
+    };
+
+    let mut query = sqlx::query_as::<_, AppointmentWithDetails>(&q).bind(id);
+    if let Some(doc) = bind_own {
+        query = query.bind(doc);
+    }
+    query
         .fetch_one(pool.inner())
         .await
         .map_err(|e| format!("Appointment not found: {}", e))
@@ -422,14 +526,41 @@ pub async fn update_appointment(
     session: tauri::State<'_, SessionState>,
     appointment: UpdateAppointment,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::AppointmentsUpdate)?;
+    let (s, scope) =
+        require_appointment_mutation_scope(pool.inner(), &session, Permission::AppointmentsUpdate)
+            .await?;
 
-    let old_status: Option<(String,)> =
-        sqlx::query_as("SELECT status FROM appointments WHERE id = $1")
+    let old: Option<(String, i32)> =
+        sqlx::query_as("SELECT status, doctor_id FROM appointments WHERE id = $1")
             .bind(appointment.id)
             .fetch_optional(pool.inner())
             .await
             .map_err(|e| format!("Status fetch failed: {}", e))?;
+
+    // RCTF: ownership check BEFORE any mutation. An Own-scope session
+    // (doctor) whose target appointment belongs to another doctor gets the
+    // same not-found response a nonexistent id would (Test E) — never a
+    // distinguishable "forbidden".
+    let existing_doctor_id = match (&old, scope) {
+        (Some((_, existing_doctor_id)), AppointmentScope::Own(my_doctor_id)) => {
+            if *existing_doctor_id != my_doctor_id {
+                return Err("Appointment not found.".to_string());
+            }
+            Some(*existing_doctor_id)
+        }
+        (Some((_, existing_doctor_id)), AppointmentScope::Full) => Some(*existing_doctor_id),
+        (None, _) => None,
+    };
+
+    // RCTF: doctor-reassignment protection (Test G). Own-scope callers can
+    // update their own appointment's details but can NEVER move it to
+    // another doctor — even if the request body's doctor_id says otherwise.
+    // Full-scope callers (receptionist/super_admin) retain existing
+    // reassignment behavior unchanged.
+    let effective_doctor_id = match scope {
+        AppointmentScope::Full => appointment.doctor_id,
+        AppointmentScope::Own(my_doctor_id) => my_doctor_id,
+    };
 
     let date = NaiveDate::parse_from_str(&appointment.appointment_date, "%Y-%m-%d")
         .map_err(|_| "Invalid date format.".to_string())?;
@@ -439,7 +570,7 @@ pub async fn update_appointment(
     if let Some(start_min) = time_to_minutes(&appointment.appointment_time) {
         check_doctor_overlap(
             pool.inner(),
-            appointment.doctor_id,
+            effective_doctor_id,
             date,
             start_min,
             duration,
@@ -459,40 +590,84 @@ pub async fn update_appointment(
         .await?;
     }
 
-    sqlx::query(
-        r#"
-        UPDATE appointments SET
-            patient_id = $1, doctor_id = $2,
-            appointment_date = $3, appointment_time = $4::TIME,
-            duration_minutes = $5, status = $6,
-            reason = $7, notes = $8, updated_at = NOW(),
-            consultation_fee = $10, fee_paid = $11
-        WHERE id = $9
-        "#,
-    )
-    .bind(appointment.patient_id)
-    .bind(appointment.doctor_id)
-    .bind(date)
-    .bind(&appointment.appointment_time)
-    .bind(duration)
-    .bind(&appointment.status)
-    .bind(&appointment.reason)
-    .bind(&appointment.notes)
-    .bind(appointment.id)
-    .bind(&appointment.consultation_fee)
-    .bind(appointment.fee_paid.unwrap_or(false))
-    .execute(pool.inner())
-    .await
-    .map_err(|e| {
-        // F-23: friendly mapping for the EXCLUDE backstop (reschedule races).
-        if e.to_string().contains("excl_appt_doctor_slot") {
-            "This doctor already has an appointment that overlaps the selected time. Choose a different time or doctor.".to_string()
-        } else {
-            format!("Update failed: {}", e)
+    // RCTF: enforce ownership atomically in the UPDATE's WHERE clause too
+    // (belt-and-suspenders with the pre-check above, closing any TOCTOU
+    // window) — an Own-scope update can only ever affect its own doctor_id.
+    let update_result = match scope {
+        AppointmentScope::Full => {
+            sqlx::query(
+                r#"
+                UPDATE appointments SET
+                    patient_id = $1, doctor_id = $2,
+                    appointment_date = $3, appointment_time = $4::TIME,
+                    duration_minutes = $5, status = $6,
+                    reason = $7, notes = $8, updated_at = NOW(),
+                    consultation_fee = $10, fee_paid = $11
+                WHERE id = $9
+                "#,
+            )
+            .bind(appointment.patient_id)
+            .bind(effective_doctor_id)
+            .bind(date)
+            .bind(&appointment.appointment_time)
+            .bind(duration)
+            .bind(&appointment.status)
+            .bind(&appointment.reason)
+            .bind(&appointment.notes)
+            .bind(appointment.id)
+            .bind(&appointment.consultation_fee)
+            .bind(appointment.fee_paid.unwrap_or(false))
+            .execute(pool.inner())
+            .await
         }
-    })?;
+        AppointmentScope::Own(my_doctor_id) => {
+            sqlx::query(
+                r#"
+                UPDATE appointments SET
+                    patient_id = $1, doctor_id = $2,
+                    appointment_date = $3, appointment_time = $4::TIME,
+                    duration_minutes = $5, status = $6,
+                    reason = $7, notes = $8, updated_at = NOW(),
+                    consultation_fee = $10, fee_paid = $11
+                WHERE id = $9 AND doctor_id = $2
+                "#,
+            )
+            .bind(appointment.patient_id)
+            .bind(my_doctor_id)
+            .bind(date)
+            .bind(&appointment.appointment_time)
+            .bind(duration)
+            .bind(&appointment.status)
+            .bind(&appointment.reason)
+            .bind(&appointment.notes)
+            .bind(appointment.id)
+            .bind(&appointment.consultation_fee)
+            .bind(appointment.fee_paid.unwrap_or(false))
+            .execute(pool.inner())
+            .await
+        }
+    };
+    let rows_affected = update_result
+        .map_err(|e| {
+            // F-23: friendly mapping for the EXCLUDE backstop (reschedule races).
+            if e.to_string().contains("excl_appt_doctor_slot") {
+                "This doctor already has an appointment that overlaps the selected time. Choose a different time or doctor.".to_string()
+            } else {
+                format!("Update failed: {}", e)
+            }
+        })?
+        .rows_affected();
 
-    let prev = old_status.map(|x| x.0).unwrap_or_default();
+    // RCTF: the Own-scope `AND doctor_id = $2` clause above is the atomic
+    // backstop for the pre-check — if a concurrent reassignment slipped in
+    // between the pre-check and this UPDATE, zero rows match and nothing
+    // was silently applied to the wrong doctor's appointment.
+    if rows_affected == 0 {
+        return Err("Appointment not found.".to_string());
+    }
+
+    let _ = existing_doctor_id; // ownership already enforced above and in the UPDATE's WHERE clause
+    let prev = old.map(|x| x.0).unwrap_or_default();
     let next = appointment.status.as_str();
     if prev != next {
         if let Ok((patient_id, patient_name, phone, doctor_name, date_str, time_str)) =
@@ -560,21 +735,49 @@ pub async fn update_appointment_status(
     id: i32,
     status: String,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::AppointmentsUpdate)?;
+    let (s, scope) =
+        require_appointment_mutation_scope(pool.inner(), &session, Permission::AppointmentsUpdate)
+            .await?;
     validate_appointment_status(&status)?;
 
-    let old: Option<(String,)> = sqlx::query_as("SELECT status FROM appointments WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool.inner())
-        .await
-        .map_err(|e| e.to_string())?;
+    let old: Option<(String, i32)> =
+        sqlx::query_as("SELECT status, doctor_id FROM appointments WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| e.to_string())?;
 
-    sqlx::query("UPDATE appointments SET status = $1, updated_at = NOW() WHERE id = $2")
+    // RCTF: Test F — an Own-scope session cannot change status on another
+    // doctor's appointment. Same not-found response as a nonexistent id.
+    if let (Some((_, existing_doctor_id)), AppointmentScope::Own(my_doctor_id)) = (&old, scope) {
+        if *existing_doctor_id != my_doctor_id {
+            return Err("Appointment not found.".to_string());
+        }
+    }
+
+    let rows_affected = match scope {
+        AppointmentScope::Full => {
+            sqlx::query("UPDATE appointments SET status = $1, updated_at = NOW() WHERE id = $2")
+                .bind(&status)
+                .bind(id)
+                .execute(pool.inner())
+                .await
+        }
+        AppointmentScope::Own(my_doctor_id) => sqlx::query(
+            "UPDATE appointments SET status = $1, updated_at = NOW() WHERE id = $2 AND doctor_id = $3",
+        )
         .bind(&status)
         .bind(id)
+        .bind(my_doctor_id)
         .execute(pool.inner())
-        .await
-        .map_err(|e| format!("Status update failed: {}", e))?;
+        .await,
+    }
+    .map_err(|e| format!("Status update failed: {}", e))?
+    .rows_affected();
+
+    if rows_affected == 0 {
+        return Err("Appointment not found.".to_string());
+    }
 
     let prev = old.map(|x| x.0).unwrap_or_default();
     if prev != status {
@@ -658,12 +861,31 @@ pub async fn delete_appointment(
     session: tauri::State<'_, SessionState>,
     id: i32,
 ) -> Result<(), String> {
-    let s = rbac::require(&session, Permission::AppointmentsDelete)?;
-    sqlx::query("DELETE FROM appointments WHERE id = $1")
-        .bind(id)
-        .execute(pool.inner())
-        .await
-        .map_err(|e| format!("Delete failed: {}", e))?;
+    // RCTF: no seeded role currently holds AppointmentsDelete without also
+    // holding full AppointmentsView, so this is Full scope in practice
+    // today — the Own-scope branch is defense-in-depth for if that ever
+    // changes, per "audit every mutation" (Step 5), not a capability grant.
+    let (s, scope) =
+        require_appointment_mutation_scope(pool.inner(), &session, Permission::AppointmentsDelete)
+            .await?;
+    let rows_affected = match scope {
+        AppointmentScope::Full => sqlx::query("DELETE FROM appointments WHERE id = $1")
+            .bind(id)
+            .execute(pool.inner())
+            .await,
+        AppointmentScope::Own(my_doctor_id) => {
+            sqlx::query("DELETE FROM appointments WHERE id = $1 AND doctor_id = $2")
+                .bind(id)
+                .bind(my_doctor_id)
+                .execute(pool.inner())
+                .await
+        }
+    }
+    .map_err(|e| format!("Delete failed: {}", e))?
+    .rows_affected();
+    if rows_affected == 0 {
+        return Err("Appointment not found.".to_string());
+    }
     audit::for_session(
         pool.inner(),
         &s,
@@ -681,12 +903,22 @@ pub async fn get_today_appointments(
     pool: tauri::State<'_, PgPool>,
     session: tauri::State<'_, SessionState>,
 ) -> Result<Vec<AppointmentWithDetails>, String> {
-    let _ = rbac::require(&session, Permission::AppointmentsView)?;
-    let q = format!(
-        "{} WHERE a.appointment_date = CURRENT_DATE ORDER BY a.appointment_time ASC",
-        SELECT_WITH_DETAILS
-    );
-    sqlx::query_as::<_, AppointmentWithDetails>(&q)
+    let (_session, scope) = require_appointment_read_scope(pool.inner(), &session).await?;
+    let q = match scope {
+        AppointmentScope::Full => format!(
+            "{} WHERE a.appointment_date = CURRENT_DATE ORDER BY a.appointment_time ASC",
+            SELECT_WITH_DETAILS
+        ),
+        AppointmentScope::Own(_) => format!(
+            "{} WHERE a.appointment_date = CURRENT_DATE AND a.doctor_id = $1 ORDER BY a.appointment_time ASC",
+            SELECT_WITH_DETAILS
+        ),
+    };
+    let mut query = sqlx::query_as::<_, AppointmentWithDetails>(&q);
+    if let AppointmentScope::Own(my_doctor_id) = scope {
+        query = query.bind(my_doctor_id);
+    }
+    query
         .fetch_all(pool.inner())
         .await
         .map_err(|e| format!("Failed to get today appointments: {}", e))
@@ -697,9 +929,11 @@ pub async fn get_appointment_stats(
     pool: tauri::State<'_, PgPool>,
     session: tauri::State<'_, SessionState>,
 ) -> Result<AppointmentStats, String> {
-    let _ = rbac::require(&session, Permission::AppointmentsView)?;
-    let row: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
-        r#"
+    // RCTF Step 3 (statistics/aggregate commands): an Own-scope caller must
+    // never see cross-doctor counts (Test H) — the FILTER aggregate below is
+    // scoped by the same WHERE clause as any other own-access query.
+    let (_session, scope) = require_appointment_read_scope(pool.inner(), &session).await?;
+    let q = r#"
         SELECT
             COUNT(*)                                          AS total,
             COUNT(*) FILTER (WHERE status = 'scheduled')     AS scheduled,
@@ -709,11 +943,19 @@ pub async fn get_appointment_stats(
             COUNT(*) FILTER (WHERE status = 'cancelled')     AS cancelled,
             COUNT(*) FILTER (WHERE status = 'no-show')       AS no_show
         FROM appointments
-        "#,
-    )
-    .fetch_one(pool.inner())
-    .await
-    .map_err(|e| format!("Stats query failed: {}", e))?;
+    "#;
+    let (q, own_doctor_id): (String, Option<i32>) = match scope {
+        AppointmentScope::Full => (q.to_string(), None),
+        AppointmentScope::Own(id) => (format!("{} WHERE doctor_id = $1", q), Some(id)),
+    };
+    let mut query = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(&q);
+    if let Some(id) = own_doctor_id {
+        query = query.bind(id);
+    }
+    let row = query
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| format!("Stats query failed: {}", e))?;
 
     Ok(AppointmentStats {
         total: row.0,

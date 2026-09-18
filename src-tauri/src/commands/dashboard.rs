@@ -48,6 +48,37 @@ pub async fn get_dashboard_kpis(
         let sched = count(pool, "SELECT COUNT(*) FROM appointments WHERE appointment_date = CURRENT_DATE AND status IN ('scheduled','confirmed')").await;
         let done = count(pool, "SELECT COUNT(*) FROM appointments WHERE appointment_date = CURRENT_DATE AND status = 'completed'").await;
         (today, sched, done)
+    } else if s.has(Permission::AppointmentsViewOwn) {
+        // RCTF Step 3: an own-scope caller (doctor) gets their own-doctor
+        // counts, never the clinic-wide total — resolved server-side, never
+        // from client input.
+        match crate::commands::doctors::doctor_id_for_user(pool, s.user_id).await {
+            Ok(Some(doctor_id)) => {
+                let today = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM appointments WHERE appointment_date = CURRENT_DATE AND doctor_id = $1",
+                )
+                .bind(doctor_id)
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+                let sched = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM appointments WHERE appointment_date = CURRENT_DATE AND status IN ('scheduled','confirmed') AND doctor_id = $1",
+                )
+                .bind(doctor_id)
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+                let done = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM appointments WHERE appointment_date = CURRENT_DATE AND status = 'completed' AND doctor_id = $1",
+                )
+                .bind(doctor_id)
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+                (today, sched, done)
+            }
+            _ => (0, 0, 0),
+        }
     } else {
         (0, 0, 0)
     };

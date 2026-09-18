@@ -32,6 +32,8 @@ import {
   useIssueQueueTokenForAppointment,
 } from "@/lib/queries";
 import type { AppointmentWithDetails, Appointment } from "@/lib/models";
+import { useAuth } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/rbac";
 import {
   PageContainer,
   PageHeader,
@@ -66,6 +68,12 @@ type EditableAppointment = Pick<
 export function Appointments() {
   const [searchParams, setSearchParams] = useSearchParams();
 
+  const { has } = useAuth();
+  // RCTF Step 6: whether this session has system-wide appointment
+  // visibility (vs. own-doctor-only). Drives the doctor-filter dropdown's
+  // visibility only — never used for authorization (the backend re-checks
+  // and scopes every command independently).
+  const canViewAllDoctors = has(PERMISSIONS.AppointmentsView);
   const { data: appointments = [], isLoading, isError, refetch, isFetching } = useAppointments();
   const { data: patients = [] } = usePatientsEhr();
   const { data: doctors = [] } = useDoctors();
@@ -277,22 +285,31 @@ export function Appointments() {
                 />
               </div>
 
-              <Select
-                value={filterDoctor.toString()}
-                onValueChange={(v) => setFilterDoctor(v === "all" ? "all" : Number(v))}
-              >
-                <SelectTrigger className="w-[180px]">
-                  <SelectValue placeholder="All doctors" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All doctors</SelectItem>
-                  {doctors.map((d) => (
-                    <SelectItem key={d.id} value={d.id.toString()}>
-                      Dr. {d.first_name} {d.last_name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {/* RCTF Step 6: the global doctor filter only makes sense for a
+                  full AppointmentsView session — a session with only
+                  AppointmentsViewOwn (doctor role) already sees exclusively
+                  their own appointments (enforced server-side), so "All
+                  doctors" would be misleading. UX only — hiding it is not
+                  a security control; the backend ignores/overrides any
+                  doctor filter for an own-scope session regardless. */}
+              {canViewAllDoctors && (
+                <Select
+                  value={filterDoctor.toString()}
+                  onValueChange={(v) => setFilterDoctor(v === "all" ? "all" : Number(v))}
+                >
+                  <SelectTrigger className="w-[180px]">
+                    <SelectValue placeholder="All doctors" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All doctors</SelectItem>
+                    {doctors.map((d) => (
+                      <SelectItem key={d.id} value={d.id.toString()}>
+                        Dr. {d.first_name} {d.last_name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
 
               <Select value={filterStatus} onValueChange={setFilterStatus}>
                 <SelectTrigger className="w-[160px]">

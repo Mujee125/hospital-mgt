@@ -255,6 +255,27 @@ export function useDeleteDoctor() {
   });
 }
 
+// RCTF Step 10: creates a login for a practitioner who has no linked user
+// account yet. Returns [username, one-time temporary password] — the
+// component displays the password once and must not log it. Invalidates
+// both doctors (user_id becomes non-null) and users (a new account exists)
+// per the existing query-key conventions above (see useCreateUser).
+export function useCreateLoginForDoctor() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: { doctorId: number; username: string }) =>
+      invoke<[string, string]>("create_login_for_doctor", {
+        doctorId: req.doctorId,
+        username: req.username,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["doctors"] });
+      qc.invalidateQueries({ queryKey: ["users"] });
+    },
+    onError: (err) => toast.error(`Failed to create login: ${err}`),
+  });
+}
+
 // ── Appointments ─────────────────────────────────────────────────────────
 
 export function useAppointments(dateFilter?: string | null, statusFilter?: string | null) {
@@ -280,9 +301,10 @@ export function useTodayAppointments(enabled = true) {
   return useQuery({
     queryKey: qk.todayAppointments(),
     queryFn: () => invoke<AppointmentWithDetails[]>("get_today_appointments"),
-    // RBAC: `get_today_appointments` requires AppointmentsView. Callers whose
-    // role lacks it must pass enabled=false — the backend would otherwise
-    // deny the invoke and the global QueryCache onError would toast it.
+    // RBAC: `get_today_appointments` requires AppointmentsView OR
+    // AppointmentsViewOwn (own-doctor-scoped for the latter). Callers with
+    // neither must pass enabled=false — the backend would otherwise deny
+    // the invoke and the global QueryCache onError would toast it.
     enabled,
   });
 }
@@ -291,7 +313,8 @@ export function useAppointmentStats(enabled = true) {
   return useQuery({
     queryKey: qk.appointmentStats(),
     queryFn: () => invoke<AppointmentStats>("get_appointment_stats"),
-    // RBAC: as above — `get_appointment_stats` requires AppointmentsView.
+    // RBAC: as above — `get_appointment_stats` requires AppointmentsView OR
+    // AppointmentsViewOwn (own-doctor-scoped counts for the latter).
     enabled,
   });
 }

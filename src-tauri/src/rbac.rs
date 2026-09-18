@@ -41,6 +41,12 @@ pub enum Permission {
     PrescriptionsCreate,
     // Appointments
     AppointmentsView,
+    // RCTF own-appointment scoping: read access limited to the appointments
+    // belonging to the practitioner profile linked to the caller's own
+    // account (see `doctors::doctor_id_for_user`). Granted to the doctor
+    // role INSTEAD OF AppointmentsView. Deliberately read-only — never
+    // implies AppointmentsCreate/Update/Delete.
+    AppointmentsViewOwn,
     AppointmentsCreate,
     AppointmentsUpdate,
     AppointmentsDelete,
@@ -130,6 +136,7 @@ impl Permission {
             Permission::PatientConsentManage => "patients.consent.manage",
             Permission::PrescriptionsCreate => "prescriptions.create",
             Permission::AppointmentsView => "appointments.view",
+            Permission::AppointmentsViewOwn => "appointments.view_own",
             Permission::AppointmentsCreate => "appointments.create",
             Permission::AppointmentsUpdate => "appointments.update",
             Permission::AppointmentsDelete => "appointments.delete",
@@ -193,6 +200,7 @@ impl Permission {
             Permission::PatientConsentManage,
             Permission::PrescriptionsCreate,
             Permission::AppointmentsView,
+            Permission::AppointmentsViewOwn,
             Permission::AppointmentsCreate,
             Permission::AppointmentsUpdate,
             Permission::AppointmentsDelete,
@@ -267,7 +275,17 @@ pub fn permissions_for_role(role: &str) -> Vec<Permission> {
             PatientsView,
             PatientsCreate,
             PatientsUpdate,
-            AppointmentsView,
+            // RCTF own-appointment scoping: doctors previously held full
+            // AppointmentsView (system-wide visibility across every
+            // practitioner). Replaced with AppointmentsViewOwn — a doctor
+            // now sees only appointments belonging to their own linked
+            // practitioner profile (commands/appointments.rs +
+            // doctors::doctor_id_for_user enforce this server-side).
+            // AppointmentsUpdate is retained unchanged: doctors could
+            // already update appointments before this change, and that
+            // capability is now additionally scoped to their own
+            // appointments by the same enforcement.
+            AppointmentsViewOwn,
             AppointmentsUpdate,
             QueueView,
             DoctorsView,

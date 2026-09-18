@@ -57,6 +57,7 @@ const menuItems: NavItem[] = [
     label: "Appointments",
     icon: Calendar,
     requiredPermission: PERMISSIONS.AppointmentsView,
+    anyOfPermissions: [PERMISSIONS.AppointmentsViewOwn],
   },
   {
     to: "/patients",
@@ -172,7 +173,10 @@ export function Sidebar({
   const { session, has } = useAuth();
   const showExpanded = isMobileDrawer || !collapsed;
   const visibleItems = menuItems.filter(
-    (item) => !item.requiredPermission || has(item.requiredPermission),
+    (item) =>
+      !item.requiredPermission ||
+      has(item.requiredPermission) ||
+      item.anyOfPermissions?.some(has),
   );
   const primaryRole = session?.roles?.[0];
 

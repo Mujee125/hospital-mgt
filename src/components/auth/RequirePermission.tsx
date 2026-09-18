@@ -15,11 +15,14 @@ interface Props {
   perm: Permission;
   children: ReactNode;
   hide?: boolean;
+  /** Also render children if the session holds any of these (OR'd with
+   *  `perm`) — e.g. Appointments: full view OR own-only view. */
+  anyOf?: Permission[];
 }
 
-export function RequirePermission({ perm, children, hide = false }: Props) {
+export function RequirePermission({ perm, children, hide = false, anyOf }: Props) {
   const { has } = useAuth();
-  if (has(perm)) return <>{children}</>;
+  if (has(perm) || anyOf?.some(has)) return <>{children}</>;
   if (hide) return null;
   return (
     <div className="flex items-center gap-3 p-4 border border-border bg-muted/40 text-sm text-muted-foreground">

@@ -17,6 +17,10 @@ export const PERMISSIONS = {
   PatientConsentManage: "patients.consent.manage",
   PrescriptionsCreate: "prescriptions.create",
   AppointmentsView: "appointments.view",
+  // RCTF own-appointment scoping: mirrors Permission::AppointmentsViewOwn.
+  // Granted to the doctor role instead of AppointmentsView. UX only — the
+  // backend is the authorization boundary (see commands/appointments.rs).
+  AppointmentsViewOwn: "appointments.view_own",
   AppointmentsCreate: "appointments.create",
   AppointmentsUpdate: "appointments.update",
   AppointmentsDelete: "appointments.delete",
@@ -109,6 +113,10 @@ export interface NavItem {
   end?: boolean;
   badge?: string;
   requiredPermission?: Permission;
+  /** Visible if the session holds ANY of these (used alongside/instead of
+   *  requiredPermission when a nav item has more than one qualifying
+   *  permission, e.g. Appointments: full view OR own-only view). */
+  anyOfPermissions?: Permission[];
   disabled?: boolean;
   note?: string;
 }

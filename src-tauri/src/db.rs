@@ -70,6 +70,23 @@ fn curated_hint(sqlstate: Option<&str>, constraint: Option<&str>) -> Option<Stri
                  or leave the field blank to skip it."
                     .to_string(),
             ),
+            // RCTF Step 8: create_login_for_doctor's username field hits the
+            // same `users.username UNIQUE` constraint as create_user. A
+            // curated hint here means the admin gets "already taken"
+            // instead of the generic sanitized message, without exposing
+            // the constraint/table name itself.
+            Some("users_username_key") => Some(
+                "This username is already taken. Choose a different one.".to_string(),
+            ),
+            // RCTF Step 6 (login-creation atomicity, Test P): doctors.user_id
+            // is UNIQUE — the DB-level backstop for two admins concurrently
+            // creating a login for the SAME doctor. Only one write wins; the
+            // other lands here.
+            Some("doctors_user_id_key") => Some(
+                "This practitioner already has a login (it may have just been \
+                 created by another administrator)."
+                    .to_string(),
+            ),
             _ => None,
         },
         // SQLSTATE 22001 = string_data_right_truncation — a typed value

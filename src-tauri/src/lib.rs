@@ -1546,6 +1546,7 @@ pub fn run() {
             commands::doctors::update_doctor,
             commands::doctors::delete_doctor,
             commands::doctors::get_specializations,
+            commands::doctors::create_login_for_doctor,
             // Appointments
             commands::appointments::create_appointment,
             commands::appointments::get_appointments,

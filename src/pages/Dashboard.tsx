@@ -60,8 +60,14 @@ function greetingFor(now: Date): string {
 export function Dashboard({ onNavigate, triggerAddPatient, triggerAddAppointment }: DashboardProps) {
   const { session, has } = useAuth();
   const canAppointments = has(PERMISSIONS.AppointmentsView);
+  // RCTF own-appointment scoping: a doctor holds AppointmentsViewOwn instead
+  // of AppointmentsView. get_appointment_stats/get_today_appointments now
+  // accept either (backend returns own-doctor-scoped data for ViewOwn) —
+  // get_failed_notifications does NOT, so `canAppointments` (full-view only)
+  // is kept unchanged for that one below.
+  const canAppointmentsAny = canAppointments || has(PERMISSIONS.AppointmentsViewOwn);
   const { data: kpis } = useDashboardKpis();
-  const { data: stats } = useAppointmentStats(canAppointments);
+  const { data: stats } = useAppointmentStats(canAppointmentsAny);
 
   const primaryRole = session?.roles?.[0];
   const firstName = (session?.user.full_name ?? "").split(" ")[0] || "there";
@@ -90,7 +96,7 @@ export function Dashboard({ onNavigate, triggerAddPatient, triggerAddAppointment
   // run — a backend null on any of these commands white-screened the
   // dashboard behind the ErrorBoundary). A disabled (permission-gated)
   // query also yields data === undefined — `?? []` guards both cases.
-  const todaySchedule = useTodayAppointments(canAppointments).data ?? [];
+  const todaySchedule = useTodayAppointments(canAppointmentsAny).data ?? [];
   const queue = useQueue(null, canQueue).data ?? [];
   const { data: labOrdersData, isLoading: labOrdersLoading } = useLabOrders(null, canLab);
   const labOrders = labOrdersData ?? [];

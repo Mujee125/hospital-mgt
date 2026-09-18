@@ -124,6 +124,39 @@ pub async fn ensure_doctor_profile(
     Ok(())
 }
 
+/// RCTF own-appointment scoping (Step 2): resolve the practitioner profile
+/// linked to an authenticated user, server-side. This is the ONLY
+/// authoritative way to determine "which doctor is this session" — never
+/// trust a client-supplied `doctor_id`/`doctor_filter` for that purpose.
+///
+/// Returns `None` when the user has no linked practitioner profile (e.g. a
+/// doctor-role account created before the profile bridge existed, or one
+/// whose profile was unlinked). Callers must treat `None` as "no appointment
+/// access", never as "show everything".
+///
+/// Edge cases (deliberately NOT expanded beyond what the existing schema
+/// already encodes, per the "don't invent a new policy" rule):
+///   • Inactive doctor (`doctors.is_active = FALSE`): still resolves — an
+///     inactive practitioner can still view their historical own
+///     appointments; nothing in the existing model revokes read access on
+///     deactivation, and doing so here would be a new policy.
+///   • Duplicate links: impossible — `doctors.user_id` has a UNIQUE
+///     constraint (DOC-LINK-2026-09-16 migration), so at most one doctor row
+///     can reference a given user.
+///   • Deleted user: `doctors.user_id` is `ON DELETE SET NULL`, so a deleted
+///     user's doctor row reverts to unlinked and this returns `None` for any
+///     (now nonexistent) session referencing that user id.
+///   • Deleted doctor: the doctor row is gone, so the lookup simply finds no
+///     match and returns `None`.
+pub async fn doctor_id_for_user(pool: &PgPool, user_id: i32) -> Result<Option<i32>, String> {
+    let row: Option<(i32,)> = sqlx::query_as("SELECT id FROM doctors WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    Ok(row.map(|r| r.0))
+}
+
 #[tauri::command]
 pub async fn create_doctor(
     pool: tauri::State<'_, PgPool>,
@@ -297,6 +330,175 @@ pub async fn delete_doctor(
     )
     .await;
     Ok(())
+}
+
+// ── RCTF Steps 7–8: create a login for an existing unlinked practitioner ──
+
+/// Server-side username validation for `create_login_for_doctor`. No
+/// dedicated username-validation helper existed elsewhere in the repo to
+/// reuse (create_user only checks non-empty) — this is deliberately
+/// conservative and matches the `users.username VARCHAR(60)` column width.
+/// The database UNIQUE constraint (curated in `db::curated_hint`) remains
+/// the final, authoritative uniqueness check.
+fn validate_login_username(username: &str) -> Result<(), String> {
+    if username.is_empty() {
+        return Err("Username is required.".to_string());
+    }
+    if username.chars().count() > 60 {
+        return Err("Username must be 60 characters or fewer.".to_string());
+    }
+    if username.chars().count() < 3 {
+        return Err("Username must be at least 3 characters.".to_string());
+    }
+    let all_valid_chars = username
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'));
+    if !all_valid_chars {
+        return Err(
+            "Username may only contain lowercase letters, digits, '.', '_', and '-'.".to_string(),
+        );
+    }
+    if !username
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_lowercase())
+        .unwrap_or(false)
+    {
+        return Err("Username must start with a letter.".to_string());
+    }
+    Ok(())
+}
+
+/// Create a login account for a practitioner who already exists in the
+/// `doctors` directory but has no linked `users` row.
+///
+/// Authorization boundary: `Permission::UsersManage` (NOT `DoctorsManage` —
+/// creating a login account is a user-management action, distinct from
+/// editing the practitioner's directory profile).
+///
+/// Atomicity (RCTF Step 6/atomicity rule): user creation, doctor-role
+/// assignment, and the `doctors.user_id` link all happen inside one
+/// `sqlx::Transaction`. Any failure rolls back the whole operation — no
+/// orphan user, no partially-linked doctor, no role without a user.
+/// Audit logging follows the SAME convention `create_user` already uses:
+/// recorded after a successful commit, not inside the transaction (a
+/// logging fault must not undo a successful account creation, and nothing
+/// is audited for an operation that was rolled back).
+#[tauri::command]
+pub async fn create_login_for_doctor(
+    pool: tauri::State<'_, PgPool>,
+    session: tauri::State<'_, SessionState>,
+    doctor_id: i32,
+    username: String,
+) -> Result<(String, String), String> {
+    // RCTF hard rule 8: server-side UsersManage is the ONLY authorization
+    // boundary. `require_strong` additionally re-validates the session
+    // against the DB (not just the in-memory permission snapshot) — this is
+    // a high-risk, PHI-adjacent account-creation command, the same class
+    // `create_user` already uses `require_strong` for.
+    let s = rbac::require_strong(&session, pool.inner(), Permission::UsersManage).await?;
+
+    let username = username.trim().to_string();
+    validate_login_username(&username)?;
+
+    let pool_ref = pool.inner();
+
+    let doctor: Option<(String, String, Option<String>, Option<i32>)> = sqlx::query_as(
+        "SELECT first_name, last_name, email, user_id FROM doctors WHERE id = $1",
+    )
+    .bind(doctor_id)
+    .fetch_optional(pool_ref)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    let (first_name, last_name, email, existing_user_id) =
+        doctor.ok_or_else(|| "Practitioner not found.".to_string())?;
+
+    if existing_user_id.is_some() {
+        return Err("This practitioner already has a login.".to_string());
+    }
+
+    // Password generation/hashing happens OUTSIDE the transaction — it's
+    // CPU-bound (Argon2, spawn_blocking) with no DB round-trip, so it
+    // doesn't hold a transaction open. Reuses the EXACT same generator and
+    // hasher `create_user`/bootstrap admin creation use — no second
+    // password-generation system.
+    let plain_password = crate::auth::generate_bootstrap_password();
+    let hash = crate::auth::hash_password_async(&plain_password).await?;
+    let full_name = format!("{} {}", first_name, last_name)
+        .trim()
+        .to_string();
+
+    let mut tx = pool_ref
+        .begin()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    let new_user_id: i32 = sqlx::query_scalar::<_, i32>(
+        "INSERT INTO users (username, full_name, email, password_hash, must_change_password)
+         VALUES ($1, $2, $3, $4, TRUE) RETURNING id",
+    )
+    .bind(&username)
+    .bind(&full_name)
+    .bind(&email)
+    .bind(&hash)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| crate::db::explain_db_error(&e))?;
+
+    // Doctor role assignment, inline in this transaction. `auth::sync_user_roles`
+    // can't be reused here — it opens its own separate transaction on `&PgPool`,
+    // which would break the atomicity this command requires. Same INSERT
+    // shape `sync_user_roles` uses, not a second role-assignment system.
+    sqlx::query(
+        "INSERT INTO user_roles (user_id, role_id)
+         SELECT $1, id FROM roles WHERE name = $2
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(new_user_id)
+    .bind(rbac::ROLE_DOCTOR)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    // Link doctors.user_id, guarding against a concurrent link with a
+    // conditional WHERE (Test P: two admins racing to create a login for
+    // the SAME doctor). If another transaction linked it first, zero rows
+    // match here and the whole operation rolls back — the UNIQUE constraint
+    // on doctors.user_id is the final backstop even under true concurrency.
+    let link_result = sqlx::query("UPDATE doctors SET user_id = $1 WHERE id = $2 AND user_id IS NULL")
+        .bind(new_user_id)
+        .bind(doctor_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| crate::db::explain_db_error(&e))?;
+
+    if link_result.rows_affected() != 1 {
+        tx.rollback().await.ok();
+        return Err(
+            "This practitioner already has a login (it may have just been created by another administrator)."
+                .to_string(),
+        );
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+    // Audit AFTER commit — never logs the plaintext password, matches the
+    // create_user convention above.
+    audit::for_session(
+        pool_ref,
+        &s,
+        "doctor_login_create",
+        "users",
+        Some(&new_user_id.to_string()),
+        Some(serde_json::json!({"doctor_id": doctor_id, "username": username})),
+    )
+    .await;
+
+    // Returned ONCE. Never persisted, never logged, no retrieval endpoint.
+    Ok((username, plain_password))
 }
 
 #[tauri::command]

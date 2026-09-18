@@ -14,11 +14,13 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from "@/components/ui/dialog";
 import { DoctorForm } from "@/components/forms/DoctorForm";
-import { Search, UserPlus, Edit, Trash2, Stethoscope } from "lucide-react";
-import { useDoctors, useDeleteDoctor } from "@/lib/queries";
+import { Search, UserPlus, Edit, Trash2, Stethoscope, KeyRound, Copy, Check, Loader2 } from "lucide-react";
+import { useDoctors, useDeleteDoctor, useCreateLoginForDoctor } from "@/lib/queries";
 import type { Doctor } from "@/lib/models";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
+import { Label } from "@/components/ui/label";
+import { toast } from "sonner";
 import {
   PageContainer,
   PageHeader,
@@ -33,16 +35,85 @@ export function Doctors() {
   const [searchQuery, setSearchQuery] = useState("");
   const { data: doctors = [], isLoading } = useDoctors();
   const deleteDoctor = useDeleteDoctor();
+  const createLogin = useCreateLoginForDoctor();
   // RBAC: the directory is readable with doctors.view, but creating,
   // editing and deleting practitioner profiles require doctors.manage
   // (super_admin only in the seed). Without these gates a receptionist
   // sees the buttons and is refused only at submit.
   const { has } = useAuth();
   const canManage = has(PERMISSIONS.DoctorsManage);
+  // RCTF Step 11: "Create login" is a user-management action (distinct from
+  // DoctorsManage), so it's gated on UsersManage — matching the backend's
+  // authorization boundary on create_login_for_doctor. UX only; the backend
+  // enforces UsersManage regardless of what this button shows.
+  const canManageUsers = has(PERMISSIONS.UsersManage);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedDoctor, setSelectedDoctor] = useState<Doctor | undefined>(undefined);
   const [deleteTarget, setDeleteTarget] = useState<Doctor | null>(null);
+
+  // ── RCTF Step 11: create-login flow ───────────────────────────────────
+  const [loginTarget, setLoginTarget] = useState<Doctor | null>(null);
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginResult, setLoginResult] = useState<{ username: string; password: string } | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  /** Suggest `firstname.lastname`, normalized to the backend's allowed
+   *  charset (lowercase letters, digits, '.', '_', '-'). The backend
+   *  remains the authoritative uniqueness/format check — this is a
+   *  starting point the admin can edit, not a guarantee. */
+  const suggestUsername = (doctor: Doctor) => {
+    const normalize = (s: string) =>
+      s
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "") // strip accents
+        .replace(/[^a-z0-9]/g, "");
+    const first = normalize(doctor.first_name);
+    const last = normalize(doctor.last_name);
+    return [first, last].filter(Boolean).join(".");
+  };
+
+  const openCreateLogin = (doctor: Doctor) => {
+    setLoginTarget(doctor);
+    setLoginUsername(suggestUsername(doctor));
+    setLoginResult(null);
+    setCopied(false);
+  };
+
+  const closeLoginDialog = () => {
+    // Do not provide a later "show password again" operation — clearing
+    // component state here is the only place the plaintext password lives.
+    setLoginTarget(null);
+    setLoginUsername("");
+    setLoginResult(null);
+    setCopied(false);
+  };
+
+  const submitCreateLogin = async () => {
+    if (!loginTarget) return;
+    try {
+      const [username, password] = await createLogin.mutateAsync({
+        doctorId: loginTarget.id,
+        username: loginUsername.trim(),
+      });
+      setLoginResult({ username, password });
+    } catch {
+      // useCreateLoginForDoctor's onError already toasts the message.
+    }
+  };
+
+  const copyPassword = async () => {
+    if (!loginResult) return;
+    try {
+      await navigator.clipboard.writeText(loginResult.password);
+      setCopied(true);
+      toast.success("Temporary password copied.");
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error("Couldn't copy to clipboard — select and copy manually.");
+    }
+  };
 
   const handleAddDoctor = () => {
     setSelectedDoctor(undefined);
@@ -200,6 +271,18 @@ export function Doctors() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-1">
+                          {canManageUsers && doc.user_id == null && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => openCreateLogin(doc)}
+                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                              title="Create login"
+                              aria-label={`Create login for Dr. ${doc.first_name} ${doc.last_name}`}
+                            >
+                              <KeyRound className="h-4 w-4" />
+                            </Button>
+                          )}
                           {canManage && (
                             <Button
                               variant="ghost"
@@ -279,6 +362,84 @@ export function Doctors() {
               {deleteDoctor.isPending ? "Deleting…" : "Delete doctor"}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {/* RCTF Step 11: create-login dialog. Two phases in one Dialog:
+          (1) review/edit the suggested username and confirm, (2) on
+          success, a one-time credential panel — replaces the confirm
+          form rather than stacking a second dialog. */}
+      <Dialog open={loginTarget !== null} onOpenChange={(o) => !o && closeLoginDialog()}>
+        <DialogContent className="max-w-md">
+          {!loginResult ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Create login</DialogTitle>
+                <DialogDescription>
+                  Create a system login for Dr. {loginTarget?.first_name} {loginTarget?.last_name}.
+                  A temporary password will be generated and shown once — they'll be required to
+                  change it on first sign-in.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-1.5 py-2">
+                <Label htmlFor="login-username">Username</Label>
+                <Input
+                  id="login-username"
+                  value={loginUsername}
+                  onChange={(e) => setLoginUsername(e.target.value)}
+                  placeholder="firstname.lastname"
+                  autoFocus
+                />
+                <p className="text-xs text-muted-foreground">
+                  Lowercase letters, digits, '.', '_', and '-' only. You can edit the suggested
+                  username before creating the account.
+                </p>
+              </div>
+              <DialogFooter>
+                <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
+                <Button
+                  onClick={submitCreateLogin}
+                  disabled={createLogin.isPending || loginUsername.trim().length < 3}
+                >
+                  {createLogin.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create login"}
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <DialogHeader>
+                <DialogTitle>Login created</DialogTitle>
+                <DialogDescription>
+                  This is the only time the temporary password will be shown. Deliver it to
+                  the practitioner securely — they must change it on first login.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3 py-2">
+                <div className="space-y-1.5">
+                  <Label>Username</Label>
+                  <p className="font-mono text-sm px-3 py-2 rounded-[var(--radius)] bg-muted/50 border border-border">
+                    {loginResult.username}
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Temporary password</Label>
+                  <div className="flex items-center gap-2">
+                    <p className="flex-1 font-mono text-sm px-3 py-2 rounded-[var(--radius)] bg-muted/50 border border-border select-all">
+                      {loginResult.password}
+                    </p>
+                    <Button variant="outline" size="icon" onClick={copyPassword} title="Copy password">
+                      {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  It will not be shown again after you close this dialog.
+                </p>
+              </div>
+              <DialogFooter>
+                <Button onClick={closeLoginDialog}>Done</Button>
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
     </PageContainer>

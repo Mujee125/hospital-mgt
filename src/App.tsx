@@ -471,7 +471,7 @@ function RoutedPages({ config, setConfig }: { config: AppConfig | null; setConfi
     <AnimatePresence mode="wait">
       <Routes>
         <Route path="/" element={<PageTransition><Dashboard onNavigate={(tab) => navigate(`/${tab}`)} triggerAddPatient={() => navigate("/patients?add=1")} triggerAddAppointment={() => navigate("/appointments?add=1")} /></PageTransition>} />
-        <Route path="/appointments" element={<PageTransition><RequirePermission perm={PERMISSIONS.AppointmentsView}><Appointments /></RequirePermission></PageTransition>} />
+        <Route path="/appointments" element={<PageTransition><RequirePermission perm={PERMISSIONS.AppointmentsView} anyOf={[PERMISSIONS.AppointmentsViewOwn]}><Appointments /></RequirePermission></PageTransition>} />
         <Route path="/patients" element={<PageTransition><RequirePermission perm={PERMISSIONS.PatientsView}><Patients /></RequirePermission></PageTransition>} />
         <Route path="/doctors" element={<PageTransition><RequirePermission perm={PERMISSIONS.DoctorsView}><Doctors /></RequirePermission></PageTransition>} />
         <Route path="/queue" element={<PageTransition><RequirePermission perm={PERMISSIONS.QueueView}><Queue /></RequirePermission></PageTransition>} />

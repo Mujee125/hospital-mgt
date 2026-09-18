@@ -31,6 +31,10 @@ export interface Doctor {
   available_to: string;
   is_active: boolean;
   created_at: string;
+  // DOC-LINK-2026-09-16 / RCTF Step 11: the login account linked to this
+  // practitioner profile, if any. Null means no system login exists yet —
+  // drives the "Create login" action on the Doctors page.
+  user_id: number | null;
 }
 
 export interface Appointment {
