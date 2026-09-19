@@ -64,6 +64,16 @@ const CORE_DELEGATES: &[(&str, &str)] = &[
     ("reset_user_password", "reset_user_password_core"),
     ("create_patient", "create_patient_core"),
     ("create_prescription", "create_prescription_core"),
+    // update_appointment/update_appointment_status delegate to a `_core` fn
+    // (the AERP extraction pattern — needed here because the wrapper also
+    // takes a Wry-pinned AppHandle for WhatsApp notifications, which the
+    // mutation-scope guard itself doesn't need and which would otherwise
+    // block command-level testing). get_appointments/get_appointment/
+    // get_today_appointments/get_appointment_stats/delete_appointment call
+    // their guard helper directly in their own body, so they're covered by
+    // GUARD_TOKENS below instead of needing an entry here.
+    ("update_appointment", "update_appointment_core"),
+    ("update_appointment_status", "update_appointment_status_core"),
 ];
 
 const GUARD_TOKENS: &[&str] = &[
@@ -72,6 +82,13 @@ const GUARD_TOKENS: &[&str] = &[
     "require_if_session(",
     "require_config_mutation(",
     "rbac::require(",
+    // RCTF own-appointment scoping: these two resolve the guard (Full vs.
+    // Own-doctor scope) through commands/appointments.rs's shared helpers
+    // instead of calling a bare rbac::require*/require_strong fn — both
+    // helpers call rbac::require/rbac::require_session internally, so this
+    // is the same guard contract expressed one level up.
+    "require_appointment_read_scope(",
+    "require_appointment_mutation_scope(",
 ];
 
 fn scan_all_commands() -> Vec<(String, String)> {

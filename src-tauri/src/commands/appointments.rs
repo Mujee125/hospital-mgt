@@ -561,14 +561,78 @@ pub async fn update_appointment(
     session: tauri::State<'_, SessionState>,
     appointment: UpdateAppointment,
 ) -> Result<(), String> {
+    let appt_id = appointment.id;
+    let next_status = appointment.status.clone();
+    let prev = update_appointment_core(pool.inner(), &session, appointment).await?;
+
+    if prev != next_status {
+        if let Ok((patient_id, patient_name, phone, doctor_name, date_str, time_str)) =
+            get_appt_details(pool.inner(), appt_id).await
+        {
+            let clinic = clinic_name(&app_handle);
+            let (msg_text, ntype) = match next_status.as_str() {
+                "confirmed" => (
+                    whatsapp::build_appointment_confirmed_msg(
+                        &clinic,
+                        &patient_name,
+                        &doctor_name,
+                        &date_str,
+                        &time_str,
+                    ),
+                    "confirmed",
+                ),
+                "cancelled" => (
+                    whatsapp::build_appointment_cancelled_msg(
+                        &clinic,
+                        &patient_name,
+                        &doctor_name,
+                        &date_str,
+                        &time_str,
+                    ),
+                    "cancelled",
+                ),
+                _ => (String::new(), ""),
+            };
+            if !msg_text.is_empty() {
+                fire_whatsapp(
+                    &app_handle,
+                    pool.inner(),
+                    WhatsAppMessage {
+                        recipient: phone,
+                        message: msg_text,
+                        is_group: false,
+                        appointment_id: Some(appt_id),
+                        notification_type: ntype.to_string(),
+                        patient_id: Some(patient_id),
+                    },
+                )
+                .await;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// AERP extraction pattern: the guarded/DB half of `update_appointment`,
+/// with no `AppHandle` dependency — carries the RCTF ownership-scoping
+/// logic (ownership pre-check, reassignment block, atomic `WHERE
+/// doctor_id = $own`) and the audit call. Returns the appointment's
+/// PREVIOUS status on success, which the wrapper needs to decide whether a
+/// WhatsApp notification is due. Testable directly with a `&PgPool` +
+/// `&SessionState` — no mock Tauri runtime required.
+pub async fn update_appointment_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    appointment: UpdateAppointment,
+) -> Result<String, String> {
     let (s, scope) =
-        require_appointment_mutation_scope(pool.inner(), &session, Permission::AppointmentsUpdate)
+        require_appointment_mutation_scope(pool, session_state, Permission::AppointmentsUpdate)
             .await?;
 
     let old: Option<(String, i32)> =
         sqlx::query_as("SELECT status, doctor_id FROM appointments WHERE id = $1")
             .bind(appointment.id)
-            .fetch_optional(pool.inner())
+            .fetch_optional(pool)
             .await
             .map_err(|e| format!("Status fetch failed: {}", e))?;
 
@@ -604,7 +668,7 @@ pub async fn update_appointment(
 
     if let Some(start_min) = time_to_minutes(&appointment.appointment_time) {
         check_doctor_overlap(
-            pool.inner(),
+            pool,
             effective_doctor_id,
             date,
             start_min,
@@ -615,7 +679,7 @@ pub async fn update_appointment(
         // PK-2026-09-14 gap-2: same-patient double-booking guard (see
         // check_patient_overlap doc comment).
         check_patient_overlap(
-            pool.inner(),
+            pool,
             appointment.patient_id,
             date,
             start_min,
@@ -652,7 +716,7 @@ pub async fn update_appointment(
             .bind(appointment.id)
             .bind(&appointment.consultation_fee)
             .bind(appointment.fee_paid.unwrap_or(false))
-            .execute(pool.inner())
+            .execute(pool)
             .await
         }
         AppointmentScope::Own(my_doctor_id) => {
@@ -678,7 +742,7 @@ pub async fn update_appointment(
             .bind(appointment.id)
             .bind(&appointment.consultation_fee)
             .bind(appointment.fee_paid.unwrap_or(false))
-            .execute(pool.inner())
+            .execute(pool)
             .await
         }
     };
@@ -704,54 +768,9 @@ pub async fn update_appointment(
     let _ = existing_doctor_id; // ownership already enforced above and in the UPDATE's WHERE clause
     let prev = old.map(|x| x.0).unwrap_or_default();
     let next = appointment.status.as_str();
-    if prev != next {
-        if let Ok((patient_id, patient_name, phone, doctor_name, date_str, time_str)) =
-            get_appt_details(pool.inner(), appointment.id).await
-        {
-            let clinic = clinic_name(&app_handle);
-            let (msg_text, ntype) = match next {
-                "confirmed" => (
-                    whatsapp::build_appointment_confirmed_msg(
-                        &clinic,
-                        &patient_name,
-                        &doctor_name,
-                        &date_str,
-                        &time_str,
-                    ),
-                    "confirmed",
-                ),
-                "cancelled" => (
-                    whatsapp::build_appointment_cancelled_msg(
-                        &clinic,
-                        &patient_name,
-                        &doctor_name,
-                        &date_str,
-                        &time_str,
-                    ),
-                    "cancelled",
-                ),
-                _ => (String::new(), ""),
-            };
-            if !msg_text.is_empty() {
-                fire_whatsapp(
-                    &app_handle,
-                    pool.inner(),
-                    WhatsAppMessage {
-                        recipient: phone,
-                        message: msg_text,
-                        is_group: false,
-                        appointment_id: Some(appointment.id),
-                        notification_type: ntype.to_string(),
-                        patient_id: Some(patient_id),
-                    },
-                )
-                .await;
-            }
-        }
-    }
 
     audit::for_session(
-        pool.inner(),
+        pool,
         &s,
         "appointment_update",
         "appointments",
@@ -759,7 +778,7 @@ pub async fn update_appointment(
         Some(serde_json::json!({"prev_status": prev, "next_status": next})),
     )
     .await;
-    Ok(())
+    Ok(prev)
 }
 
 #[tauri::command]
@@ -770,51 +789,8 @@ pub async fn update_appointment_status(
     id: i32,
     status: String,
 ) -> Result<(), String> {
-    let (s, scope) =
-        require_appointment_mutation_scope(pool.inner(), &session, Permission::AppointmentsUpdate)
-            .await?;
-    validate_appointment_status(&status)?;
+    let prev = update_appointment_status_core(pool.inner(), &session, id, status.clone()).await?;
 
-    let old: Option<(String, i32)> =
-        sqlx::query_as("SELECT status, doctor_id FROM appointments WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool.inner())
-            .await
-            .map_err(|e| e.to_string())?;
-
-    // RCTF: Test F — an Own-scope session cannot change status on another
-    // doctor's appointment. Same not-found response as a nonexistent id.
-    if let (Some((_, existing_doctor_id)), AppointmentScope::Own(my_doctor_id)) = (&old, scope) {
-        if *existing_doctor_id != my_doctor_id {
-            return Err("Appointment not found.".to_string());
-        }
-    }
-
-    let rows_affected = match scope {
-        AppointmentScope::Full => {
-            sqlx::query("UPDATE appointments SET status = $1, updated_at = NOW() WHERE id = $2")
-                .bind(&status)
-                .bind(id)
-                .execute(pool.inner())
-                .await
-        }
-        AppointmentScope::Own(my_doctor_id) => sqlx::query(
-            "UPDATE appointments SET status = $1, updated_at = NOW() WHERE id = $2 AND doctor_id = $3",
-        )
-        .bind(&status)
-        .bind(id)
-        .bind(my_doctor_id)
-        .execute(pool.inner())
-        .await,
-    }
-    .map_err(|e| format!("Status update failed: {}", e))?
-    .rows_affected();
-
-    if rows_affected == 0 {
-        return Err("Appointment not found.".to_string());
-    }
-
-    let prev = old.map(|x| x.0).unwrap_or_default();
     if prev != status {
         if let Ok((patient_id, patient_name, phone, doctor_name, date_str, time_str)) =
             get_appt_details(pool.inner(), id).await
@@ -860,6 +836,66 @@ pub async fn update_appointment_status(
             }
         }
     }
+    Ok(())
+}
+
+/// AERP extraction pattern: the guarded/DB half of `update_appointment_status`
+/// — no `AppHandle` dependency. Carries the RCTF ownership-scoping logic
+/// (Test F), the BILLING-LINK-2026-09-16 auto-bill-on-complete step, and the
+/// audit call. Returns the appointment's PREVIOUS status on success, which
+/// the wrapper needs to decide whether a WhatsApp notification is due.
+/// Testable directly with a `&PgPool` + `&SessionState`.
+pub async fn update_appointment_status_core(
+    pool: &PgPool,
+    session_state: &SessionState,
+    id: i32,
+    status: String,
+) -> Result<String, String> {
+    let (s, scope) =
+        require_appointment_mutation_scope(pool, session_state, Permission::AppointmentsUpdate)
+            .await?;
+    validate_appointment_status(&status)?;
+
+    let old: Option<(String, i32)> =
+        sqlx::query_as("SELECT status, doctor_id FROM appointments WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    // RCTF: Test F — an Own-scope session cannot change status on another
+    // doctor's appointment. Same not-found response as a nonexistent id.
+    if let (Some((_, existing_doctor_id)), AppointmentScope::Own(my_doctor_id)) = (&old, scope) {
+        if *existing_doctor_id != my_doctor_id {
+            return Err("Appointment not found.".to_string());
+        }
+    }
+
+    let rows_affected = match scope {
+        AppointmentScope::Full => {
+            sqlx::query("UPDATE appointments SET status = $1, updated_at = NOW() WHERE id = $2")
+                .bind(&status)
+                .bind(id)
+                .execute(pool)
+                .await
+        }
+        AppointmentScope::Own(my_doctor_id) => sqlx::query(
+            "UPDATE appointments SET status = $1, updated_at = NOW() WHERE id = $2 AND doctor_id = $3",
+        )
+        .bind(&status)
+        .bind(id)
+        .bind(my_doctor_id)
+        .execute(pool)
+        .await,
+    }
+    .map_err(|e| format!("Status update failed: {}", e))?
+    .rows_affected();
+
+    if rows_affected == 0 {
+        return Err("Appointment not found.".to_string());
+    }
+
+    let prev = old.map(|x| x.0).unwrap_or_default();
 
     // BILLING-LINK-2026-09-16: a completed consult is the hospital's charge
     // event. Raise the consultation bill + payment so it appears in the
@@ -870,7 +906,7 @@ pub async fn update_appointment_status(
     // logged for ops instead; the helper is idempotent, so re-completing the
     // appointment retries the charge safely.
     if status == "completed" {
-        if let Err(e) = billing::bill_completed_appointment(pool.inner(), &s, id).await {
+        if let Err(e) = billing::bill_completed_appointment(pool, &s, id).await {
             eprintln!(
                 "[HMS BILLING] appointment {} completed but auto-billing failed: {}",
                 id, e
@@ -879,7 +915,7 @@ pub async fn update_appointment_status(
     }
 
     audit::for_session(
-        pool.inner(),
+        pool,
         &s,
         "appointment_status_change",
         "appointments",
@@ -887,7 +923,7 @@ pub async fn update_appointment_status(
         Some(serde_json::json!({"prev": prev, "next": status})),
     )
     .await;
-    Ok(())
+    Ok(prev)
 }
 
 #[tauri::command]

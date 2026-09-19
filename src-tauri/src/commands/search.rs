@@ -8,7 +8,8 @@
 //! Sections and their guards (mirroring each module's list command):
 //!   patients.view      → patients, prescriptions (pharmacy)
 //!   doctors.view       → doctors
-//!   appointments.view  → appointments
+//!   appointments.view  → appointments (appointments.view_own: same
+//!                         section, scoped to the caller's own doctor)
 //!   billing.view       → invoices
 //!   lab.view           → lab orders
 //!   inventory.view     → inventory items, medications (pharmacy catalog)
@@ -159,12 +160,24 @@ pub async fn global_search_core(
         }
     }
 
-    // ── Appointments (appointments.view) ────────────────────────────────
+    // ── Appointments (appointments.view / appointments.view_own) ─────────
     // Matched on the patient's or doctor's name (the reception flow: "when
-    // is Mr X coming in?").
-    if s.has(Permission::AppointmentsView) {
-        let rows = sqlx::query_as::<_, (i32, String, Option<chrono::NaiveDate>)>(
-            r#"
+    // is Mr X coming in?"). RCTF own-appointment scoping: a session that
+    // holds AppointmentsViewOwn instead of full AppointmentsView (the
+    // doctor role) still gets this section, but scoped server-side to the
+    // practitioner profile linked to their OWN account — never a
+    // client-supplied filter, and silently omitted (not an error) if the
+    // account has no linked profile, consistent with every other own-scope
+    // appointment read in commands/appointments.rs.
+    let appt_own_doctor_id: Option<i32> = if !s.has(Permission::AppointmentsView)
+        && s.has(Permission::AppointmentsViewOwn)
+    {
+        crate::commands::doctors::doctor_id_for_user(pool, s.user_id).await?
+    } else {
+        None
+    };
+    if s.has(Permission::AppointmentsView) || appt_own_doctor_id.is_some() {
+        let base = r#"
             SELECT a.id,
                    p.first_name || ' ' || p.last_name
                    || ' — ' || a.appointment_date::text
@@ -176,15 +189,28 @@ pub async fn global_search_core(
             WHERE (LOWER(p.first_name) LIKE $1 ESCAPE '\'
                    OR LOWER(p.last_name) LIKE $1 ESCAPE '\'
                    OR LOWER(d2.last_name) LIKE $1 ESCAPE '\')
-            ORDER BY a.appointment_date DESC, a.appointment_time DESC
-            LIMIT $2
-            "#,
-        )
-        .bind(&pattern)
-        .bind(MAX_HITS_PER_SECTION)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Search appointments: {}", e))?;
+        "#;
+        let q = if appt_own_doctor_id.is_some() {
+            format!(
+                "{} AND a.doctor_id = $3 ORDER BY a.appointment_date DESC, a.appointment_time DESC LIMIT $2",
+                base
+            )
+        } else {
+            format!(
+                "{} ORDER BY a.appointment_date DESC, a.appointment_time DESC LIMIT $2",
+                base
+            )
+        };
+        let mut query = sqlx::query_as::<_, (i32, String, Option<chrono::NaiveDate>)>(&q)
+            .bind(&pattern)
+            .bind(MAX_HITS_PER_SECTION);
+        if let Some(doc_id) = appt_own_doctor_id {
+            query = query.bind(doc_id);
+        }
+        let rows = query
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Search appointments: {}", e))?;
         for (id, title, date) in rows {
             hits.push(GlobalSearchHit {
                 entity_type: "appointment".into(),

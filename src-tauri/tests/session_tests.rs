@@ -267,6 +267,8 @@ async fn wp2_i07_i09_invalidation_observables() {
             email: None,
             is_active: Some(false),
             roles: None,
+            phone: None,
+            qualification: None,
         },
     )
     .await
@@ -288,6 +290,8 @@ async fn wp2_i07_i09_invalidation_observables() {
             email: None,
             is_active: None,
             roles: Some(vec!["nurse".into()]),
+            phone: None,
+            qualification: None,
         },
     )
     .await
@@ -993,6 +997,8 @@ async fn rev3_p3_10_role_change_sweeps_target_sessions() {
             email: None,
             is_active: None,
             roles: Some(vec!["patient".into()]),
+            phone: None,
+            qualification: None,
         },
     )
     .await
