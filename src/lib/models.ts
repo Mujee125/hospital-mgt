@@ -19,6 +19,24 @@ export interface Patient {
   created_at: string;
 }
 
+/**
+ * FIX-B: the deliberately tiny patient projection used by pickers/typeaheads.
+ *
+ * A patient dropdown needs a name, an MRN and a phone. It does not need
+ * allergies, chronic conditions, insurance or address — and a picker must never
+ * render clinical detail that the list it came from did not intend to show.
+ */
+export interface PatientOption {
+  id: number;
+  mrn?: string | null;
+  first_name: string;
+  last_name: string;
+  phone: string;
+  blood_group?: string | null;
+  date_of_birth: string;
+  gender: string;
+}
+
 export interface Doctor {
   id: number;
   first_name: string;
@@ -1362,6 +1380,20 @@ export interface BloodIssue {
   patient_name?: string | null;
   doctor_name?: string | null;
   issued_by_name?: string | null;
+  /**
+   * FIX-A: populated only when the ABO/Rh compatibility gate was overridden.
+   * `override_verification_required` is the QUARANTINE flag — the unit is
+   * already issued and transfusable, but the release is not co-signed, and the
+   * blood bank must show that state as an outstanding task rather than as
+   * business as usual.
+   */
+  override_reason_code?: string | null;
+  physician_order_ref?: string | null;
+  override_verification_required?: boolean;
+  override_verify_due_at?: string | null;
+  override_verified_by_user_id?: number | null;
+  override_verified_at?: string | null;
+  override_verified_by_name?: string | null;
 }
 
 export interface CreateBloodIssue {
@@ -1374,6 +1406,50 @@ export interface CreateBloodIssue {
   issue_type: string;
   clinical_indication?: string;
   special_instructions?: string;
+  /**
+   * FIX-A: required by the backend ONLY when the release is ABO/Rh
+   * incompatible. Sending them on a compatible issue is harmless (they are
+   * ignored), so callers do not need to pre-compute compatibility to fill the
+   * form correctly.
+   */
+  override_reason_code?: string;
+  physician_order_ref?: string;
+}
+
+/** FIX-A: the closed reason vocabulary for an ABO-incompatible release.
+ *  Mirrors VALID_OVERRIDE_REASON_CODES in commands/blood_bank.rs. */
+export const OVERRIDE_REASON_CODES: { value: string; label: string }[] = [
+  { value: "massive_hemorrhage", label: "Massive hemorrhage" },
+  { value: "massive_transfusion_protocol", label: "Massive transfusion protocol" },
+  { value: "no_compatible_unit_available", label: "No compatible unit available" },
+  { value: "emergency_unknown_blood_group", label: "Emergency, blood group unknown" },
+  { value: "other_documented", label: "Other (documented below)" },
+];
+
+/** FIX-A: one row of the pending second-person review queue. */
+export interface PendingEmergencyVerification {
+  id: number;
+  issue_id: number;
+  issue_number: string;
+  unit_id: number;
+  unit_number: string;
+  patient_id: number;
+  patient_name: string;
+  issued_by_user_id?: number | null;
+  issued_by_name: string;
+  reason_code: string;
+  clinical_indication: string;
+  physician_order_ref: string;
+  unit_group?: string | null;
+  unit_rh?: string | null;
+  patient_group?: string | null;
+  patient_rh?: string | null;
+  /** true = the patient had no typing at all; false = typed and INCOMPATIBLE. */
+  patient_untyped: boolean;
+  verify_due_at: string;
+  created_at: string;
+  hours_overdue: number;
+  severity: "incompatible" | "untyped" | "overdue";
 }
 
 export interface BloodTransfusion {

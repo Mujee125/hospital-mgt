@@ -35,18 +35,29 @@ pub async fn get_encounters(
     pool: tauri::State<'_, PgPool>,
     session: tauri::State<'_, SessionState>,
     patient_id: Option<i32>,
+    limit: Option<i32>,
+    offset: Option<i32>,
 ) -> Result<Vec<EncounterWithPatient>, String> {
     let _ = rbac::require(&session, Permission::PatientsView)?;
+    // FIX-B: bound the result set (see db::page_bounds). A patient's encounter
+    // history is small, but the UNFILTERED call (used by the encounters view)
+    // spans every patient in the hospital and grew without limit.
+    let (lim, off) = crate::db::page_bounds(limit, offset);
     let q = match patient_id {
         Some(_pid) => format!(
-            "{} WHERE e.patient_id = $1 ORDER BY e.visit_date DESC",
+            "{} WHERE e.patient_id = $1 ORDER BY e.visit_date DESC, e.id DESC LIMIT $2 OFFSET $3",
             SELECT_ENCOUNTERS
         ),
-        None => format!("{} ORDER BY e.visit_date DESC", SELECT_ENCOUNTERS),
+        None => format!(
+            "{} ORDER BY e.visit_date DESC, e.id DESC LIMIT $1 OFFSET $2",
+            SELECT_ENCOUNTERS
+        ),
     };
     let mut query = sqlx::query_as::<_, EncounterWithPatient>(&q);
     if let Some(pid) = patient_id {
-        query = query.bind(pid);
+        query = query.bind(pid).bind(lim).bind(off);
+    } else {
+        query = query.bind(lim).bind(off);
     }
     query
         .fetch_all(pool.inner())

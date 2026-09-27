@@ -371,6 +371,17 @@ pub fn permissions_for_role(role: &str) -> Vec<Permission> {
             BloodBankView,
             BloodBankDonorManage,
             BloodBankCrossmatch,
+            // FIX-A (2026-09-27): the lab tech may CO-SIGN an ABO-incompatible
+            // emergency release, but not issue one (that stays with the
+            // requesting doctor) and not sign their own — `verify_blood_issue`
+            // refuses self-verification. Seeding it here is what makes the
+            // second signature obtainable in a single-tech deployment; without
+            // it the override queue could only ever be closed by an admin, and
+            // in practice nobody closes it.
+            //
+            // Deliberately NOT granted to the doctor: the issuer must not also be
+            // the reviewer, or the separation of duties is cosmetic.
+            BloodBankVerify,
             MessagingView,
             MessagingSend,
         ],

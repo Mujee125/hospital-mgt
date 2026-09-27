@@ -59,18 +59,32 @@ pub async fn get_bills(
     pool: tauri::State<'_, PgPool>,
     session: tauri::State<'_, SessionState>,
     status_filter: Option<String>,
+    limit: Option<i32>,
+    offset: Option<i32>,
 ) -> Result<Vec<Bill>, String> {
     let _ = rbac::require(&session, Permission::BillingView)?;
-    let q = match status_filter.as_deref() {
-        Some(s) if !s.is_empty() => format!(
-            "{} WHERE b.status = $1 ORDER BY b.created_at DESC",
+    // FIX-B: bound the result set (see db::page_bounds). The bills list carries
+    // two correlated SUM subqueries per row, so an unbounded list is not just
+    // "a lot of rows" — it is two extra scans per row, on the money table.
+    let (lim, off) = crate::db::page_bounds(limit, offset);
+    let has_status = status_filter.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+    let q = if has_status {
+        format!(
+            "{} WHERE b.status = $1 ORDER BY b.created_at DESC, b.id DESC LIMIT $2 OFFSET $3",
             SELECT_BILLS
-        ),
-        _ => format!("{} ORDER BY b.created_at DESC", SELECT_BILLS),
+        )
+    } else {
+        format!(
+            "{} ORDER BY b.created_at DESC, b.id DESC LIMIT $1 OFFSET $2",
+            SELECT_BILLS
+        )
     };
     let mut query = sqlx::query_as::<_, Bill>(&q);
-    if let Some(s) = status_filter.filter(|s| !s.is_empty()) {
-        query = query.bind(s);
+    if has_status {
+        query = query.bind(status_filter.clone().unwrap_or_default());
+        query = query.bind(lim).bind(off);
+    } else {
+        query = query.bind(lim).bind(off);
     }
     query
         .fetch_all(pool.inner())

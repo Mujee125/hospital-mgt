@@ -13,7 +13,9 @@ use chrono::NaiveDate;
 use sqlx::PgPool;
 
 use crate::audit;
-use crate::models::{CreatePatientEhr, PatientConsent, PatientEhr, UpdatePatientEhr};
+use crate::models::{
+    CreatePatientEhr, PatientConsent, PatientEhr, PatientOption, UpdatePatientEhr,
+};
 use crate::rbac::{self, Permission, SessionState};
 
 fn parse_dob(s: &str) -> Result<NaiveDate, String> {
@@ -35,9 +37,19 @@ pub async fn get_patients(
     pool: tauri::State<'_, PgPool>,
     session: tauri::State<'_, SessionState>,
     search: Option<String>,
+    limit: Option<i32>,
+    offset: Option<i32>,
 ) -> Result<Vec<PatientEhr>, String> {
     let _ = rbac::require(&session, Permission::PatientsView)?;
 
+    // FIX-B: the result set is bounded (see db::page_bounds). Without this a
+    // hospital with 50k patients serialized its ENTIRE registry — including the
+    // TEXT[] allergies and chronic_conditions on every row — into the webview on
+    // every mount, which is what froze the Patients page. `id` is in the ORDER BY
+    // alongside created_at so paging is STABLE: on created_at alone, two patients
+    // created in the same millisecond can swap pages between calls and one of
+    // them silently never appears in the list.
+    let (lim, off) = crate::db::page_bounds(limit, offset);
     let term = search.filter(|s| !s.trim().is_empty());
     let rows = match term {
         Some(t) => {
@@ -48,27 +60,81 @@ pub async fn get_patients(
                    AND (LOWER(first_name) LIKE $1 OR LOWER(last_name) LIKE $1
                         OR phone LIKE $1 OR LOWER(COALESCE(email,'')) LIKE $1
                         OR LOWER(COALESCE(mrn,'')) LIKE $1)
-                 ORDER BY created_at DESC",
+                 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
                 SELECT_EHR
             );
             sqlx::query_as::<_, PatientEhr>(&q)
                 .bind(pattern)
+                .bind(lim)
+                .bind(off)
                 .fetch_all(pool.inner())
                 .await
         }
         None => {
             // CR-11: hide soft-deleted patients from the active list.
             let q = format!(
-                "{} WHERE deleted_at IS NULL ORDER BY created_at DESC",
+                "{} WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2",
                 SELECT_EHR
             );
             sqlx::query_as::<_, PatientEhr>(&q)
+                .bind(lim)
+                .bind(off)
                 .fetch_all(pool.inner())
                 .await
         }
     };
     rows.map_err(|e| crate::db::sanitize_db_error(&e))
 }
+/// FIX-B: patient typeahead for pickers (blood-bank issue, billing, queue).
+///
+/// This exists because the obvious fix for a frozen patient dropdown — "reuse
+/// `get_patients` with a search term" — still ships the whole EHR row. A picker
+/// needs a name and an MRN; it does not need allergies, chronic conditions,
+/// insurance or address, and must never render the latter while the former are
+/// absent. The projection is deliberately tiny and hard-capped at 50: a dropdown
+/// is not a report, and results past the first screen are something the user
+/// should be typing into the search box for.
+#[tauri::command]
+pub async fn search_patient_options(
+    pool: tauri::State<'_, PgPool>,
+    session: tauri::State<'_, SessionState>,
+    search: Option<String>,
+) -> Result<Vec<PatientOption>, String> {
+    let _ = rbac::require(&session, Permission::PatientsView)?;
+    let pattern = search
+        .filter(|s| !s.trim().is_empty())
+        .map(|t| format!("%{}%", t.to_lowercase()));
+
+    const PICKER_COLS: &str = "SELECT id, mrn, first_name, last_name, phone, blood_group, \
+                                date_of_birth, gender FROM patients";
+
+    let rows = match &pattern {
+        Some(p) => {
+            sqlx::query_as::<_, PatientOption>(&format!(
+                "{} WHERE deleted_at IS NULL \
+                   AND (LOWER(first_name) LIKE $1 OR LOWER(last_name) LIKE $1 \
+                        OR LOWER(COALESCE(mrn,'')) LIKE $1 OR phone LIKE $1) \
+                 ORDER BY last_name, first_name LIMIT 50",
+                PICKER_COLS
+            ))
+            .bind(p)
+            .fetch_all(pool.inner())
+            .await
+        }
+        // No term → return NOTHING. An unfiltered picker would hand back an
+        // arbitrary alphabetical slice of the hospital's patients: useless to the
+        // user, and a bulk-PHI disclosure to any view that forgets to require a
+        // search term first.
+        None => sqlx::query_as::<_, PatientOption>(&format!(
+            "{} WHERE FALSE",
+            PICKER_COLS
+        ))
+        .fetch_all(pool.inner())
+        .await,
+    };
+    rows.map_err(|e| crate::db::sanitize_db_error(&e))
+}
+
 
 #[tauri::command]
 pub async fn get_patient(

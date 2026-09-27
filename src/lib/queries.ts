@@ -13,6 +13,7 @@ import { useQuery, useMutation, useQueryClient, type UseQueryOptions } from "@ta
 import { toast } from "sonner";
 import type {
   Patient,
+  PatientOption,
   PatientEhr,
   CreatePatientEhr,
   UpdatePatientEhr,
@@ -96,6 +97,7 @@ import type {
   CreateBloodTransfusion,
   BloodDiscardsResponse,
   CreateBloodDiscard,
+  PendingEmergencyVerification,
   CreateBloodReservation,
   BloodUnitHistory,
   BloodMovement,
@@ -154,11 +156,48 @@ export const qk = {
 
 // ── Patients ─────────────────────────────────────────────────────────────
 
-export function usePatients(search?: string | null, options?: Partial<UseQueryOptions<Patient[]>>) {
+/**
+ * Page size for the bounded list commands (FIX-B).
+ *
+ * The Rust commands clamp whatever they are given (default 250, hard max
+ * 1000) and now REQUIRE a bound — an unbounded patient list is what froze the
+ * registry page. The client asks for this much at a time and pages with it.
+ */
+export const LIST_PAGE_SIZE = 250;
+
+export function usePatients(
+  search?: string | null,
+  options?: Partial<UseQueryOptions<Patient[]>>,
+  limit: number = LIST_PAGE_SIZE,
+  offset: number = 0,
+) {
   return useQuery({
-    queryKey: qk.patients(search),
-    queryFn: () => invoke<Patient[]>("get_patients", { search: search ?? null }),
+    queryKey: [...qk.patients(search), limit, offset],
+    queryFn: () =>
+      invoke<Patient[]>("get_patients", {
+        search: search ?? null,
+        limit,
+        offset,
+      }),
     ...options,
+  });
+}
+
+/**
+ * Typeahead for patient pickers. Returns the tiny `PatientOption` projection
+ * (FIX-B) instead of the full EHR row: a dropdown needs a name and an MRN, and
+ * shipping allergies/insurance/address for every registry row is both wasteful
+ * and a bulk-PHI exposure. The backend returns nothing for an empty term, so
+ * the hook is disabled until the user types something.
+ */
+export function usePatientOptions(search: string | null, limit = 50) {
+  const enabled = !!search && search.trim().length > 0;
+  return useQuery({
+    queryKey: ["patient-options", search, limit],
+    queryFn: () =>
+      invoke<PatientOption[]>("search_patient_options", { search: search ?? null }),
+    enabled,
+    staleTime: 30_000,
   });
 }
 
@@ -278,13 +317,20 @@ export function useCreateLoginForDoctor() {
 
 // ── Appointments ─────────────────────────────────────────────────────────
 
-export function useAppointments(dateFilter?: string | null, statusFilter?: string | null) {
+export function useAppointments(
+  dateFilter?: string | null,
+  statusFilter?: string | null,
+  limit: number = LIST_PAGE_SIZE,
+  offset: number = 0,
+) {
   return useQuery({
-    queryKey: qk.appointments(dateFilter, statusFilter),
+    queryKey: [...qk.appointments(dateFilter, statusFilter), limit, offset],
     queryFn: () =>
       invoke<AppointmentWithDetails[]>("get_appointments", {
         dateFilter: dateFilter ?? null,
         statusFilter: statusFilter ?? null,
+        limit,
+        offset,
       }),
   });
 }
@@ -643,10 +689,19 @@ export function useDashboardKpis() {
 // the TS layer. The split keys keep the two callers' cache entries from
 // clobbering each other on type assertions.
 
-export function usePatientsEhr(search?: string | null) {
+export function usePatientsEhr(
+  search?: string | null,
+  limit: number = LIST_PAGE_SIZE,
+  offset: number = 0,
+) {
   return useQuery({
-    queryKey: qk.patientsEhr(search),
-    queryFn: () => invoke<PatientEhr[]>("get_patients", { search: search ?? null }),
+    queryKey: [...qk.patientsEhr(search), limit, offset],
+    queryFn: () =>
+      invoke<PatientEhr[]>("get_patients", {
+        search: search ?? null,
+        limit,
+        offset,
+      }),
   });
 }
 
@@ -740,10 +795,19 @@ export function useUpdatePatientEhr() {
 
 // ── Encounters ───────────────────────────────────────────────────────────
 
-export function useEncounters(patientId?: number | null) {
+export function useEncounters(
+  patientId?: number | null,
+  limit: number = LIST_PAGE_SIZE,
+  offset: number = 0,
+) {
   return useQuery({
-    queryKey: ["encounters", patientId ?? null],
-    queryFn: () => invoke<Encounter[]>("get_encounters", { patientId: patientId ?? null }),
+    queryKey: ["encounters", patientId ?? null, limit, offset],
+    queryFn: () =>
+      invoke<Encounter[]>("get_encounters", {
+        patientId: patientId ?? null,
+        limit,
+        offset,
+      }),
   });
 }
 
@@ -1119,10 +1183,19 @@ export function useApproveLabResult() {
 
 // ── Billing ──────────────────────────────────────────────────────────────
 
-export function useBills(statusFilter?: string | null) {
+export function useBills(
+  statusFilter?: string | null,
+  limit: number = LIST_PAGE_SIZE,
+  offset: number = 0,
+) {
   return useQuery({
-    queryKey: ["bills", statusFilter ?? null],
-    queryFn: () => invoke<Bill[]>("get_bills", { statusFilter: statusFilter ?? null }),
+    queryKey: ["bills", statusFilter ?? null, limit, offset],
+    queryFn: () =>
+      invoke<Bill[]>("get_bills", {
+        statusFilter: statusFilter ?? null,
+        limit,
+        offset,
+      }),
   });
 }
 
@@ -2432,7 +2505,59 @@ export function useIssueBlood() {
       qc.invalidateQueries({ queryKey: ["bloodbank"] });
       toast.success("Blood issued successfully.");
     },
-    onError: (err) => toast.error(`Failed to issue blood: ${err}`),
+    // FIX-A: the override rejection messages are written to be ACTIONABLE at the
+    // moment of a resuscitation (which field is missing, what a good value
+    // looks like, what the cap was). Echoing them verbatim is the whole point —
+    // a generic "Failed to issue blood" would leave the operator hunting for the
+    // reason in a log file while the patient waits.
+    onError: (err) => toast.error(`Issue refused: ${err}`, { duration: 12_000 }),
+  });
+}
+
+/**
+ * FIX-A: the outstanding second-person review queue for ABO-incompatible
+ * releases. Polled on the blood-bank page so an unverified release is visible
+ * rather than buried in an audit log nobody reads.
+ */
+export function usePendingEmergencyVerifications(limit = 100, enabled = true) {
+  return useQuery({
+    queryKey: ["bloodbank", "pending-verifications", limit],
+    queryFn: () =>
+      invoke<PendingEmergencyVerification[]>("get_pending_emergency_verifications", {
+        limit,
+      }),
+    // Gated by `bloodbank.verify` server-side. The UI only requests it for
+    // people who hold the permission, so a viewer without it is not left with a
+    // permanently failing query (and a console full of "not authorized").
+    enabled,
+    // 30s: this is an oversight queue with a deadline. A stale answer here means
+    // a reviewer signs off believing the queue is shorter than it is.
+    refetchInterval: 30_000,
+  });
+}
+
+export function useVerifyBloodIssue() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      issueId: number;
+      password: string;
+      agreed: boolean;
+      discrepancy?: string | null;
+      verificationNotes?: string | null;
+    }) =>
+      invoke<void>("verify_blood_issue", {
+        issueId: args.issueId,
+        password: args.password,
+        agreed: args.agreed,
+        discrepancy: args.discrepancy ?? null,
+        verificationNotes: args.verificationNotes ?? null,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["bloodbank"] });
+      toast.success("Release co-signed and the review queue is updated.");
+    },
+    onError: (err) => toast.error(`Co-signature refused: ${err}`, { duration: 10_000 }),
   });
 }
 

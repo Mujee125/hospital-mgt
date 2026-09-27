@@ -1532,6 +1532,7 @@ pub fn run() {
             // Patients
             commands::patients::create_patient,
             commands::patients::get_patients,
+            commands::patients::search_patient_options,
             commands::patients::get_patient,
             commands::patients::update_patient,
             commands::patients::delete_patient,
@@ -1634,6 +1635,8 @@ pub fn run() {
             commands::blood_bank::cancel_blood_reservation,
             commands::blood_bank::get_blood_issues,
             commands::blood_bank::issue_blood,
+            commands::blood_bank::get_pending_emergency_verifications,
+            commands::blood_bank::verify_blood_issue,
             commands::blood_bank::return_blood_unit,
             commands::blood_bank::get_blood_transfusions,
             commands::blood_bank::create_blood_transfusion,

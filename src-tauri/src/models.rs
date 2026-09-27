@@ -1848,6 +1848,30 @@ pub struct BloodIssue {
     pub return_reason: Option<String>,
     #[serde(default)]
     pub received_by_user_id: Option<i32>,
+    // ── FIX-A (2026-09-27): ABO-incompatible emergency-release governance ──
+    //
+    // Populated only when the ABO/Rh compatibility gate was overridden. All are
+    // additive + `#[serde(default)]`, so previously-issued rows (which have none)
+    // still deserialize, and the frontend can render "no override" without
+    // special-casing nulls on every field.
+    /// Closed-vocabulary reason for the override (see VALID_OVERRIDE_REASON_CODES).
+    #[serde(default)]
+    pub override_reason_code: Option<String>,
+    /// Physician order reference that authorised the incompatible release.
+    #[serde(default)]
+    pub physician_order_ref: Option<String>,
+    /// TRUE while a second, independent `bloodbank.verify` signature is still owed.
+    /// This flag IS the quarantine: the unit keeps flowing (status stays 'issued',
+    /// transfusion still allowed) but the release is visibly unco-signed.
+    #[serde(default)]
+    pub override_verification_required: bool,
+    /// Deadline for the co-signature. Past this instant the release is overdue.
+    #[serde(default)]
+    pub override_verify_due_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub override_verified_by_user_id: Option<i32>,
+    #[serde(default)]
+    pub override_verified_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     // Joined fields
@@ -1859,6 +1883,9 @@ pub struct BloodIssue {
     pub doctor_name: Option<String>,
     #[serde(default)]
     pub issued_by_name: Option<String>,
+    /// Joined: username of the second reviewer who co-signed the override.
+    #[serde(default)]
+    pub override_verified_by_name: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -1879,7 +1906,82 @@ pub struct CreateBloodIssue {
     pub clinical_indication: Option<String>,
     #[serde(default)]
     pub special_instructions: Option<String>,
+    // ── FIX-A (2026-09-27): mandatory ONLY when the ABO/Rh gate is overridden ──
+    //
+    // Option<> so routine (compatible) issues keep sending exactly what they sent
+    // before — no caller in the app has to change to stay working. `issue_blood`
+    // promotes these to mandatory, together with a >=25-character
+    // clinical_indication, the moment the compatibility matrix says "not
+    // compatible". See the FIX-A block in commands/blood_bank.rs.
+    /// Closed reason code, validated against VALID_OVERRIDE_REASON_CODES.
+    #[serde(default)]
+    pub override_reason_code: Option<String>,
+    /// Physician order reference authorising the incompatible release (free text
+    /// is fine — it is an auditable pointer to the paper/EMR order, not an FK).
+    #[serde(default)]
+    pub physician_order_ref: Option<String>,
 }
+
+/// FIX-B: a deliberately tiny patient projection for pickers/typeaheads.
+///
+/// PatientEhr carries allergies[], chronic_conditions[], address, insurance and
+/// CNIC — none of which a "choose the patient" dropdown needs, all of which get
+/// JSON-serialized across the IPC boundary when a page loads the registry into a
+/// `<Select>`. This type is what a picker should fetch: bounded rows (LIMIT 50),
+/// and only the fields needed to disambiguate a human being on screen.
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct PatientOption {
+    pub id: i32,
+    #[serde(default)]
+    pub mrn: Option<String>,
+    pub first_name: String,
+    pub last_name: String,
+    pub phone: String,
+    #[serde(default)]
+    pub blood_group: Option<String>,
+    pub date_of_birth: chrono::NaiveDate,
+    pub gender: String,
+}
+
+/// FIX-A: one row of the ABO-incompatible-release oversight queue.
+///
+/// A purpose-built projection rather than `BloodIssue`, because the reviewer is
+/// answering a triage question — "what is still unsigned, and what is most
+/// dangerous to leave unsigned?" — and needs the issuer, the ordering evidence,
+/// the typing snapshot and the deadline on one screen. The sort puts a
+/// KNOWN-INCOMPATIBLE release (the patient WAS typed and the unit contradicts
+/// it) above an untyped emergency release: the first one was avoidable.
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct PendingEmergencyVerification {
+    pub id: i32,
+    pub issue_id: i32,
+    pub issue_number: String,
+    pub unit_id: i32,
+    pub unit_number: String,
+    pub patient_id: i32,
+    pub patient_name: String,
+    pub issued_by_user_id: Option<i32>,
+    pub issued_by_name: String,
+    pub reason_code: String,
+    pub clinical_indication: String,
+    pub physician_order_ref: String,
+    pub unit_group: Option<String>,
+    pub unit_rh: Option<String>,
+    pub patient_group: Option<String>,
+    pub patient_rh: Option<String>,
+    pub patient_untyped: bool,
+    pub verify_due_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Hours past the co-sign deadline; 0 while still inside the window.
+    /// Computed in SQL so the on-screen queue and any export always agree.
+    pub hours_overdue: i32,
+    /// Derived severity for the queue header: "incompatible" (typed, known
+    /// conflict), "untyped" (no typing available at release), or "overdue".
+    pub severity: String,
+}
+
 
 #[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]

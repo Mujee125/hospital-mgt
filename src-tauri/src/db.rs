@@ -179,6 +179,92 @@ fn build_url(
 
 // ── Connection helpers ───────────────────────────────────────────────────────
 
+// ── FIX-B (2026-09-27): shared LIKE-escaping helper ──────────────────────────
+//
+// A user-supplied search term interpolated into `%term%` is a wildcard-injection
+// vector: `%` alone matches everything and `_` matches any single character, so a
+// search for "%" silently returns the entire patient registry to a caller that is
+// only entitled to a name lookup. `search.rs` already escaped these (SST-4);
+// `patients.rs` did not. Centralised here so every `%…%` predicate in the app can
+// be made correct with one call. ALWAYS pair with `ESCAPE '\'` in the SQL, and use
+// the resulting pattern with a LOWER()ed column (the helper lowercases the term).
+pub fn like_contains_pattern(term: &str) -> String {
+    let escaped = term
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{}%", escaped.to_lowercase())
+}
+
+// ── FIX-A (2026-09-27): policy knobs without a schema migration ──────────────
+//
+// Reads an integer from the existing `settings` table (which no Rust code read
+// before this change), falling back to the caller's default when the key is
+// missing, NULL, or unparsable.
+//
+// The fallback direction matters: these keys gate a SAFETY limit, so a missing or
+// garbage value must fall back to the CODE default (a conservative number baked in
+// at build time), never to 0 and never to "unlimited". Ops can retune live:
+//   UPDATE settings SET value = '5' WHERE key = 'blood.emergency_release_24h_limit';
+pub async fn setting_i64(pool: &PgPool, key: &str, default: i64) -> i64 {
+    // Decoded as O = String on purpose. `fetch_optional` then yields
+    // Result<Option<String>, _> — a single Option — and a NULL value arrives as
+    // an error or None, both of which fall through to `default` below. Asking
+    // for O = Option<String> instead produces an Option<Option<String>> whose
+    // "correct" number of `.flatten()` calls is a guess, and getting that guess
+    // wrong is a compile error at best and a silently-defaulted safety knob at
+    // worst.
+    let raw: Option<String> = match sqlx::query_scalar::<_, String>(
+        "SELECT value FROM settings WHERE key = $1",
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => None,
+    };
+    raw.and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(default)
+}
+
+// ── FIX-B (2026-09-27): list-query bounds ──────────────────────────────────────
+//
+// The registry/appointment/bill/encounter lists were unbounded: mounting the
+// page serialized every matching row across the IPC boundary. At 50k patients
+// with TEXT[] allergies + chronic_conditions + address + insurance per row,
+// that is tens of megabytes into a webview, and the UI thread blocks while it
+// deserializes.
+//
+// The bound is applied HERE, in one place, so every list command clamps the
+// same way and none of them can drift back to "no LIMIT" by omission. The
+// defaults are deliberately generous for a hospital (250 rows ≈ 25 screens of
+// a paginated table) while still being a hard ceiling: the worst case is now
+// bounded work, not a function of registry size.
+pub const LIST_DEFAULT_LIMIT: i64 = 250;
+pub const LIST_MAX_LIMIT: i64 = 1000;
+
+/// Clamp caller-supplied `(limit, offset)` into safe SQL paging values.
+///
+/// A limit of 0 or a negative offset is a client bug, not a request for "no
+/// rows" / "rows from the end" — both would either hide the entire table or
+/// produce a Postgres error, so both are normalized here rather than at each
+/// call site. `offset` is additionally capped so a caller cannot ask for
+/// OFFSET 2_000_000_000 and force a full scan-then-discard.
+pub fn page_bounds(limit: Option<i32>, offset: Option<i32>) -> (i64, i64) {
+    let lim = limit.unwrap_or(LIST_DEFAULT_LIMIT as i32);
+    let lim = if lim <= 0 {
+        LIST_DEFAULT_LIMIT as i32
+    } else {
+        lim
+    };
+    let off = offset.unwrap_or(0).max(0);
+    (
+        (lim as i64).min(LIST_MAX_LIMIT),
+        (off as i64).min(1_000_000),
+    )
+}
+
 pub async fn connect_root(
     host: &str,
     port: u16,
@@ -2746,6 +2832,222 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| format!("uq_active_bed_admission index: {}", e))?;
+
+    // ── SEC-FIX-A (2026-09-27): Emergency ABO-incompatible release governance ──
+    //
+    // BEFORE this change, `issue_blood` accepted ANY non-empty string in
+    // `clinical_indication` as a complete override of the ABO/Rh compatibility
+    // gate — the condition was `issue_type == "emergency" && !indication.is_empty()`.
+    // A single word ("urgent") therefore bypassed the control that prevents a
+    // fatal incompatible transfusion, no reason was captured, and nothing
+    // downstream ever reviewed the release.
+    //
+    // Chosen control model: HYBRID QUARANTINE.
+    //   * The release is NOT blocked — a 3 AM trauma case must not wait for a
+    //     second signer to appear. But the free-text bypass is gone: a closed
+    //     reason code, a >=25-character indication and a physician order
+    //     reference are all mandatory, and releases are rate-limited per issuer.
+    //   * The issue row is flagged `override_verification_required = TRUE` with a
+    //     deadline. Until a SECOND, independent `bloodbank.verify` holder calls
+    //     verify_blood_issue(), the release is quarantined in the oversight
+    //     sense: it is listed by get_pending_emergency_overrides(), it pings the
+    //     blood-bank role, and it counts double against the issuer's rolling
+    //     24-hour quota once the deadline passes.
+    //
+    // Deliberately NOT implemented as a new `blood_units.status` value:
+    // `chk_unit_status` (db.rs:2288) would need altering, the unit lifecycle
+    // state machine would need a new transition, and transfusion — which
+    // requires status 'issued' — would break. That is the opposite of the
+    // intent: the blood must keep flowing while the PAPERWORK is quarantined, so
+    // the flag lives on the issue row, not on the unit.
+    //
+    // Every statement below is idempotent (ADD COLUMN IF NOT EXISTS / pg_constraint
+    // guard) because run_migrations re-executes on every startup of an existing DB.
+    for col in [
+        "override_reason_code VARCHAR(40)",
+        "physician_order_ref VARCHAR(80)",
+        "override_verification_required BOOLEAN NOT NULL DEFAULT FALSE",
+        "override_verify_due_at TIMESTAMPTZ",
+        "override_verified_by_user_id INT",
+        "override_verified_at TIMESTAMPTZ",
+    ] {
+        sqlx::query(&format!(
+            "ALTER TABLE blood_issues ADD COLUMN IF NOT EXISTS {}",
+            col
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| format!("blood_issues override column: {} ({})", e, col))?;
+    }
+
+    // ADD CONSTRAINT has no IF NOT EXISTS form in PostgreSQL (unlike DROP
+    // CONSTRAINT), so attach it through a pg_constraint guard — the same reason
+    // the invalid `ADD CONSTRAINT IF NOT EXISTS` at db.rs:2348 silently never
+    // applies, which this pattern avoids repeating.
+    sqlx::query(
+        r#"DO $$ BEGIN
+             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_issue_override_verifier') THEN
+               ALTER TABLE blood_issues
+                 ADD CONSTRAINT fk_issue_override_verifier
+                 FOREIGN KEY (override_verified_by_user_id) REFERENCES users(id) ON DELETE SET NULL;
+             END IF;
+           END $$;"#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("fk_issue_override_verifier: {}", e))?;
+
+
+    // Oversight register: one row per ABO-incompatible emergency release — the
+    // queue a blood-bank supervisor works through and the source of truth for the
+    // 24-hour quota. Kept separate from blood_issues so routine issues are
+    // untouched and the override payload is queryable on its own.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS blood_emergency_overrides (
+            id                       BIGSERIAL   PRIMARY KEY,
+            issue_id                 INT         NOT NULL UNIQUE REFERENCES blood_issues(id) ON DELETE CASCADE,
+            unit_id                  INT         NOT NULL,
+            patient_id               INT         NOT NULL,
+            issued_by_user_id        INT         REFERENCES users(id) ON DELETE SET NULL,
+            reason_code              VARCHAR(40) NOT NULL,
+            clinical_indication      TEXT        NOT NULL,
+            physician_order_ref      VARCHAR(80) NOT NULL,
+            unit_group               VARCHAR(4),
+            unit_rh                  VARCHAR(2),
+            patient_group            VARCHAR(4),
+            patient_rh               VARCHAR(2),
+            patient_untyped          BOOLEAN     NOT NULL DEFAULT FALSE,
+            verification_required    BOOLEAN     NOT NULL DEFAULT TRUE,
+            verify_due_at            TIMESTAMPTZ NOT NULL,
+            verified_by_user_id      INT         REFERENCES users(id) ON DELETE SET NULL,
+            verified_at              TIMESTAMPTZ,
+            created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT chk_emergency_reason_code CHECK (reason_code IN
+              ('massive_hemorrhage','massive_transfusion_protocol',
+               'no_compatible_unit_available','emergency_unknown_blood_group',
+               'other_documented'))
+        )
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("blood_emergency_overrides: {}", e))?;
+
+    // Partial index = "the pending-verification queue", the only read pattern
+    // that matters for this table (supervisor dashboard + scheduler escalation).
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_emergency_overrides_pending \
+         ON blood_emergency_overrides(verify_due_at) WHERE verified_at IS NULL",
+    )
+    .execute(pool)
+    .await
+    .ok();
+
+    // Policy knobs, stored in the existing (previously unused by Rust) `settings`
+    // table so no further schema churn is needed. Read via db::setting_i64.
+    //   24h limit: how many ABO-incompatible emergency releases ONE user may make
+    //     in a rolling day before a supervisor must raise the cap. Deliberately
+    //     generous (3) so it stops serial abuse, not genuine mass-casualty care.
+    //   verification hours: how long the second signer has before the release is
+    //     overdue (1h covers "finish this transfusion, then co-sign").
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES \
+           ('blood.emergency_release_24h_limit', '3'), \
+           ('blood.emergency_verification_hours', '1') \
+         ON CONFLICT (key) DO NOTHING",
+    )
+    .execute(pool)
+    .await
+    .ok();
+
+
+    // ── FIX-C (2026-09-27): inventory stock can never go negative in the DB ────
+    //
+    // Every writer computed `stock_quantity` in Rust and then wrote an ABSOLUTE
+    // value (`SET stock_quantity = $1`). That invariant lives only in application
+    // code: the next write path that forgets the FOR UPDATE read loses an update,
+    // and nothing at the database layer notices. With a CHECK in place, a negative
+    // balance becomes a hard constraint violation instead of silent data corruption
+    // that only surfaces as a stock-out months later.
+    //
+    // Pre-clean first: ADD CONSTRAINT validates every existing row, so a single
+    // legacy negative row would abort the whole migration (and startup). Those rows
+    // are already broken — floor them to 0 and tell ops loudly so the ledger can be
+    // reviewed, rather than crashing the hospital's app on a Sunday boot.
+    match sqlx::query("UPDATE inventory_items SET stock_quantity = 0, updated_at = NOW() WHERE stock_quantity < 0")
+        .execute(pool)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => eprintln!(
+            "[HMS Migration] FIX-C: floored {} inventory_items row(s) with negative stock to 0 \
+             before attaching chk_inventory_stock_non_negative. Those rows indicate a prior \
+             lost-update bug — reconcile them against inventory_movements.",
+            r.rows_affected()
+        ),
+        Err(e) => eprintln!("[HMS Migration] FIX-C: negative-stock pre-clean failed: {}", e),
+        _ => {}
+    }
+
+    sqlx::query(
+        r#"DO $$ BEGIN
+             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_inventory_stock_non_negative') THEN
+               ALTER TABLE inventory_items
+                 ADD CONSTRAINT chk_inventory_stock_non_negative CHECK (stock_quantity >= 0);
+             END IF;
+           END $$;"#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("chk_inventory_stock_non_negative: {}", e))?;
+
+    // Supports pharmacy's stock matcher, which resolves stock by LOWER(name)
+    // (pharmacy.rs F-16). Without this, every dispense seq-scans inventory_items.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_inventory_items_name_lower \
+         ON inventory_items (LOWER(name)) WHERE is_active = TRUE",
+    )
+    .execute(pool)
+    .await
+    .ok();
+
+    // ── FIX-B (2026-09-27): bounded patient/appointment list pagination ───────
+    //
+    // get_patients / get_appointments / get_bills / get_encounters had NO LIMIT,
+    // so mounting a page serialized the whole registry (tens of thousands of
+    // PHI-heavy rows, including TEXT[] allergies + chronic_conditions) across the
+    // IPC boundary and froze the webview for seconds. The bounded queries page
+    // with `ORDER BY created_at DESC, id DESC LIMIT n OFFSET m`; this index makes
+    // that an index scan instead of a full sort of the table.
+    //
+    // NOTE on search: the patient search predicate is `%term%`, which no btree
+    // index can serve — a term search still scans. That is acceptable because the
+    // result is now hard-capped and the new search_patient_options projection is
+    // tiny; the freeze came from row COUNT and payload width, not the scan. A
+    // pg_trgm GIN index would fix the scan, but CREATE EXTENSION requires
+    // superuser, which locked-down hospital installs do not grant, so it is
+    // deliberately not attempted here.
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_patients_created_id ON patients (created_at DESC, id DESC)")
+        .execute(pool)
+        .await
+        .ok();
+
+    // Sibling indexes for the other three bounded lists (FIX-B). Each matches its
+    // command's new ORDER BY, including the id tiebreaker that makes paging
+    // stable — an index on the sort key alone would still not make two rows with
+    // an identical timestamp page deterministically.
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_encounters_visit_id ON encounters (visit_date DESC, id DESC)")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_bills_created_id ON bills (created_at DESC, id DESC)")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_appointments_date_time ON appointments (appointment_date DESC, appointment_time ASC)")
+        .execute(pool)
+        .await
+        .ok();
 
     // Seed default roles, permissions, and a bootstrap admin once.
     crate::auth::seed_defaults(pool)

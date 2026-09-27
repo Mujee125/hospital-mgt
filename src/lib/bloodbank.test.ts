@@ -464,7 +464,7 @@ describe("BB-007: Blood Bank TypeScript Interfaces", () => {
 // a TanStack Query test setup with mocked invoke — documented in BB-006.
 
 describe("BB-007: Blood Bank Query Hook Exports", () => {
-  it("FE-HK-001: all 29 Blood Bank hooks are exported from queries.ts", async () => {
+  it("FE-HK-001: all Blood Bank hooks are exported from queries.ts", async () => {
     const mod = await import("@/lib/queries");
     const expectedHooks = [
       "useBloodDonors",
@@ -488,6 +488,11 @@ describe("BB-007: Blood Bank Query Hook Exports", () => {
       "useCancelBloodReservation",
       "useBloodIssues",
       "useIssueBlood",
+      // FIX-A: the second-person review path. These two are the only way an
+      // ABO-incompatible override can be closed, so their absence must fail this
+      // test rather than surface later as a queue nobody can work through.
+      "usePendingEmergencyVerifications",
+      "useVerifyBloodIssue",
       "useReturnBloodUnit",
       "useBloodTransfusions",
       "useCreateBloodTransfusion",
@@ -503,5 +508,45 @@ describe("BB-007: Blood Bank Query Hook Exports", () => {
       expect(mod, `Hook ${hookName} should be exported`).toHaveProperty(hookName);
       expect(typeof mod[hookName as keyof typeof mod]).toBe("function");
     }
+  });
+
+  it("FE-HK-002: the patient typeahead hook is exported (FIX-B)", async () => {
+    const mod = await import("@/lib/queries");
+    expect(typeof mod.usePatientOptions).toBe("function");
+    // The bounded list commands and their shared page size: the client must not
+    // be able to reintroduce an unbounded fetch.
+    expect(typeof mod.LIST_PAGE_SIZE).toBe("number");
+    expect(mod.LIST_PAGE_SIZE).toBeGreaterThan(0);
+  });
+});
+
+// ── FIX-A: the override contract, as the frontend sees it ─────────────────────
+//
+// The reason vocabulary is duplicated in TS and Rust on purpose (the backend
+// must never trust a client-side allow-list). This test is the tripwire that
+// keeps the two copies from drifting: the DB has a CHECK constraint on the same
+// five codes, so a mismatch here means overrides start failing at 3 AM with an
+// opaque constraint error instead of a validation message.
+
+describe("FIX-A: ABO-incompatible release override contract", () => {
+  it("FE-OVR-001: the reason vocabulary is the closed set the backend expects", async () => {
+    const { OVERRIDE_REASON_CODES } = await import("@/lib/models");
+    expect(OVERRIDE_REASON_CODES.map((r) => r.value)).toEqual([
+      "massive_hemorrhage",
+      "massive_transfusion_protocol",
+      "no_compatible_unit_available",
+      "emergency_unknown_blood_group",
+      "other_documented",
+    ]);
+    // Every entry needs a human label: a raw snake_case code on screen during an
+    // emergency is not a decision aid.
+    for (const r of OVERRIDE_REASON_CODES) {
+      expect(r.label.length).toBeGreaterThan(0);
+      expect(r.label).not.toBe(r.value);
+    }
+  });
+
+  it("FE-OVR-002: the permission constant for co-signing matches Rust as_str", () => {
+    expect(PERMISSIONS.BloodBankVerify).toBe("bloodbank.verify");
   });
 });

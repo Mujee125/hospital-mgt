@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { PatientForm } from "@/components/forms/PatientForm";
 import { PatientProfileDialog } from "@/components/clinical/PatientProfileDialog";
 import { Search, UserPlus, Edit, Trash2, Users, User } from "lucide-react";
-import { usePatients, useDeletePatient } from "@/lib/queries";
+import { usePatients, useDeletePatient, LIST_PAGE_SIZE } from "@/lib/queries";
 import type { Patient } from "@/lib/models";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
@@ -51,8 +51,20 @@ export function Patients() {
 
   // F-09: a failed load must show the ERROR state, never "No patients
   // registered yet" (staff would re-register patients mid-outage).
-  const { data: patients = [], isLoading, isError, refetch, isFetching } = usePatients();
+  //
+  // FIX-B: `get_patients` is now BOUNDED — the whole registry (with TEXT[]
+  // allergies and chronic_conditions on every row) was what froze this page.
+  // A bounded list means a search must reach the SERVER, not just filter the
+  // 250 rows already in memory, or older patients become unfindable. The term
+  // is only sent once it is long enough to be selective; below that the page
+  // works on the most recent window, and the toolbar says so.
+  const serverSearch = searchQuery.trim().length >= 2 ? searchQuery.trim() : null;
+  const { data: patients = [], isLoading, isError, refetch, isFetching } = usePatients(serverSearch);
   const deletePatient = useDeletePatient();
+  // "We may be showing you a subset" is a fact the user must be told, not
+  // inferred from a page count: a receptionist concluding that a patient is not
+  // registered, because the registry is longer than one page, is a real harm.
+  const atServerCap = patients.length >= LIST_PAGE_SIZE;
 
   // F-13: pagination. A 10k-patient DB previously rendered every row (with
   // per-row animations — the motion import is gone too); now 25 rows are
@@ -190,6 +202,16 @@ export function Patients() {
                 {filteredPatients.length} of {patients.length} patients
               </span>
             </PageToolbar>
+
+            {/* FIX-B: when the list is sitting exactly on the server's cap, say
+                so. A silent subset reads as "these are all our patients", and a
+                search that silently misses a record is worse than a slow one. */}
+            {atServerCap && !isSearchActive && (
+              <p className="mb-3 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                Showing the {LIST_PAGE_SIZE} most recently registered patients. Search by name, MRN or
+                phone to reach any other record in the registry.
+              </p>
+            )}
 
             <Table>
               <TableHeader>

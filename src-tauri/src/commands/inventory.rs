@@ -102,6 +102,15 @@ pub async fn create_inventory_item(
     }
     let expiry = parse_date(&item.expiry_date)?;
 
+    // FIX-C: the item row and its opening-balance movement are written in ONE
+    // transaction. Previously the INSERT was autocommitted and the movement was
+    // a separate `let _ =` best-effort write — so a failure there left an item
+    // whose opening stock existed in inventory_items but nowhere in the ledger
+    // that the module's own invariant ("every stock change is recorded in
+    // inventory_movements") depends on. Silently unreconcilable stock is worse
+    // than a failed create, which the user can simply retry.
+    let mut tx = pool.begin().await.map_err(|e| format!("Begin tx: {}", e))?;
+
     let row: (i32,) = sqlx::query_as(
         r#"INSERT INTO inventory_items
               (name, sku, category, unit, stock_quantity, reorder_level,
@@ -118,15 +127,15 @@ pub async fn create_inventory_item(
     .bind(&item.batch_number)
     .bind(dec(item.unit_cost.unwrap_or(0.0)))
     .bind(item.is_active.unwrap_or(true))
-    .fetch_one(pool.inner())
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| format!("Create inventory item: {}", e))?;
 
     // If the item is created with an opening stock, record a movement so the
-    // audit trail reflects the initial balance.
+    // audit trail reflects the initial balance. No longer best-effort.
     let opening = dec(item.stock_quantity.unwrap_or(0.0));
     if opening != Decimal::ZERO {
-        let _ = sqlx::query(
+        sqlx::query(
             r#"INSERT INTO inventory_movements
                   (item_id, quantity_change, reason, balance_after, created_by_user_id, notes)
                VALUES ($1, $2, 'initial_stock', $2, $3, 'Opening balance at item creation')"#,
@@ -134,9 +143,12 @@ pub async fn create_inventory_item(
         .bind(row.0)
         .bind(opening)
         .bind(s.user_id)
-        .execute(pool.inner())
-        .await;
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Record opening-stock movement: {}", e))?;
     }
+
+    tx.commit().await.map_err(|e| format!("Commit: {}", e))?;
 
     audit::for_session(
         pool.inner(),
@@ -319,12 +331,30 @@ pub async fn adjust_inventory(
         ));
     }
 
-    sqlx::query("UPDATE inventory_items SET stock_quantity = $1, updated_at = NOW() WHERE id = $2")
-        .bind(new_balance)
-        .bind(item_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Update stock_quantity: {}", e))?;
+    // FIX-C: RELATIVE, GUARDED update — see the matching note in
+    // pharmacy::dispense_prescription_item_core. The absolute write this
+    // replaces (`SET stock_quantity = $1`) made the balance correct only while
+    // every writer held the row lock; the relative form is correct regardless,
+    // and `rows_affected() = 0` is the database refusing to go negative rather
+    // than Rust asserting that it would not.
+    let updated = sqlx::query(
+        "UPDATE inventory_items
+            SET stock_quantity = stock_quantity + $1, updated_at = NOW()
+          WHERE id = $2 AND stock_quantity + $1 >= 0",
+    )
+    .bind(change_dec)
+    .bind(item_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Update stock_quantity: {}", e))?;
+
+    if updated.rows_affected() == 0 {
+        return Err(format!(
+            "Adjustment refused: '{}' has {} in stock and the change of {} would take it below \
+             zero. Nothing was adjusted and no movement was recorded.",
+            item_name, current_balance, quantity_change
+        ));
+    }
 
     sqlx::query(
         r#"INSERT INTO inventory_movements

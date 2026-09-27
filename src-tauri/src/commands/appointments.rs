@@ -478,6 +478,8 @@ pub async fn get_appointments(
     date_filter: Option<String>,
     status_filter: Option<String>,
     doctor_filter: Option<i32>,
+    limit: Option<i32>,
+    offset: Option<i32>,
 ) -> Result<Vec<AppointmentWithDetails>, String> {
     let (_session, scope) = require_appointment_read_scope(pool.inner(), &session).await?;
 
@@ -508,6 +510,16 @@ pub async fn get_appointments(
     }
     query.push_str(" ORDER BY a.appointment_date DESC, a.appointment_time ASC");
 
+    // FIX-B: bound the result set (see db::page_bounds). An unfiltered
+    // appointment list is a multi-year table joined to patients and doctors —
+    // loading all of it to render a day view is the same class of freeze the
+    // patient registry had. The bound is appended AFTER the dynamic $n numbering
+    // above so the paging parameters always take the next free placeholder.
+    let (lim, off) = crate::db::page_bounds(limit, offset);
+    let n = 1 + date_filter.is_some() as i32 + status_filter.is_some() as i32
+        + effective_doctor_filter.is_some() as i32;
+    query.push_str(&format!(" LIMIT ${} OFFSET ${}", n, n + 1));
+
     let mut q = sqlx::query_as::<_, AppointmentWithDetails>(&query);
     if let Some(ref d) = date_filter {
         q = q.bind(d);
@@ -519,7 +531,9 @@ pub async fn get_appointments(
         q = q.bind(doc);
     }
 
-    q.fetch_all(pool.inner())
+    q.bind(lim)
+        .bind(off)
+        .fetch_all(pool.inner())
         .await
         .map_err(|e| format!("Failed to get appointments: {}", e))
 }

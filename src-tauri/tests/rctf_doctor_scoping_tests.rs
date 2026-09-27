@@ -149,7 +149,7 @@ async fn rctf_a_b_c_own_list_ignores_malicious_doctor_filter() {
     // Test C: no filter — only Doctor A's own appointments come back.
     let app = app_for(&pool, doc_a_user, "hash_rctf_abc_doc_a").await;
     let (pool_s, sess_s) = states(&app);
-    let no_filter = get_appointments(pool_s, sess_s, None, None, None)
+    let no_filter = get_appointments(pool_s, sess_s, None, None, None, None, None)
         .await
         .expect("doctor A list (no filter)");
     assert!(
@@ -165,7 +165,7 @@ async fn rctf_a_b_c_own_list_ignores_malicious_doctor_filter() {
     // Test B: malicious doctor_filter = Doctor B — still only Doctor A's own.
     let app2 = app_for(&pool, doc_a_user, "hash_rctf_abc_doc_a").await;
     let (pool_s2, sess_s2) = states(&app2);
-    let with_malicious_filter = get_appointments(pool_s2, sess_s2, None, None, Some(doc_b))
+    let with_malicious_filter = get_appointments(pool_s2, sess_s2, None, None, Some(doc_b), None, None)
         .await
         .expect("doctor A list (doctor_filter = B)");
     assert!(
@@ -372,7 +372,7 @@ async fn rctf_i_unlinked_doctor_gets_clear_error_not_unrestricted_access() {
 
     let app = app_for(&pool, unlinked_user, "hash_rctf_i_unlinked").await;
     let (pool_s, sess_s) = states(&app);
-    let result = get_appointments(pool_s, sess_s, None, None, None).await;
+    let result = get_appointments(pool_s, sess_s, None, None, None, None, None).await;
     assert!(
         result.is_err(),
         "a doctor-role account with no linked practitioner profile must get an error, not an appointment list"
@@ -409,7 +409,7 @@ async fn rctf_j_full_access_role_regression_unchanged() {
     // BOTH doctors' appointments — this is the regression check.
     let app = app_for(&pool, receptionist, "hash_rctf_j_reception").await;
     let (pool_s, sess_s) = states(&app);
-    let hits = get_appointments(pool_s, sess_s, None, None, None)
+    let hits = get_appointments(pool_s, sess_s, None, None, None, None, None)
         .await
         .expect("receptionist list");
     let seen_doctors: std::collections::HashSet<i32> = hits.iter().map(|a| a.doctor_id).collect();

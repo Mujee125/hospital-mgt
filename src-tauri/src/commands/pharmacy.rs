@@ -575,51 +575,80 @@ pub async fn dispense_prescription_item_core(
         return Err("This prescription item has already been dispensed.".to_string());
     }
 
-    // F-16 stock matching — catalog identity first, free-text fallback.
-    // FOR UPDATE on the inventory row prevents concurrent dispenses racing
-    // on the same stock.
-    let inv_row: Option<(i32, Decimal)> = match medication_id {
-        Some(mid) => {
-            let by_catalog = sqlx::query_as(
-                r#"SELECT ii.id, ii.stock_quantity
-                   FROM inventory_items ii
-                   JOIN medications m ON m.id = $1
-                   WHERE (LOWER(ii.name) = LOWER(m.brand_name)
-                       OR LOWER(ii.name) = LOWER(m.generic_name))
-                     AND ii.is_active = TRUE
-                   ORDER BY ii.id ASC
-                   LIMIT 1
-                   FOR UPDATE OF ii"#,
-            )
-            .bind(mid)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| crate::db::sanitize_db_error(&e))?;
-            match by_catalog {
-                Some(row) => Some(row),
-                // Catalog match found nothing → legacy free-text match.
-                None => sqlx::query_as(
-                    r#"SELECT id, stock_quantity FROM inventory_items
-                       WHERE LOWER(name) = LOWER($1) AND is_active = TRUE
-                       ORDER BY id ASC LIMIT 1 FOR UPDATE"#,
-                )
-                .bind(&med_name)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| crate::db::sanitize_db_error(&e))?,
-            }
-        }
-        // No catalog link on the item → legacy free-text match.
+    // FIX-D (2026-09-27): FEFO with an explicit ambiguity stop.
+    //
+    // The old matcher was `ORDER BY id ASC LIMIT 1` — i.e. "whichever row the
+    // planner happened to create first". For expiry-dated stock that is the
+    // opposite of FEFO, and for the catalog path (which matches the item name
+    // against BOTH brand_name and generic_name) it can pick a brand line when a
+    // generic line was equally valid, with no signal to the pharmacist that a
+    // choice had been made on their behalf.
+    //
+    // The replacement:
+    //   1. never match EXPIRED stock (it must not be dispensed at all);
+    //   2. order the survivors by soonest expiry (FEFO), undated stock last;
+    //   3. if the two best candidates are DIFFERENT PRODUCTS (distinct names —
+    //      e.g. a brand line and a generic line), refuse and name them, rather
+    //      than picking one silently. Same-name lines differing only by batch
+    //      are not ambiguous: FEFO resolves them, which is the whole point of
+    //      having an expiry date.
+    // The candidate list is capped because the pathological case (thousands of
+    // identically-named rows) must not become its own denial of service.
+    const MAX_STOCK_CANDIDATES: i64 = 50;
+    let candidates: Vec<(i32, Decimal, String, Option<chrono::NaiveDate>)> = match medication_id {
+        Some(mid) => sqlx::query_as(
+            r#"SELECT ii.id, ii.stock_quantity, ii.name, ii.expiry_date
+               FROM inventory_items ii
+               JOIN medications m ON m.id = $1
+               WHERE (LOWER(ii.name) = LOWER(m.brand_name)
+                   OR LOWER(ii.name) = LOWER(m.generic_name))
+                 AND ii.is_active = TRUE
+               ORDER BY ii.expiry_date ASC NULLS LAST, ii.id ASC
+               LIMIT $2
+               FOR UPDATE OF ii"#,
+        )
+        .bind(mid)
+        .bind(MAX_STOCK_CANDIDATES)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?,
+        // No catalog link on the item → legacy free-text match, same policy.
         None => sqlx::query_as(
-            r#"SELECT id, stock_quantity FROM inventory_items
+            r#"SELECT id, stock_quantity, name, expiry_date FROM inventory_items
                WHERE LOWER(name) = LOWER($1) AND is_active = TRUE
-               ORDER BY id ASC LIMIT 1 FOR UPDATE"#,
+               ORDER BY expiry_date ASC NULLS LAST, id ASC
+               LIMIT $2
+               FOR UPDATE"#,
         )
         .bind(&med_name)
-        .fetch_optional(&mut *tx)
+        .bind(MAX_STOCK_CANDIDATES)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?,
     };
+
+    let today = chrono::Local::now().date_naive();
+    let usable: Vec<(i32, Decimal, String, Option<chrono::NaiveDate>)> = candidates
+        .into_iter()
+        .filter(|(_, _, _, exp)| exp.map(|d| d >= today).unwrap_or(true))
+        .collect();
+
+    if usable.len() > 1 && usable[0].2.to_lowercase() != usable[1].2.to_lowercase() {
+        return Err(format!(
+            "'{}' matches more than one distinct inventory product, so the stock to dispense is \
+             ambiguous and nothing has been deducted: '{}' (#{}, expiry {}) or '{}' (#{}, expiry \
+             {}). Retire or rename one of them, then dispense again.",
+            med_name,
+            usable[0].2,
+            usable[0].0,
+            usable[0].3.map(|d| d.to_string()).unwrap_or_else(|| "none".into()),
+            usable[1].2,
+            usable[1].0,
+            usable[1].3.map(|d| d.to_string()).unwrap_or_else(|| "none".into()),
+        ));
+    }
+
+    let inv_row: Option<(i32, Decimal)> = usable.first().map(|(id, stock, _, _)| (*id, *stock));
 
     // Capture the bool before the if-let so the audit JSON below doesn't
     // depend on `Option<(i32, Decimal)>: Copy` (it IS Copy today because
@@ -652,14 +681,36 @@ pub async fn dispense_prescription_item_core(
                 med_name, current_balance, qty
             ));
         }
-        sqlx::query(
-            "UPDATE inventory_items SET stock_quantity = $1, updated_at = NOW() WHERE id = $2",
+        // FIX-C: RELATIVE, GUARDED update. The arithmetic above runs under the
+        // row lock, but writing an ABSOLUTE value would make the balance
+        // correct only as long as every future writer remembers to lock first.
+        // `stock_quantity - $1 ... WHERE stock_quantity - $1 >= 0` is correct
+        // either way, moves the insufficient-stock decision from "Rust computed
+        // it" to "the database refused it", and RETURNING gives the movement
+        // ledger the balance that was actually written rather than the one we
+        // predicted. A NULL result means the guard rejected the write.
+        let applied: Option<(Decimal,)> = sqlx::query_as(
+            r#"UPDATE inventory_items
+               SET stock_quantity = stock_quantity - $1, updated_at = NOW()
+               WHERE id = $2 AND stock_quantity - $1 >= 0
+               RETURNING stock_quantity"#,
         )
-        .bind(new_balance)
+        .bind(qty_dec)
         .bind(inv_id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| crate::db::sanitize_db_error(&e))?;
+
+        let new_balance = match applied {
+            Some((b,)) => b,
+            None => {
+                return Err(format!(
+                    "Insufficient stock for '{}' (item #{}): the requested {} is no longer \
+                     available. Nothing has been dispensed.",
+                    med_name, inv_id, qty
+                ))
+            }
+        };
 
         sqlx::query(
             r#"INSERT INTO inventory_movements

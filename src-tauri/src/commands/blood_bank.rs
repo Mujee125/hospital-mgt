@@ -32,7 +32,7 @@ use crate::models::{
     BloodCrossmatch, BloodDiscard, BloodDonation, BloodDonor, BloodIssue, BloodMovement,
     BloodTransfusion, BloodUnit, BloodUnitHistory, CreateBloodCrossmatch, CreateBloodDiscard,
     CreateBloodDonation, CreateBloodDonor, CreateBloodIssue, CreateBloodReservation,
-    CreateBloodTransfusion, CreateBloodUnit,
+    CreateBloodTransfusion, CreateBloodUnit, PendingEmergencyVerification,
 };
 use crate::rbac::{self, Permission, SessionState};
 
@@ -88,6 +88,198 @@ const VALID_DISCARD_REASONS: &[&str] = &[
 ];
 const VALID_TRANSFUSION_OUTCOMES: &[&str] = &["completed", "reaction", "incomplete", "cancelled"];
 const VALID_SCREENING_STATUSES: &[&str] = &["pending", "passed", "failed", "quarantine"];
+
+// ── FIX-A (2026-09-27): emergency-release policy constants ───────────────────
+//
+// The override used to be `issue_type == "emergency" && !indication.is_empty()`.
+// Free text is not a control: "urgent" satisfied it, told no reviewer anything,
+// and was never revisited by anyone. The replacement keeps the clinical escape
+// hatch (a massive hemorrhage must not wait for a typing) but makes the override
+// STRUCTURED, ATTRIBUTABLE and REVIEWED:
+//   1. a closed reason code (below)     2. a >=MIN_INDICATION_LEN-char indication
+//   3. a physician order reference      4. a per-user rolling 24h cap
+//   5. a SECOND-person co-signature inside a policy window.
+//
+// Model chosen: HYBRID QUARANTINE. The unit goes out immediately — status stays
+// 'issued' and transfusion is NOT blocked — but the issue row carries
+// `override_verification_required = TRUE` until an independent `bloodbank.verify`
+// holder co-signs. What is quarantined is the paperwork and the issuer's quota,
+// never the blood. (A "hard" tier that blocks release until a second signature is
+// present is a one-branch change in `issue_blood`, deliberately not taken: the
+// 3 AM staffing reality was rejected as unsafe by the blood-bank SOP.)
+const VALID_OVERRIDE_REASON_CODES: &[&str] = &[
+    "massive_hemorrhage",
+    "massive_transfusion_protocol",
+    "no_compatible_unit_available",
+    "emergency_unknown_blood_group",
+    "other_documented",
+];
+/// Shorter than this, an "indication" is a word, not a clinical justification.
+const MIN_INDICATION_LEN: usize = 25;
+/// Used only when the `settings` rows are missing or unparsable. The code default
+/// is the value the policy was designed with — never 0, never unlimited.
+const DEFAULT_RELEASES_PER_24H: i64 = 3;
+const DEFAULT_VERIFY_WINDOW_HOURS: i64 = 1;
+const SETTING_KEY_RELEASE_LIMIT: &str = "blood.emergency_release_24h_limit";
+const SETTING_KEY_VERIFY_HOURS: &str = "blood.emergency_verification_hours";
+/// Namespace for the per-user advisory lock that makes the emergency-release
+/// quota exact under concurrency. An arbitrary, stable constant — it only has
+/// to not collide with any other `pg_advisory_xact_lock` key in this app, of
+/// which it is currently the only one.
+const QUOTA_LOCK_NAMESPACE: i64 = 0x5649_5441_4C46; // "VITALF" in ASCII
+
+/// FIX-A: the structured override an operator must supply to get past the ABO/Rh
+/// gate. Replaces "one free-text word is enough".
+struct EmergencyOverride {
+    reason_code: String,
+    indication: String,
+    physician_order_ref: String,
+    /// Snapshot of the typing at the moment of release. Stored (rather than joined
+    /// from `patients`) because the patient record may be corrected later — the
+    /// reviewer must see what the issuer saw, not what the chart says today.
+    unit_group: Option<String>,
+    unit_rh: Option<String>,
+    patient_group: Option<String>,
+    patient_rh: Option<String>,
+    /// true = the patient was UNTYPED (emergency uncrossmatched release);
+    /// false = the patient WAS typed and the unit is known-incompatible. The
+    /// reviewer queue sorts these differently: the second is far more serious.
+    patient_untyped: bool,
+}
+
+
+/// FIX-A: validate the override documentation and return
+/// `(reason_code, indication, physician_order_ref)`.
+///
+/// Returns the bare triple rather than a filled `EmergencyOverride` because the
+/// typing snapshot is known only at the call site, inside the compatibility check.
+///
+/// These strings are surfaced verbatim in a blocking dialog at the moment of a
+/// resuscitation, so each one must name the exact missing field and say what
+/// "good" looks like — an operator must never have to guess how to satisfy the
+/// control, or they will look for a way around it.
+fn validate_emergency_override(issue: &CreateBloodIssue) -> Result<(String, String, String), String> {
+    let reason_code = issue
+        .override_reason_code
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    validate_enum(&reason_code, VALID_OVERRIDE_REASON_CODES, "override_reason_code")?;
+
+    let indication = issue
+        .clinical_indication
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if indication.chars().count() < MIN_INDICATION_LEN {
+        return Err(format!(
+            "An ABO-incompatible release needs a clinical indication of at least {} characters \
+             (currently {}). State the hemorrhage/units outstanding and why no compatible unit \
+             was available — not just 'emergency'.",
+            MIN_INDICATION_LEN,
+            indication.chars().count()
+        ));
+    }
+
+    let order_ref = issue
+        .physician_order_ref
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if order_ref.is_empty() {
+        return Err(
+            "A physician order reference is required for an ABO-incompatible release \
+             (e.g. 'TRAUMA-ORDER-4471' or the verbal-order time + ordering doctor)."
+                .to_string(),
+        );
+    }
+    if order_ref.chars().count() > 80 {
+        return Err("Physician order reference must be 80 characters or fewer.".to_string());
+    }
+
+    Ok((reason_code, indication, order_ref))
+}
+
+/// FIX-A: rolling 24-hour cap on ABO-incompatible releases by ONE user.
+///
+/// One person issuing incompatible blood all night is either a mass-casualty
+/// event (a supervisor should know) or an attacker/compromised account. Overdue
+/// unverified releases count DOUBLE: if the review loop is not being closed, the
+/// cap should bite immediately rather than after another three units.
+///
+/// Takes the caller's TRANSACTION, not the pool, for two reasons:
+///
+///   1. POOL SAFETY. `issue_blood` already holds a transaction (it has locked
+///      the blood unit). Issuing this read on a second pooled connection means
+///      every concurrent emergency release holds two connections, and a small
+///      `max_connections` turns a busy blood bank into lock-wait timeouts on
+///      the very path that must never fail.
+///   2. RACE SAFETY. Two overrides released by the SAME user at the same moment
+///      would each read the other's pre-insert state and both pass a cap of N.
+///      The advisory lock below makes same-user releases serial within the
+///      transaction, so the cap is exact rather than approximately enforced.
+async fn enforce_emergency_release_quota(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: i32,
+) -> Result<(), String> {
+    // Serialize this user's override releases against each other. The key is
+    // namespaced by an arbitrary constant so it cannot collide with any other
+    // advisory lock in the app, and the lock is released automatically at
+    // COMMIT/ROLLBACK.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(QUOTA_LOCK_NAMESPACE)
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| sanitize_db_error(&e))?;
+
+    // Read through the transaction so a NULL / missing / unparsable setting
+    // falls back to the code default rather than to "no limit".
+    let raw: Option<String> = match sqlx::query_scalar::<_, String>(
+        "SELECT value FROM settings WHERE key = $1",
+    )
+    .bind(SETTING_KEY_RELEASE_LIMIT)
+    .fetch_optional(&mut **tx)
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => None,
+    };
+    let limit = raw
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(DEFAULT_RELEASES_PER_24H)
+        .max(1);
+
+    let weighted: i64 = sqlx::query_scalar(
+        r#"SELECT COALESCE(SUM(CASE WHEN verified_at IS NULL AND verify_due_at < NOW()
+                                    THEN 2 ELSE 1 END), 0)::bigint
+             FROM blood_emergency_overrides
+            WHERE issued_by_user_id = $1
+              AND created_at > NOW() - INTERVAL '24 hours'"#,
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| sanitize_db_error(&e))?;
+
+    if weighted >= limit {
+        return Err(format!(
+            "EMERGENCY RELEASE CAP REACHED: this account has {} weighted ABO-incompatible \
+             emergency releases in the last 24 hours (cap {}, and unverified releases past \
+             their co-sign deadline count double). A second blood-bank holder must co-sign the \
+             pending overrides (verify_blood_issue) — or, for a genuine mass-casualty event, a \
+             supervisor raises '{}' in the settings table.",
+            weighted,
+            limit,
+            SETTING_KEY_RELEASE_LIMIT
+        ));
+    }
+    Ok(())
+}
+
 
 fn validate_enum(value: &str, allowed: &[&str], field_name: &str) -> Result<(), String> {
     if !allowed.contains(&value) {
@@ -219,16 +411,25 @@ const SELECT_ISSUES: &str = r#"
            bi.crossmatch_id, bi.doctor_id, bi.issued_by_user_id, bi.issued_at,
            bi.issued_to_location, bi.issue_type, bi.clinical_indication,
            bi.special_instructions, bi.returned_at, bi.return_reason,
-           bi.received_by_user_id, bi.created_at, bi.updated_at,
+           bi.received_by_user_id,
+           bi.override_reason_code, bi.physician_order_ref,
+           bi.override_verification_required, bi.override_verify_due_at,
+           bi.override_verified_by_user_id, bi.override_verified_at,
+           bi.created_at, bi.updated_at,
            bu.unit_number AS unit_number,
            p.first_name || ' ' || p.last_name AS patient_name,
            d.first_name || ' ' || d.last_name AS doctor_name,
-           u.username AS issued_by_name
+           u.username AS issued_by_name,
+           uv.username AS override_verified_by_name
     FROM blood_issues bi
     LEFT JOIN blood_units bu ON bu.id = bi.unit_id
     LEFT JOIN patients p ON p.id = bi.patient_id
     LEFT JOIN doctors d ON d.id = bi.doctor_id
     LEFT JOIN users u ON u.id = bi.issued_by_user_id
+    -- FIX-A: who co-signed an ABO-incompatible emergency release. The column list
+    -- here is EXPLICIT, so every field on the BloodIssue struct must be listed —
+    -- a missing column makes sqlx's FromRow fail at runtime, not compile time.
+    LEFT JOIN users uv ON uv.id = bi.override_verified_by_user_id
 "#;
 
 const SELECT_TRANSFUSIONS: &str = r#"
@@ -2175,6 +2376,11 @@ pub async fn issue_blood(
     //   The override is audit-logged.
     // For 'autologous' issues: the donor is the patient themselves, so ABO
     //   is inherently compatible — skip the matrix check.
+    // FIX-A: set only when the ABO/Rh gate below is overridden. Declared out here
+    // because the INSERT and the oversight row further down both need it, while the
+    // compatibility check lives inside the `autologous` guard.
+    let mut emergency_override: Option<EmergencyOverride> = None;
+
     if issue_type != "autologous" {
         let unit_bt: (String, String) =
             sqlx::query_as("SELECT blood_group, rh_factor FROM blood_units WHERE id = $1")
@@ -2214,56 +2420,83 @@ pub async fn issue_blood(
         };
 
         if !compatible {
-            // Determine if an emergency override is permitted.
+            // ── FIX-A: THE BYPASS, CLOSED ─────────────────────────────────────
+            //
+            // This block used to reduce to: `issue_type is emergency/uncrossmatched`
+            // AND `clinical_indication` contains one non-space character → fall
+            // through and claim the unit. "urgent" was therefore a sufficient
+            // override for a potentially fatal transfusion; it captured no reason
+            // code, no authorising order, and the audit row written afterwards did
+            // not even mention that an override had happened.
+            //
+            // The override survives (HYBRID QUARANTINE) because clinically it must:
+            // an untyped trauma patient gets O-negative before the lab finishes. But
+            // it is now a structured, attributable, reviewed act:
+            //   closed reason_code  +  >=25-char indication  +  physician_order_ref
+            //   +  per-user rolling 24h cap  +  an outstanding second-person
+            //   co-signature recorded on the issue row.
             let is_emergency_override = issue_type == "emergency" || issue_type == "uncrossmatched";
-            let has_indication = issue
-                .clinical_indication
-                .as_deref()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
 
             if !is_emergency_override {
                 let reason = if p_group.is_empty() || p_rh.is_empty() {
                     format!(
                         "Patient {} blood type is not fully recorded (ABO and Rh both required). \
-                         Record it before issuing blood.",
+                         Record it before issuing blood — or, for a life-threatening hemorrhage, \
+                         use issue_type='emergency' with a documented override.",
                         issue.patient_id
                     )
                 } else {
                     format!(
                         "ABO/Rh INCOMPATIBLE: unit {} is {}{} but patient {} is {}{}. \
                          Incompatible transfusion can cause acute hemolytic reaction (fatal). \
-                         Use issue_type='emergency' with a clinical_indication only for \
-                         life-threatening massive hemorrhage where typing is not yet available.",
-                        issue.unit_id, unit_bt.0, unit_bt.1, issue.patient_id, p_group, p_rh
+                         To override for a life-threatening massive hemorrhage, send \
+                         issue_type='emergency' with override_reason_code, a >=25-character \
+                         clinical_indication and physician_order_ref; the release is then \
+                         recorded for mandatory second-person review.",
+                        issue.unit_id,
+                        unit_bt.0,
+                        unit_bt.1,
+                        issue.patient_id,
+                        p_group,
+                        p_rh
                     )
                 };
                 return Err(reason);
             }
 
-            if !has_indication {
-                return Err(format!(
-                    "Emergency issue of potentially incompatible blood requires a non-empty \
-                     clinical_indication documenting the life-threatening reason (e.g. 'massive \
-                     hemorrhage, O- not available'). Unit {} is {}{}, patient {} is {}{}.",
-                    issue.unit_id,
-                    unit_bt.0,
-                    unit_bt.1,
-                    issue.patient_id,
-                    if p_group.is_empty() {
-                        "untyped".to_string()
-                    } else {
-                        p_group.clone()
-                    },
-                    if p_rh.is_empty() {
-                        "".to_string()
-                    } else {
-                        p_rh.clone()
-                    }
-                ));
-            }
-            // Emergency override with documented indication — proceed.
-            // The audit log (below) records the override.
+            // Typed-but-incompatible and never-typed are different clinical acts.
+            // Both may proceed, but the reviewer queue must be able to tell them
+            // apart (a known-incompatible release is the serious one), so the
+            // distinction is recorded now rather than inferred from a chart that may
+            // be corrected later.
+            let patient_untyped = p_group.is_empty() || p_rh.is_empty();
+
+            let (reason_code, indication, physician_order_ref) = validate_emergency_override(&issue)?;
+
+            // Quota is checked INSIDE the transaction, on the SAME connection,
+            // before the unit is claimed: a rejected release then rolls back
+            // cleanly instead of leaving a unit half-transitioned, and no
+            // second pooled connection is held on the path that must not fail.
+            enforce_emergency_release_quota(&mut tx, s.user_id).await?;
+
+            emergency_override = Some(EmergencyOverride {
+                reason_code,
+                indication,
+                physician_order_ref,
+                unit_group: Some(unit_bt.0.clone()),
+                unit_rh: Some(unit_bt.1.clone()),
+                patient_group: if p_group.is_empty() {
+                    None
+                } else {
+                    Some(p_group.clone())
+                },
+                patient_rh: if p_rh.is_empty() {
+                    None
+                } else {
+                    Some(p_rh.clone())
+                },
+                patient_untyped,
+            });
         }
     }
 
@@ -2311,12 +2544,30 @@ pub async fn issue_blood(
     .map_err(|e| sanitize_db_error(&e))?;
     let issue_number = issue_number_row.0;
 
+    // FIX-A: the co-sign deadline starts at RELEASE, not when someone next opens a
+    // queue — otherwise "pending verification" could silently sit for days.
+    let override_due_at = match &emergency_override {
+        None => None,
+        Some(_) => {
+            let hours = crate::db::setting_i64(
+                pool.inner(),
+                SETTING_KEY_VERIFY_HOURS,
+                DEFAULT_VERIFY_WINDOW_HOURS,
+            )
+            .await
+            .max(1);
+            Some(chrono::Utc::now() + chrono::Duration::hours(hours))
+        }
+    };
+
     let row: (i32,) = sqlx::query_as(
         r#"INSERT INTO blood_issues
               (issue_number, unit_id, patient_id, reservation_id, crossmatch_id, doctor_id,
                issued_by_user_id, issued_to_location, issue_type, clinical_indication,
-               special_instructions)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id"#,
+               special_instructions,
+               override_reason_code, physician_order_ref,
+               override_verification_required, override_verify_due_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id"#,
     )
     .bind(&issue_number)
     .bind(issue.unit_id)
@@ -2327,12 +2578,56 @@ pub async fn issue_blood(
     .bind(s.user_id)
     .bind(issue.issued_to_location.as_deref())
     .bind(issue_type)
-    .bind(issue.clinical_indication.as_deref())
+    // FIX-A: when an override was recorded, persist the VALIDATED indication (the
+    // one that passed the length check) rather than echoing the raw client string,
+    // so what is stored is always what was checked.
+    .bind(
+        emergency_override
+            .as_ref()
+            .map(|o| o.indication.clone())
+            .or_else(|| issue.clinical_indication.as_deref().map(|v| v.trim().to_string())),
+    )
     .bind(issue.special_instructions.as_deref())
+    .bind(emergency_override.as_ref().map(|o| o.reason_code.clone()))
+    .bind(emergency_override.as_ref().map(|o| o.physician_order_ref.clone()))
+    // The flag IS the quarantine: TRUE until verify_blood_issue() clears it.
+    .bind(emergency_override.is_some())
+    .bind(override_due_at)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| sanitize_db_error(&e))?;
     let issue_id = row.0;
+
+    // FIX-A: the oversight row is written IN THE SAME TRANSACTION as the issue.
+    // A release without an oversight row would re-open exactly the hole this fix
+    // closes, so — unlike the best-effort notification below — a failure here
+    // rolls the whole release back rather than being logged and ignored.
+    if let Some(ov) = &emergency_override {
+        sqlx::query(
+            r#"INSERT INTO blood_emergency_overrides
+                     (issue_id, unit_id, patient_id, issued_by_user_id, reason_code,
+                      clinical_indication, physician_order_ref, unit_group, unit_rh,
+                      patient_group, patient_rh, patient_untyped, verification_required,
+                      verify_due_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,TRUE,$13)"#,
+        )
+        .bind(issue_id)
+        .bind(issue.unit_id)
+        .bind(issue.patient_id)
+        .bind(s.user_id)
+        .bind(&ov.reason_code)
+        .bind(&ov.indication)
+        .bind(&ov.physician_order_ref)
+        .bind(ov.unit_group.clone())
+        .bind(ov.unit_rh.clone())
+        .bind(ov.patient_group.clone())
+        .bind(ov.patient_rh.clone())
+        .bind(ov.patient_untyped)
+        .bind(override_due_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| sanitize_db_error(&e))?;
+    }
 
     // Fulfil the linked reservation (if any).
     if let Some(rid) = linked_reservation_id {
@@ -2351,10 +2646,30 @@ pub async fn issue_blood(
         issue.unit_id,
         "issued",
         s.user_id,
-        Some(&format!(
-            "Issued to patient {} ({})",
-            issue.patient_id, issue_type
-        )),
+        // FIX-A: the unit-chain note says in plain words that this release bypassed
+        // the ABO gate. Anyone auditing the unit's history must be able to see the
+        // override without joining tables.
+        Some(&match &emergency_override {
+            None => format!("Issued to patient {} ({})", issue.patient_id, issue_type),
+            Some(ov) => format!(
+                "Issued to patient {} ({}): EMERGENCY OVERRIDE [{}] {} — indication: {}; \
+                 order {}; second-person verification PENDING",
+                issue.patient_id,
+                issue_type,
+                ov.reason_code,
+                if ov.patient_untyped {
+                    "patient was UNTYPED".to_string()
+                } else {
+                    format!(
+                        "ABO/Rh INCOMPATIBLE (patient {}{})",
+                        ov.patient_group.clone().unwrap_or_default(),
+                        ov.patient_rh.clone().unwrap_or_default()
+                    )
+                },
+                ov.indication,
+                ov.physician_order_ref
+            ),
+        }),
         Some("issue"),
         Some(issue_id),
     )
@@ -2385,11 +2700,329 @@ pub async fn issue_blood(
             "unit_id": issue.unit_id,
             "patient_id": issue.patient_id,
             "issue_type": issue_type,
+            // FIX-A: the audit row previously looked identical whether or not the
+            // ABO gate had been bypassed. `emergency_override` is now always a key
+            // (null or an object), so "was this an override?" is answerable from
+            // the audit log alone.
+            "emergency_override": emergency_override.as_ref().map(|o| serde_json::json!({
+                "reason_code": o.reason_code,
+                "clinical_indication": o.indication,
+                "physician_order_ref": o.physician_order_ref,
+                "unit_abo_rh": format!("{}{}", o.unit_group.clone().unwrap_or_default(),
+                                           o.unit_rh.clone().unwrap_or_default()),
+                "patient_abo_rh": match (&o.patient_group, &o.patient_rh) {
+                    (Some(g), Some(r)) => format!("{}{}", g, r),
+                    _ => "UNTYPED".to_string(),
+                },
+                "patient_untyped": o.patient_untyped,
+            })),
+            "verification_required": emergency_override.is_some(),
+            "verify_due_at": override_due_at.map(|d| d.to_rfc3339()),
         })),
     )
     .await;
+
+    // FIX-A: best-effort notification, deliberately AFTER commit and deliberately
+    // ignored on failure. The release is already clinically complete and the
+    // paperwork is already quarantined in the database; refusing to return success
+    // here would tell the blood bank the unit was not released, which is the more
+    // dangerous answer. The pending-verification queue (bloodbank.verify) is the
+    // authoritative safety net if this insert does not land.
+    if let Some(ov) = &emergency_override {
+        let _ = crate::commands::notifications::emit(
+            pool.inner(),
+            crate::commands::notifications::NotificationOut {
+                user_id: None,
+                role_target: Some(rbac::ROLE_LAB_TECH.to_string()),
+                kind: "blood_emergency_override".into(),
+                title: format!("Emergency release needs review — {}", issue_number),
+                body: format!(
+                    "Unit {} ({}{}) released to patient {} who is {}: {}. Order {}. \
+                     Second-person verification required{}.",
+                    issue.unit_id,
+                    ov.unit_group.clone().unwrap_or_default(),
+                    ov.unit_rh.clone().unwrap_or_default(),
+                    issue.patient_id,
+                    if ov.patient_untyped {
+                        "UNTYPED".to_string()
+                    } else {
+                        format!(
+                            "{}{} (INCOMPATIBLE)",
+                            ov.patient_group.clone().unwrap_or_default(),
+                            ov.patient_rh.clone().unwrap_or_default()
+                        )
+                    },
+                    ov.indication,
+                    ov.physician_order_ref,
+                    match override_due_at {
+                        Some(d) => format!(" by {}", d.format("%Y-%m-%d %H:%M UTC")),
+                        None => String::new(),
+                    }
+                ),
+                entity_type: Some("blood_issues".into()),
+                entity_id: Some(issue_id),
+            },
+        )
+        .await;
+    }
     Ok(issue_id)
 }
+// ── FIX-A: second-person verification of an ABO-incompatible release ───────────
+
+/// The co-signature queue. RBAC: `BloodBankVerify`.
+///
+/// Ordered the way a supervisor should work it: overdue first, then known-
+/// incompatible ahead of untyped, then soonest deadline. The bounded LIMIT is
+/// not cosmetic — the queue is polled on every dashboard render, and an
+/// unbounded oversight table would eventually do to this screen what the
+/// unbounded patient list did to the registry.
+#[tauri::command]
+pub async fn get_pending_emergency_verifications(
+    pool: tauri::State<'_, PgPool>,
+    session: tauri::State<'_, SessionState>,
+    limit: Option<i32>,
+) -> Result<Vec<PendingEmergencyVerification>, String> {
+    let _s = rbac::require(&session, Permission::BloodBankVerify)?;
+    let cap = limit.unwrap_or(100).clamp(1, 500) as i64;
+
+    let rows = sqlx::query_as::<_, PendingEmergencyVerification>(
+        r#"
+        SELECT o.id,
+               o.issue_id,
+               i.issue_number,
+               o.unit_id,
+               u.unit_number,
+               o.patient_id,
+               (p.first_name || ' ' || p.last_name) AS patient_name,
+               o.issued_by_user_id,
+               COALESCE(iu.username, 'unknown') AS issued_by_name,
+               o.reason_code,
+               o.clinical_indication,
+               o.physician_order_ref,
+               o.unit_group,
+               o.unit_rh,
+               o.patient_group,
+               o.patient_rh,
+               o.patient_untyped,
+               o.verify_due_at,
+               o.created_at,
+               GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - o.verify_due_at)) / 3600))::int
+                   AS hours_overdue,
+               CASE
+                   WHEN o.verify_due_at < NOW() THEN 'overdue'
+                   WHEN o.patient_untyped THEN 'untyped'
+                   ELSE 'incompatible'
+               END AS severity
+        FROM blood_emergency_overrides o
+        JOIN blood_issues i ON i.id = o.issue_id
+        JOIN blood_units  u ON u.id = o.unit_id
+        JOIN patients     p ON p.id = o.patient_id
+        LEFT JOIN users   iu ON iu.id = o.issued_by_user_id
+        WHERE o.verification_required = TRUE
+          AND o.verified_at IS NULL
+        ORDER BY (o.verify_due_at < NOW()) DESC,
+                 o.patient_untyped ASC,
+                 o.verify_due_at ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(cap)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| sanitize_db_error(&e))?;
+    Ok(rows)
+}
+
+/// Co-sign an ABO-incompatible release. RBAC: `BloodBankVerify`.
+///
+/// Three properties make this a real second signature rather than a rubber stamp:
+///
+/// 1. IT MUST BE A DIFFERENT PERSON — `issued_by_user_id` is compared against the
+///    session and self-verification is refused. That is the whole point: one
+///    operator working alone can no longer close their own paperwork.
+/// 2. IT REQUIRES THE VERIFIER'S OWN PASSWORD — holding an open session is not
+///    enough, so the co-signature is attributable to a person at a point in time.
+/// 3. IT RECORDS WHAT WAS CHECKED — notes are mandatory, and a discrepancy is a
+///    first-class outcome rather than something hidden in free text.
+///
+/// The release is NOT retroactively undone: the unit is already issued and the
+/// blood may already be transfused, and marking that as invalid would be a lie
+/// about what happened. Disagreement is recorded and escalated instead.
+#[tauri::command]
+pub async fn verify_blood_issue(
+    pool: tauri::State<'_, PgPool>,
+    session: tauri::State<'_, SessionState>,
+    issue_id: i32,
+    password: String,
+    agreed: bool,
+    discrepancy: Option<String>,
+    verification_notes: Option<String>,
+) -> Result<(), String> {
+    let s = rbac::require(&session, Permission::BloodBankVerify)?;
+
+    // `agreed` is the affirmative act ("I have independently checked this
+    // release"). A caller that omits it has confirmed nothing.
+    if !agreed {
+        return Err(
+            "Tick the confirmation that you have independently checked this release before \
+             co-signing it."
+                .to_string(),
+        );
+    }
+
+    // Second-person authentication. The password is verified against the
+    // VERIFIER's own account — never the issuer's — so a borrowed or hijacked
+    // session cannot close the loop that the RBAC check just opened.
+    let hash: Option<String> =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1 AND is_active = TRUE")
+            .bind(s.user_id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| sanitize_db_error(&e))?;
+    let hash = hash.ok_or_else(|| "Your account is not active.".to_string())?;
+    if !crate::auth::verify_password_async(&password, &hash).await {
+        audit::for_session(
+            pool.inner(),
+            &s,
+            "blood_override_verify_failed",
+            "blood_issues",
+            Some(&issue_id.to_string()),
+            Some(serde_json::json!({ "reason": "bad_password" })),
+        )
+        .await;
+        return Err("Incorrect password. The co-signature was not recorded.".to_string());
+    }
+
+    let mut tx = pool.begin().await.map_err(|e| sanitize_db_error(&e))?;
+
+    // Lock the oversight row. FOR UPDATE is what makes "already co-signed" a
+    // decision made on fresh data: two verifiers clicking at the same moment
+    // cannot both write a signature.
+    let row: Option<(i32, Option<i32>, bool, Option<chrono::DateTime<chrono::Utc>>)> =
+        sqlx::query_as(
+            r#"SELECT id, issued_by_user_id, verification_required, verified_at
+               FROM blood_emergency_overrides
+               WHERE issue_id = $1 FOR UPDATE"#,
+        )
+        .bind(issue_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| sanitize_db_error(&e))?;
+
+    let (override_id, issued_by_user_id, required, already_verified) = row.ok_or_else(|| {
+        format!(
+            "Blood issue {} has no emergency-override record, so there is nothing to \
+             co-sign. Routine (ABO-compatible) issues do not require verification.",
+            issue_id
+        )
+    })?;
+
+    if !required || already_verified.is_some() {
+        return Err(format!(
+            "Blood issue {} was already co-signed; verification is closed.",
+            issue_id
+        ));
+    }
+    if let Some(issuer) = issued_by_user_id {
+        if issuer == s.user_id {
+            return Err(
+                "You released this unit, so you cannot co-sign your own override. A second \
+                 blood-bank holder with 'bloodbank.verify' must review it."
+                    .to_string(),
+            );
+        }
+    }
+
+    let notes = verification_notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("");
+    if notes.chars().count() < 10 {
+        return Err(format!(
+            "Record what you checked (at least 10 characters, currently {}). \
+             'verified' alone is not an audit trail.",
+            notes.chars().count()
+        ));
+    }
+
+    let discrepancy = discrepancy
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+
+
+    sqlx::query(
+        r#"UPDATE blood_emergency_overrides
+           SET verification_required = FALSE,
+               verified_by_user_id = $1,
+               verified_at = NOW()
+           WHERE id = $2"#,
+    )
+    .bind(s.user_id)
+    .bind(override_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| sanitize_db_error(&e))?;
+
+    // The issue row mirrors the flag so any blood-issues list (and the frontend
+    // badge) shows the state without joining the oversight table.
+    sqlx::query(
+        r#"UPDATE blood_issues
+           SET override_verification_required = FALSE,
+               override_verified_by_user_id = $1,
+               override_verified_at = NOW(),
+               updated_at = NOW()
+           WHERE id = $2"#,
+    )
+    .bind(s.user_id)
+    .bind(issue_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| sanitize_db_error(&e))?;
+
+    tx.commit().await.map_err(|e| sanitize_db_error(&e))?;
+
+    audit::for_session(
+        pool.inner(),
+        &s,
+        "blood_override_verify",
+        "blood_issues",
+        Some(&issue_id.to_string()),
+        Some(serde_json::json!({
+            "override_id": override_id,
+            "issued_by_user_id": issued_by_user_id,
+            "verified_by_user_id": s.user_id,
+            "verification_notes": notes,
+            "discrepancy": discrepancy,
+        })),
+    )
+    .await;
+
+    // A flagged discrepancy is the one outcome that must not disappear into a
+    // log: route it to the blood-bank role as well as the audit trail.
+    if let Some(d) = discrepancy {
+        let _ = crate::commands::notifications::emit(
+            pool.inner(),
+            crate::commands::notifications::NotificationOut {
+                user_id: None,
+                role_target: Some(rbac::ROLE_LAB_TECH.to_string()),
+                kind: "blood_override_discrepancy".into(),
+                title: format!("Discrepancy flagged on blood issue {}", issue_id),
+                body: format!(
+                    "Reviewer flagged an ABO-incompatible release: {}. Verifier notes: {}",
+                    d, notes
+                ),
+                entity_type: Some("blood_issues".into()),
+                entity_id: Some(issue_id),
+            },
+        )
+        .await;
+    }
+    Ok(())
+}
+
 
 /// Receive/return blood back to the bank (unused return).
 /// RBAC: `BloodBankIssue`. Audit-logged. Moves the unit back to 'available'.
@@ -3462,9 +4095,9 @@ fn is_abo_rh_compatible(
 // ════════════════════════════════════════════════════════════════════════════
 //
 // These tests cover the pure functions in this module: the state machine,
-// enum validation, and ABO/Rh compatibility logic. They require no database
-// and no Tauri runtime — they are standard Rust unit tests runnable via
-// `cargo test --lib blood_bank`.
+// enum validation, ABO/Rh compatibility logic, and (FIX-A) the emergency
+// override contract. They require no database and no Tauri runtime — they are
+// standard Rust unit tests runnable via `cargo test --lib blood_bank`.
 //
 // Tests NOT included here (require DB + Tauri runtime):
 //   - Integration tests (donation/screening/issue/transfusion/return/discard)
@@ -3476,6 +4109,200 @@ fn is_abo_rh_compatible(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── FIX-A: the emergency-release override contract ────────────────────────
+    //
+    // These lock down the exact defect this change fixes. The old gate was
+    // `issue_type == "emergency" && !clinical_indication.is_empty()`: a one-word
+    // indication satisfied it. Each case below is written as the REFUSAL it must
+    // produce, so loosening one back to "some non-empty text" re-opens the
+    // bypass and fails the suite.
+
+    /// Minimal `CreateBloodIssue` builder so each test states only the fields
+    /// relevant to the override being exercised.
+    fn issue_with_override(
+        reason: Option<&str>,
+        indication: Option<&str>,
+        order_ref: Option<&str>,
+    ) -> CreateBloodIssue {
+        CreateBloodIssue {
+            unit_id: 1,
+            patient_id: 1,
+            reservation_id: None,
+            crossmatch_id: None,
+            doctor_id: None,
+            issued_to_location: None,
+            issue_type: "emergency".to_string(),
+            clinical_indication: indication.map(|s| s.to_string()),
+            special_instructions: None,
+            override_reason_code: reason.map(|s| s.to_string()),
+            physician_order_ref: order_ref.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn fix_a_override_requires_a_reason_code() {
+        // A long, sincere indication and a real order reference are NOT enough:
+        // without a closed reason code there is nothing to count or review by.
+        let err = validate_emergency_override(&issue_with_override(
+            None,
+            Some("Massive hemorrhage, four units PRBC outstanding"),
+            Some("TRAUMA-ORDER-4471"),
+        ))
+        .expect_err("missing reason code must be refused");
+        assert!(
+            err.contains("override_reason_code"),
+            "the error must name the missing field: {err}"
+        );
+    }
+
+    #[test]
+    fn fix_a_override_rejects_a_free_text_reason() {
+        // The vocabulary is closed. If an operator can type "because", the field
+        // is decoration rather than a control.
+        let err = validate_emergency_override(&issue_with_override(
+            Some("because"),
+            Some("Massive hemorrhage, four units PRBC outstanding"),
+            Some("TRAUMA-ORDER-4471"),
+        ))
+        .expect_err("a reason outside the closed vocabulary must be refused");
+        assert!(
+            err.contains("override_reason_code"),
+            "the error must name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn fix_a_override_rejects_a_one_word_indication() {
+        // THE REGRESSION TEST. "urgent" is exactly what the old code accepted.
+        let err = validate_emergency_override(&issue_with_override(
+            Some("massive_hemorrhage"),
+            Some("urgent"),
+            Some("TRAUMA-ORDER-4471"),
+        ))
+        .expect_err("a one-word indication must be refused");
+        assert!(
+            err.contains(&MIN_INDICATION_LEN.to_string()),
+            "the error must state the required length: {err}"
+        );
+    }
+
+    #[test]
+    fn fix_a_override_accepts_a_full_justification() {
+        let ok = validate_emergency_override(&issue_with_override(
+            Some("massive_transfusion_protocol"),
+            Some("Massive hemorrhage, MTP activated, no O-negative left in stock"),
+            Some("TRAUMA-ORDER-4471"),
+        ))
+        .expect("a fully documented override must be accepted");
+        assert_eq!(ok.0, "massive_transfusion_protocol");
+        assert_eq!(ok.2, "TRAUMA-ORDER-4471");
+    }
+
+    #[test]
+    fn fix_a_override_requires_a_physician_order_reference() {
+        let err = validate_emergency_override(&issue_with_override(
+            Some("massive_hemorrhage"),
+            Some("Massive hemorrhage, four units PRBC outstanding"),
+            None,
+        ))
+        .expect_err("a release with no authorising order must be refused");
+        assert!(
+            err.contains("physician order"),
+            "the error must name what is missing: {err}"
+        );
+    }
+
+    #[test]
+    fn fix_a_override_rejects_an_over_long_order_reference() {
+        // Bounded, not truncated: silently shortening a reference would make the
+        // stored value differ from the one the operator confirmed.
+        let long = "X".repeat(81);
+        let err = validate_emergency_override(&issue_with_override(
+            Some("massive_hemorrhage"),
+            Some("Massive hemorrhage, four units PRBC outstanding"),
+            Some(&long),
+        ))
+        .expect_err("an 81-character order reference must be refused");
+        assert!(err.contains("80 characters"), "message should state the cap: {err}");
+    }
+
+    #[test]
+    fn fix_a_override_trims_before_validating() {
+        // Whitespace is not a reason code, and a pasted value with a trailing
+        // newline must not be rejected for a reason the operator cannot see.
+        let ok = validate_emergency_override(&issue_with_override(
+            Some("  massive_hemorrhage  "),
+            Some("   Massive hemorrhage, four units PRBC outstanding   "),
+            Some("  TRAUMA-ORDER-4471  "),
+        ))
+        .expect("surrounding whitespace must be tolerated");
+        assert_eq!(ok.0, "massive_hemorrhage");
+        assert_eq!(ok.1, "Massive hemorrhage, four units PRBC outstanding");
+        assert_eq!(ok.2, "TRAUMA-ORDER-4471");
+    }
+
+    #[test]
+    fn fix_a_override_reason_codes_match_the_database_constraint() {
+        // The table carries a CHECK constraint listing the same five codes. If
+        // one side is edited without the other, every override starts failing
+        // with an opaque constraint error at 3 AM.
+        const EXPECTED: [&str; 5] = [
+            "massive_hemorrhage",
+            "massive_transfusion_protocol",
+            "no_compatible_unit_available",
+            "emergency_unknown_blood_group",
+            "other_documented",
+        ];
+        for code in EXPECTED {
+            assert!(
+                VALID_OVERRIDE_REASON_CODES.contains(&code),
+                "{code} must stay in both the Rust list and the SQL CHECK constraint"
+            );
+        }
+        assert_eq!(VALID_OVERRIDE_REASON_CODES.len(), EXPECTED.len());
+    }
+
+    #[test]
+    fn fix_a_indication_floor_is_25_characters() {
+        // Pinned because the same number is quoted in three places (the Rust
+        // constant, the SQL-facing error text and the UI counter). Changing one
+        // without the others is a silent policy change.
+        assert_eq!(MIN_INDICATION_LEN, 25);
+        let at_floor = "x".repeat(MIN_INDICATION_LEN);
+        validate_emergency_override(&issue_with_override(
+            Some("other_documented"),
+            Some(&at_floor),
+            Some("ORDER-1"),
+        ))
+        .expect("an indication exactly at the floor must be accepted");
+    }
+
+    // ── FIX-B: list bounds ───────────────────────────────────────────────────
+    //
+    // The clamp is all that stands between a client and an unbounded 50k-row
+    // query, so its edges are pinned here rather than discovered in production.
+
+    #[test]
+    fn fix_b_page_bounds_defaults_and_clamps() {
+        use crate::db::{page_bounds, LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT};
+        // No arguments = the documented default, not "no limit".
+        assert_eq!(page_bounds(None, None), (LIST_DEFAULT_LIMIT, 0));
+        // A hostile or merely oversized limit is capped, not honoured.
+        assert_eq!(
+            page_bounds(Some(100_000), Some(0)).0,
+            LIST_MAX_LIMIT,
+            "an oversized limit must be capped at LIST_MAX_LIMIT"
+        );
+        // A zero/negative limit is a client bug, not a request for no rows —
+        // silently returning an empty registry would be the worst outcome.
+        assert_eq!(page_bounds(Some(0), None), (LIST_DEFAULT_LIMIT, 0));
+        assert_eq!(page_bounds(Some(-5), None), (LIST_DEFAULT_LIMIT, 0));
+        // A negative offset must not become a Postgres error.
+        assert_eq!(page_bounds(Some(10), Some(-1)).1, 0);
+        // Normal values pass through untouched.
+        assert_eq!(page_bounds(Some(25), Some(50)), (25, 50));
+    }
 
     // ── State Machine Tests (UT-SM-001 through UT-SM-024) ───────────────────
 

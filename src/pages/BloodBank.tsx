@@ -68,6 +68,8 @@ import {
   useDiscardBloodUnit,
   usePatientsEhr,
   useDoctors,
+  usePendingEmergencyVerifications,
+  useVerifyBloodIssue,
 } from "@/lib/queries";
 import { useAuth } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/rbac";
@@ -81,7 +83,9 @@ import type {
   CreateBloodIssue,
   CreateBloodTransfusion,
   CreateBloodDiscard,
+  PendingEmergencyVerification,
 } from "@/lib/models";
+import { OVERRIDE_REASON_CODES } from "@/lib/models";
 import {
   PageContainer,
   PageHeader,
@@ -108,6 +112,48 @@ const COMPONENT_TYPES = [
   "granulocytes",
 ] as const;
 const ISSUE_TYPES = ["routine", "emergency", "uncrossmatched", "autologous"] as const;
+
+/**
+ * FIX-A: advisory ABO/Rh read used by the issue dialog.
+ *
+ * Returns one of:
+ *   "unknown"       — nothing selected yet, or the record has no blood group
+ *   "untyped"       — the patient has no blood group on file: compatibility is
+ *                     UNKNOWN, which is clinically different from "compatible"
+ *   "compatible"    — red-cell compatible under the ISBT matrix
+ *   "incompatible"  — the release would be ABO/Rh incompatible
+ *
+ * This mirrors the server's rules for the sole purpose of warning the operator
+ * early. It is deliberately fail-safe in the "warn" direction: anything it
+ * cannot parse is reported as needing attention rather than as compatible.
+ */
+function aboTypingState(
+  unitGroup?: string | null,
+  unitRh?: string | null,
+  patientGroup?: string | null,
+): "unknown" | "untyped" | "compatible" | "incompatible" {
+  if (!unitGroup || !unitRh) return "unknown";
+  if (!patientGroup) return "untyped";
+  const ug = unitGroup.trim().toUpperCase();
+  const pr = patientGroup.trim().toUpperCase();
+  const ur = unitRh.trim();
+  if (!/^(A|B|AB|O)$/.test(ug)) return "unknown";
+  if (!/^(A|B|AB|O)([+-])$/.test(pr)) return "untyped";
+  const prGroup = pr.slice(0, -1);
+  const prRhNeg = pr.endsWith("-");
+  // Red-cell compatibility: O donates to all; A and B donate to AB; identical
+  // groups always match.
+  const aboOk =
+    ug === "O" ||
+    ug === prGroup ||
+    (ug === "A" && prGroup === "AB") ||
+    (ug === "B" && prGroup === "AB") ||
+    (ug === "AB" && prGroup === "AB");
+  // Rh: Rh-negative units are safe for either patient; an Rh-positive unit is
+  // only safe for an Rh-positive patient.
+  const rhSafe = ur === "-" ? true : !prRhNeg;
+  return aboOk && rhSafe ? "compatible" : "incompatible";
+}
 const DISCARD_REASONS = [
   "expired",
   "contaminated",
@@ -197,6 +243,11 @@ export function BloodBank() {
   const canTransfuse = has(PERMISSIONS.BloodBankTransfuse);
   const canDiscard = has(PERMISSIONS.BloodBankDiscard);
   const canManage = has(PERMISSIONS.BloodBankManage);
+  // FIX-A: co-signing an ABO-incompatible release is a SEPARATE permission from
+  // issuing one, and is deliberately not given to the doctor role. The UI gates
+  // on it so a user without it sees that the queue exists (and that it is not
+  // theirs to clear) instead of silently seeing nothing.
+  const canVerify = has(PERMISSIONS.BloodBankVerify);
 
   return (
     <PageContainer>
@@ -232,7 +283,7 @@ export function BloodBank() {
         </TabsContent>
 
         <TabsContent value="issues" className="mt-4">
-          <IssuesTab canIssue={canIssue} />
+          <IssuesTab canIssue={canIssue} canVerify={canVerify} />
         </TabsContent>
 
         <TabsContent value="transfusions" className="mt-4">
@@ -657,14 +708,29 @@ function CrossmatchTab({ canCrossmatch }: { canCrossmatch: boolean }) {
 
 // ── Issues Tab ─────────────────────────────────────────────────────────────
 
-function IssuesTab({ canIssue }: { canIssue: boolean }) {
+function IssuesTab({ canIssue, canVerify }: { canIssue: boolean; canVerify: boolean }) {
+  const { session } = useAuth();
   const [page, setPage] = useState(1);
   const [rowsPerPage, setRowsPerPage] = useState(10);
   const [issueDialogOpen, setIssueDialogOpen] = useState(false);
+  // FIX-A: which pending override is open in the co-sign dialog, if any.
+  const [verifying, setVerifying] = useState<PendingEmergencyVerification | null>(null);
 
   const { data: resp, isLoading } = useBloodIssues(undefined, undefined, page, rowsPerPage);
   const issues = resp?.issues ?? [];
   const total = resp?.total ?? 0;
+  // The oversight queue command is `bloodbank.verify`-gated, so it is only
+  // requested by people who can actually act on it. Everyone else still SEES that
+  // a release is unsigned, via the `override_verification_required` flag carried
+  // on the issue rows in the table below.
+  const { data: pending = [] } = usePendingEmergencyVerifications(100, canVerify);
+  // A verifier's own releases are removed here for the same reason the server
+  // refuses them: showing a row that cannot be actioned is worse than not
+  // showing it, because it looks like a queue someone else will clear.
+  const myPending = canVerify
+    ? pending.filter((p) => p.issued_by_user_id !== session?.user.id)
+    : [];
+  const unverifiedCount = issues.filter((i) => i.override_verification_required).length;
 
   const ISSUE_TYPE_STYLE: Record<string, { color: string; label: string }> = {
     routine: { color: "var(--primary)", label: "Routine" },
@@ -682,6 +748,36 @@ function IssuesTab({ canIssue }: { canIssue: boolean }) {
           </Button>
         )}
       </PageToolbar>
+
+      {/* FIX-A: the outstanding second-person review, rendered ABOVE the issue
+          table rather than in a settings page. A control whose only home is the
+          audit log is a control that does not exist. */}
+      {unverifiedCount > 0 && (
+        <div className="mb-4 flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+          <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-destructive" />
+          <div>
+            <p className="font-semibold text-destructive">
+              {unverifiedCount} ABO-incompatible release{unverifiedCount === 1 ? "" : "s"} on this page
+              {myPending.length > 0 ? ` · ${myPending.length} awaiting co-signature` : ""}
+            </p>
+            <p className="text-muted-foreground">
+              The units were released and are transfusable — the paperwork is what is quarantined.
+              {canVerify
+                ? " Each one needs a second, independent blood-bank holder to check and co-sign it."
+                : " A second, independent blood-bank holder must check and co-sign each one."}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {myPending.length > 0 && (
+        <div className="mb-4 space-y-2">
+          <p className="text-sm font-semibold">Pending second-person review</p>
+          {myPending.map((p) => (
+            <PendingVerificationRow key={p.id} item={p} onReview={() => setVerifying(p)} />
+          ))}
+        </div>
+      )}
 
       {isLoading ? (
         <LoadingState rows={6} />
@@ -709,7 +805,24 @@ function IssuesTab({ canIssue }: { canIssue: boolean }) {
             <TableBody>
               {issues.map((i) => (
                 <TableRow key={i.id}>
-                  <TableCell className="font-mono text-xs">{i.issue_number}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {i.issue_number}
+                    {/* FIX-A: the quarantine is visible in the list itself. A
+                        released-but-unsigned unit must never look identical to a
+                        clean one in the same column. */}
+                    {i.override_verification_required && (
+                      <span className="ml-2 inline-flex items-center gap-1 rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-semibold text-destructive">
+                        <AlertTriangle className="h-3 w-3" />
+                        OVERRIDE — UNVERIFIED
+                      </span>
+                    )}
+                    {i.override_verified_at && !i.override_verification_required && (
+                      <span className="ml-2 inline-flex items-center gap-1 rounded bg-status-completed/10 px-1.5 py-0.5 text-[10px] font-semibold text-status-completed">
+                        <ShieldCheck className="h-3 w-3" />
+                        CO-SIGNED
+                      </span>
+                    )}
+                  </TableCell>
                   <TableCell className="font-mono text-xs">{i.unit_number ?? "—"}</TableCell>
                   <TableCell>{i.patient_name ?? "—"}</TableCell>
                   <TableCell><StatusPill status={i.issue_type} map={ISSUE_TYPE_STYLE} /></TableCell>
@@ -744,9 +857,198 @@ function IssuesTab({ canIssue }: { canIssue: boolean }) {
       {issueDialogOpen && (
         <IssueBloodDialog open={issueDialogOpen} onOpenChange={setIssueDialogOpen} />
       )}
+      {verifying && (
+        <VerifyOverrideDialog
+          item={verifying}
+          open={!!verifying}
+          onOpenChange={(o) => { if (!o) setVerifying(null); }}
+        />
+      )}
     </SectionCard>
   );
 }
+
+/**
+ * FIX-A: one line of the pending second-person review queue.
+ *
+ * The wording differs per severity because they are different acts: an UNTYPED
+ * patient is the system working as designed in a genuine emergency, while a
+ * KNOWN-INCOMPATIBLE release against a patient who WAS typed is the one that
+ * should keep a reviewer awake.
+ */
+function PendingVerificationRow({
+  item,
+  onReview,
+}: {
+  item: PendingEmergencyVerification;
+  onReview: () => void;
+}) {
+  const overdue = item.hours_overdue > 0;
+  return (
+    <div
+      className={`flex flex-wrap items-center justify-between gap-3 rounded-md border p-3 text-sm ${
+        overdue ? "border-destructive/50 bg-destructive/5" : "border-border"
+      }`}
+    >
+      <div className="min-w-0">
+        <p className="font-medium">
+          <span className="font-mono text-xs">{item.issue_number}</span> · unit {item.unit_number} (
+          {item.unit_group ?? "?"}
+          {item.unit_rh ?? ""}) → {item.patient_name} (
+          {item.patient_untyped ? "UNTYPED" : `${item.patient_group ?? "?"}${item.patient_rh ?? ""}`})
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {item.patient_untyped ? "Uncrossmatched emergency release" : "ABO/Rh INCOMPATIBLE"} · released by{" "}
+          {item.issued_by_name} · {item.clinical_indication}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Order {item.physician_order_ref} ·{" "}
+          {overdue
+            ? `co-signature overdue by ${item.hours_overdue}h`
+            : `co-signature due ${formatDateTime(item.verify_due_at)}`}
+        </p>
+      </div>
+      <Button size="sm" variant={overdue ? "destructive" : "outline"} onClick={onReview}>
+        Review &amp; co-sign
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * FIX-A: the co-signature dialog.
+ *
+ * It asks for the reviewer's PASSWORD, not just a click — the server refuses the
+ * signature without it, because a "second signature" an unattended session can
+ * produce is not a second signature. It also requires WHAT was checked, and
+ * offers "I disagree" as a first-class answer: a control with only an approve
+ * button pushes people towards approving.
+ */
+function VerifyOverrideDialog({
+  item,
+  open,
+  onOpenChange,
+}: {
+  item: PendingEmergencyVerification;
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+}) {
+  const verify = useVerifyBloodIssue();
+  const [password, setPassword] = useState("");
+  const [agreed, setAgreed] = useState(false);
+  const [discrepancy, setDiscrepancy] = useState(false);
+  const [notes, setNotes] = useState("");
+  const [discrepancyDetail, setDiscrepancyDetail] = useState("");
+
+  const notesLen = notes.trim().length;
+  const canSubmit =
+    agreed && password.length > 0 && notesLen >= 10 && (!discrepancy || discrepancyDetail.trim().length > 0);
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    await verify.mutateAsync({
+      issueId: item.issue_id,
+      password,
+      agreed,
+      discrepancy: discrepancy ? discrepancyDetail.trim() : null,
+      verificationNotes: notes.trim(),
+    });
+    setPassword("");
+    setAgreed(false);
+    setNotes("");
+    setDiscrepancy(false);
+    setDiscrepancyDetail("");
+    onOpenChange(false);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Co-sign emergency release {item.issue_number}</DialogTitle>
+          <DialogDescription>
+            {item.patient_untyped
+              ? "This patient had no blood typing when the unit was released. Check the release was clinically correct."
+              : "This unit is ABO/Rh INCOMPATIBLE with the patient as typed. Check carefully before co-signing."}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3 py-2 text-sm">
+          <div className="space-y-1 rounded-md border p-3 text-xs">
+            <p><span className="font-semibold">Unit</span> {item.unit_number} — {item.unit_group ?? "?"}{item.unit_rh ?? ""}</p>
+            <p>
+              <span className="font-semibold">Patient</span> {item.patient_name} —{" "}
+              {item.patient_untyped ? "UNTYPED at release" : `${item.patient_group ?? "?"}${item.patient_rh ?? ""}`}
+            </p>
+            <p>
+              <span className="font-semibold">Reason code</span>{" "}
+              {OVERRIDE_REASON_CODES.find((r) => r.value === item.reason_code)?.label ?? item.reason_code}
+            </p>
+            <p><span className="font-semibold">Indication</span> {item.clinical_indication}</p>
+            <p><span className="font-semibold">Physician order</span> {item.physician_order_ref}</p>
+            <p>
+              <span className="font-semibold">Released by</span> {item.issued_by_name} at{" "}
+              {formatDateTime(item.created_at)}
+            </p>
+          </div>
+
+          <FormField label="What did you check?" required>
+            <Textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={2}
+              placeholder="e.g. Confirmed patient typing with the lab; unit label read against the barcoded unit; trauma order found."
+            />
+            {notesLen < 10 && (
+              <p className="text-xs text-muted-foreground">
+                {10 - notesLen} more characters — &quot;verified&quot; alone is not an audit trail.
+              </p>
+            )}
+          </FormField>
+
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" className="mt-1" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
+            <span>
+              I have independently checked this release and confirm it was correct. I am not the person who
+              released the unit.
+            </span>
+          </label>
+
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" className="mt-1" checked={discrepancy} onChange={(e) => setDiscrepancy(e.target.checked)} />
+            <span>I disagree with this release (flag it for the blood-bank supervisor)</span>
+          </label>
+          {discrepancy && (
+            <FormField label="What was wrong?" required>
+              <Input
+                value={discrepancyDetail}
+                onChange={(e) => setDiscrepancyDetail(e.target.value)}
+                placeholder="e.g. Patient was typed O+ at 02:10; a compatible unit was in the fridge."
+              />
+            </FormField>
+          )}
+
+          <FormField label="Your password" required>
+            <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+            <p className="text-xs text-muted-foreground">
+              Re-entering your password is what makes this a second person&apos;s signature rather than a second
+              click.
+            </p>
+          </FormField>
+        </div>
+
+        <DialogFooter>
+          <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
+          <Button onClick={submit} disabled={!canSubmit || verify.isPending} variant={discrepancy ? "destructive" : "default"}>
+            {verify.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            {discrepancy ? "Record disagreement" : "Co-sign release"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 
 function ReturnButton({ issueId }: { issueId: number }) {
   const returnMutation = useReturnBloodUnit();
@@ -1355,13 +1657,40 @@ function IssueBloodDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
     issued_to_location: "",
     clinical_indication: "",
     special_instructions: "",
+    // FIX-A: the structured override. These are only meaningful — and only sent —
+    // when the selected pair is ABO/Rh incompatible or the patient is untyped.
+    override_reason_code: "",
+    physician_order_ref: "",
   });
 
   const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
+  // FIX-A: an ADVISORY client-side read of the same compatibility rules the
+  // server enforces. It exists so the operator learns the release will need an
+  // override BEFORE they press Issue, and can gather the reason code and the
+  // order reference while they still have time — not to make the decision. The
+  // Rust command re-derives compatibility and re-validates everything; a
+  // mismatch here only ever makes the UI stricter, never more permissive.
+  const selectedUnit = issuableUnits.find((u) => u.id === Number(form.unit_id));
+  const selectedPatient = patients.find((p) => p.id === Number(form.patient_id));
+  const typingState = aboTypingState(selectedUnit?.blood_group, selectedUnit?.rh_factor, selectedPatient?.blood_group);
+  const isOverrideIssueType = form.issue_type === "emergency" || form.issue_type === "uncrossmatched";
+  // Only an INCOMPATIBLE or UNTYPED pairing needs the override paperwork. A
+  // routine compatible release must not be made to fill it in, or people will
+  // learn to type filler to get past the form.
+  const overrideRequired = isOverrideIssueType && (typingState === "incompatible" || typingState === "untyped");
+  const indicationLength = form.clinical_indication.trim().length;
+  const overrideMissing: string[] = [];
+  if (overrideRequired) {
+    if (!form.override_reason_code) overrideMissing.push("a reason code");
+    if (indicationLength < 25) overrideMissing.push("a clinical indication of at least 25 characters");
+    if (!form.physician_order_ref.trim()) overrideMissing.push("a physician order reference");
+  }
+  const canSubmit = !!form.unit_id && !!form.patient_id && overrideMissing.length === 0;
+
   const submit = async () => {
-    if (!form.unit_id || !form.patient_id) return;
+    if (!canSubmit) return;
     const payload: CreateBloodIssue = {
       unit_id: Number(form.unit_id),
       patient_id: Number(form.patient_id),
@@ -1370,6 +1699,10 @@ function IssueBloodDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
       issued_to_location: form.issued_to_location.trim() || undefined,
       clinical_indication: form.clinical_indication.trim() || undefined,
       special_instructions: form.special_instructions.trim() || undefined,
+      // Only sent on an override: on a compatible release the backend ignores
+      // them, so there is no need for callers to pre-compute anything.
+      override_reason_code: overrideRequired ? form.override_reason_code : undefined,
+      physician_order_ref: overrideRequired ? form.physician_order_ref.trim() : undefined,
     };
     await issueBlood.mutateAsync(payload);
     onOpenChange(false);
@@ -1433,18 +1766,92 @@ function IssueBloodDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
           <FormField label="Issued to location">
             <Input value={form.issued_to_location} onChange={(e) => set("issued_to_location", e.target.value)} placeholder="e.g. OT, Ward 3, ICU" />
           </FormField>
-          <FormField label="Clinical indication">
+          <FormField label="Clinical indication" className={overrideRequired ? "col-span-2" : ""}>
             <Input value={form.clinical_indication} onChange={(e) => set("clinical_indication", e.target.value)} placeholder="e.g. Acute blood loss" />
           </FormField>
+
+          {/* FIX-A: the override block. It is REVEALED, not disabled, and it says
+              exactly what the release is and what will happen to it afterwards —
+              an operator must be able to see the consequence of pressing the
+              button, not discover it from a rejected request. */}
+          {overrideRequired && (
+            <div className="col-span-2 space-y-3 rounded-md border border-destructive/50 bg-destructive/5 p-3">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-destructive" />
+                <div className="space-y-1 text-sm">
+                  <p className="font-semibold text-destructive">
+                    {typingState === "incompatible"
+                      ? "ABO/Rh INCOMPATIBLE — an emergency override is required"
+                      : "Patient blood type is not recorded — this is an uncrossmatched emergency release"}
+                  </p>
+                  <p className="text-muted-foreground">
+                    {typingState === "incompatible" ? (
+                      <>
+                        Unit {selectedUnit?.unit_number} is{" "}
+                        <strong>{selectedUnit?.blood_group}{selectedUnit?.rh_factor}</strong> but {selectedPatient?.first_name}{" "}
+                        {selectedPatient?.last_name} is <strong>{selectedPatient?.blood_group}</strong>. Incompatible
+                        transfusion can cause an acute hemolytic reaction.
+                      </>
+                    ) : (
+                      <>
+                        {selectedPatient?.first_name} {selectedPatient?.last_name} has no blood group on file, so
+                        compatibility cannot be established. Unit {selectedUnit?.unit_number} (
+                        {selectedUnit?.blood_group}{selectedUnit?.rh_factor}) will be released unverified.
+                      </>
+                    )}
+                  </p>
+                  <p className="text-muted-foreground">
+                    The blood <em>will</em> be released — a massive hemorrhage does not wait for a typing. The
+                    release is recorded for mandatory second-person review by another blood-bank holder, and this
+                    account&apos;s emergency-release quota is counted against it.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <FormField label="Override reason" required>
+                  <Select value={form.override_reason_code} onValueChange={(v) => set("override_reason_code", v)}>
+                    <SelectTrigger><SelectValue placeholder="Select the reason" /></SelectTrigger>
+                    <SelectContent>
+                      {OVERRIDE_REASON_CODES.map((r) => (
+                        <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </FormField>
+                <FormField label="Physician order reference" required>
+                  <Input
+                    value={form.physician_order_ref}
+                    onChange={(e) => set("physician_order_ref", e.target.value)}
+                    placeholder="e.g. TRAUMA-ORDER-4471"
+                  />
+                </FormField>
+              </div>
+
+              {overrideRequired && indicationLength < 25 && (
+                <p className="text-xs text-destructive">
+                  Clinical indication is {indicationLength}/25 characters. State the hemorrhage and why no
+                  compatible unit was available — &quot;emergency&quot; is not an indication.
+                </p>
+              )}
+              {overrideMissing.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Still required before this release can proceed: {overrideMissing.join(", ")}.
+                </p>
+              )}
+            </div>
+          )}
+
           <FormField label="Special instructions" className="col-span-2">
             <Textarea value={form.special_instructions} onChange={(e) => set("special_instructions", e.target.value)} rows={2} />
           </FormField>
         </div>
         <DialogFooter>
           <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
-          <Button onClick={submit} disabled={issueBlood.isPending}>
+          <Button onClick={submit} disabled={issueBlood.isPending || !canSubmit}
+            variant={overrideRequired ? "destructive" : "default"}>
             {issueBlood.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            Issue blood
+            {overrideRequired ? "Release with override" : "Issue blood"}
           </Button>
         </DialogFooter>
       </DialogContent>
