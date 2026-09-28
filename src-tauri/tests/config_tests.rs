@@ -688,8 +688,7 @@ fn rctf_f01_live_v2_copy_migration_rehearsal() {
     // entropy). Snapshot its bytes so the rehearsal can assert it was
     // neither created, replaced, nor rotated — the migration must stay
     // inside the temp copy's directory.
-    let entropy_before: Option<Vec<u8>> =
-        std::fs::read("C:/ProgramData/HMS/entropy.key").ok();
+    let entropy_before: Option<Vec<u8>> = std::fs::read("C:/ProgramData/HMS/entropy.key").ok();
 
     // ── Stage the copy in an isolated temp dir (unique per run). ──
     let dir = std::env::temp_dir().join(format!(
@@ -761,8 +760,7 @@ fn rctf_f01_live_v2_copy_migration_rehearsal() {
     );
     // The production entropy key is neither created nor rotated by the
     // rehearsal (the temp copy gets its OWN key inside its own dir).
-    let entropy_after: Option<Vec<u8>> =
-        std::fs::read("C:/ProgramData/HMS/entropy.key").ok();
+    let entropy_after: Option<Vec<u8>> = std::fs::read("C:/ProgramData/HMS/entropy.key").ok();
     assert_eq!(
         entropy_before, entropy_after,
         "the rehearsal must not create, replace, or rotate the production entropy key"

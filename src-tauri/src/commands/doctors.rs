@@ -92,12 +92,11 @@ pub async fn ensure_doctor_profile(
     qualification: Option<&str>,
 ) -> Result<(), String> {
     // Already linked? Nothing to do — preserve any manual profile edits.
-    let linked: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM doctors WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let linked: Option<(i32,)> = sqlx::query_as("SELECT id FROM doctors WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
     if linked.is_some() {
         return Ok(());
     }
@@ -416,13 +415,12 @@ pub async fn create_login_for_doctor(
 
     let pool_ref = pool.inner();
 
-    let doctor: Option<(String, String, Option<String>, Option<i32>)> = sqlx::query_as(
-        "SELECT first_name, last_name, email, user_id FROM doctors WHERE id = $1",
-    )
-    .bind(doctor_id)
-    .fetch_optional(pool_ref)
-    .await
-    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    let doctor: Option<(String, String, Option<String>, Option<i32>)> =
+        sqlx::query_as("SELECT first_name, last_name, email, user_id FROM doctors WHERE id = $1")
+            .bind(doctor_id)
+            .fetch_optional(pool_ref)
+            .await
+            .map_err(|e| crate::db::sanitize_db_error(&e))?;
 
     let (first_name, last_name, email, existing_user_id) =
         doctor.ok_or_else(|| "Practitioner not found.".to_string())?;
@@ -438,9 +436,7 @@ pub async fn create_login_for_doctor(
     // password-generation system.
     let plain_password = crate::auth::generate_bootstrap_password();
     let hash = crate::auth::hash_password_async(&plain_password).await?;
-    let full_name = format!("{} {}", first_name, last_name)
-        .trim()
-        .to_string();
+    let full_name = format!("{} {}", first_name, last_name).trim().to_string();
 
     let mut tx = pool_ref
         .begin()
@@ -479,12 +475,13 @@ pub async fn create_login_for_doctor(
     // the SAME doctor). If another transaction linked it first, zero rows
     // match here and the whole operation rolls back — the UNIQUE constraint
     // on doctors.user_id is the final backstop even under true concurrency.
-    let link_result = sqlx::query("UPDATE doctors SET user_id = $1 WHERE id = $2 AND user_id IS NULL")
-        .bind(new_user_id)
-        .bind(doctor_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| crate::db::explain_db_error(&e))?;
+    let link_result =
+        sqlx::query("UPDATE doctors SET user_id = $1 WHERE id = $2 AND user_id IS NULL")
+            .bind(new_user_id)
+            .bind(doctor_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| crate::db::explain_db_error(&e))?;
 
     if link_result.rows_affected() != 1 {
         tx.rollback().await.ok();

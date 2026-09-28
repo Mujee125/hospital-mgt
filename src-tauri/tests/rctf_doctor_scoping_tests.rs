@@ -60,7 +60,11 @@ async fn state_for(pool: &PgPool, user_id: i32, token_hash: &str) -> SessionStat
 
 /// Build a mock Tauri app managing the real pool + a real, DB-loaded session
 /// for `user_id` — for the commands that take `tauri::State` directly.
-async fn app_for(pool: &PgPool, user_id: i32, token_hash: &str) -> tauri::App<tauri::test::MockRuntime> {
+async fn app_for(
+    pool: &PgPool,
+    user_id: i32,
+    token_hash: &str,
+) -> tauri::App<tauri::test::MockRuntime> {
     let session = load_session_for(pool, user_id, token_hash).await;
     mock_app(pool.clone(), Some(session))
 }
@@ -171,7 +175,10 @@ async fn rctf_a_b_c_own_list_ignores_malicious_doctor_filter() {
     assert!(
         with_malicious_filter.iter().all(|a| a.doctor_id == doc_a),
         "doctor_filter=B must be ignored/overridden for an own-scope session, got: {:?}",
-        with_malicious_filter.iter().map(|a| a.doctor_id).collect::<Vec<_>>()
+        with_malicious_filter
+            .iter()
+            .map(|a| a.doctor_id)
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         no_filter.len(),
@@ -256,7 +263,10 @@ async fn rctf_e_g_update_cross_doctor_rejected_and_reassignment_blocked() {
         },
     )
     .await;
-    assert!(cross_update.is_err(), "doctor A must not update doctor B's appointment");
+    assert!(
+        cross_update.is_err(),
+        "doctor A must not update doctor B's appointment"
+    );
 
     // Test G: Doctor A updates their OWN appointment but tries to reassign
     // it to Doctor B via the request body's doctor_id — must be silently
@@ -313,8 +323,12 @@ async fn rctf_f_status_change_cross_doctor_rejected() {
     seed_session_row(&pool, doc_a_user, "hash_rctf_f_doc_a").await;
     let sess = state_for(&pool, doc_a_user, "hash_rctf_f_doc_a").await;
 
-    let result = update_appointment_status_core(&pool, &sess, appt_b, "cancelled".to_string()).await;
-    assert!(result.is_err(), "doctor A must not change doctor B's appointment status");
+    let result =
+        update_appointment_status_core(&pool, &sess, appt_b, "cancelled".to_string()).await;
+    assert!(
+        result.is_err(),
+        "doctor A must not change doctor B's appointment status"
+    );
 
     // Separately: no seeded role holds AppointmentsDelete without also
     // holding full AppointmentsView — a doctor-role session must be denied
@@ -323,7 +337,10 @@ async fn rctf_f_status_change_cross_doctor_rejected() {
     let app = app_for(&pool, doc_a_user, "hash_rctf_f_doc_a").await;
     let (pool_s, sess_s) = states(&app);
     let delete_result = delete_appointment(pool_s, sess_s, appt_b).await;
-    assert!(delete_result.is_err(), "doctor role must not be able to delete any appointment");
+    assert!(
+        delete_result.is_err(),
+        "doctor role must not be able to delete any appointment"
+    );
 }
 
 // ── rctf_h: stats scoping ───────────────────────────────────────────────────
@@ -351,7 +368,9 @@ async fn rctf_h_stats_scoped_no_cross_doctor_leak() {
     seed_session_row(&pool, doc_a_user, "hash_rctf_h_doc_a").await;
     let app = app_for(&pool, doc_a_user, "hash_rctf_h_doc_a").await;
     let (pool_s, sess_s) = states(&app);
-    let stats = get_appointment_stats(pool_s, sess_s).await.expect("doctor A stats");
+    let stats = get_appointment_stats(pool_s, sess_s)
+        .await
+        .expect("doctor A stats");
     assert_eq!(
         stats.total, 1,
         "doctor A's stats must reflect only their own appointment, not doctor B's"
@@ -433,17 +452,17 @@ async fn rctf_k_create_login_happy_path() {
 
     let app = app_for(&pool, admin, "hash_rctf_k_admin").await;
     let (pool_s, sess_s) = states(&app);
-    let (username, password) = create_login_for_doctor(
-        pool_s,
-        sess_s,
-        doctor_id,
-        "kay.practitioner".to_string(),
-    )
-    .await
-    .expect("create_login_for_doctor happy path");
+    let (username, password) =
+        create_login_for_doctor(pool_s, sess_s, doctor_id, "kay.practitioner".to_string())
+            .await
+            .expect("create_login_for_doctor happy path");
 
     assert_eq!(username, "kay.practitioner");
-    assert!(password.len() >= 8, "temporary password looks too short: {:?}", password);
+    assert!(
+        password.len() >= 8,
+        "temporary password looks too short: {:?}",
+        password
+    );
 
     let (linked_user_id,): (Option<i32>,) =
         sqlx::query_as("SELECT user_id FROM doctors WHERE id = $1")
@@ -453,13 +472,12 @@ async fn rctf_k_create_login_happy_path() {
             .unwrap();
     let linked_user_id = linked_user_id.expect("doctor.user_id must now be set");
 
-    let (db_username, must_change_password): (String, bool) = sqlx::query_as(
-        "SELECT username, must_change_password FROM users WHERE id = $1",
-    )
-    .bind(linked_user_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (db_username, must_change_password): (String, bool) =
+        sqlx::query_as("SELECT username, must_change_password FROM users WHERE id = $1")
+            .bind(linked_user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let (role_count,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM user_roles ur JOIN roles r ON r.id = ur.role_id \
          WHERE ur.user_id = $1 AND r.name = 'doctor'",
@@ -470,8 +488,14 @@ async fn rctf_k_create_login_happy_path() {
     .unwrap();
 
     assert_eq!(db_username, "kay.practitioner");
-    assert!(must_change_password, "must_change_password must be TRUE for a freshly created login");
-    assert_eq!(role_count, 1, "the new user must have the doctor role assigned exactly once");
+    assert!(
+        must_change_password,
+        "must_change_password must be TRUE for a freshly created login"
+    );
+    assert_eq!(
+        role_count, 1,
+        "the new user must have the doctor role assigned exactly once"
+    );
 }
 
 #[tokio::test]
@@ -486,14 +510,22 @@ async fn rctf_l_duplicate_login_rejected() {
 
     let app = app_for(&pool, admin, "hash_rctf_l_admin").await;
     let (pool_s, sess_s) = states(&app);
-    let result = create_login_for_doctor(pool_s, sess_s, doctor_id, "el.duplicate".to_string()).await;
-    assert!(result.is_err(), "creating a second login for an already-linked doctor must fail");
+    let result =
+        create_login_for_doctor(pool_s, sess_s, doctor_id, "el.duplicate".to_string()).await;
+    assert!(
+        result.is_err(),
+        "creating a second login for an already-linked doctor must fail"
+    );
 
-    let (user_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE username = 'el.duplicate'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(user_count, 0, "no partial user row must be created on rejection");
+    let (user_count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM users WHERE username = 'el.duplicate'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        user_count, 0,
+        "no partial user row must be created on rejection"
+    );
 }
 
 #[tokio::test]
@@ -509,14 +541,21 @@ async fn rctf_m_unauthorized_login_creation_rejected() {
     let app = app_for(&pool, nurse, "hash_rctf_m_nurse").await;
     let (pool_s, sess_s) = states(&app);
     let result = create_login_for_doctor(pool_s, sess_s, doctor_id, "em.target".to_string()).await;
-    assert!(result.is_err(), "a session without UsersManage must not be able to create a login");
+    assert!(
+        result.is_err(),
+        "a session without UsersManage must not be able to create a login"
+    );
 
-    let (still_unlinked,): (Option<i32>,) = sqlx::query_as("SELECT user_id FROM doctors WHERE id = $1")
-        .bind(doctor_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(still_unlinked.is_none(), "doctor must remain unlinked after a rejected unauthorized attempt");
+    let (still_unlinked,): (Option<i32>,) =
+        sqlx::query_as("SELECT user_id FROM doctors WHERE id = $1")
+            .bind(doctor_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        still_unlinked.is_none(),
+        "doctor must remain unlinked after a rejected unauthorized attempt"
+    );
 }
 
 #[tokio::test]
@@ -532,13 +571,21 @@ async fn rctf_n_username_collision_rejected() {
 
     let app = app_for(&pool, admin, "hash_rctf_n_admin").await;
     let (pool_s, sess_s) = states(&app);
-    let result = create_login_for_doctor(pool_s, sess_s, doctor_id, "rctf_n_taken".to_string()).await;
-    assert!(result.is_err(), "creating a login with an already-taken username must fail");
+    let result =
+        create_login_for_doctor(pool_s, sess_s, doctor_id, "rctf_n_taken".to_string()).await;
+    assert!(
+        result.is_err(),
+        "creating a login with an already-taken username must fail"
+    );
 
-    let (still_unlinked,): (Option<i32>,) = sqlx::query_as("SELECT user_id FROM doctors WHERE id = $1")
-        .bind(doctor_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(still_unlinked.is_none(), "doctor must remain unlinked after a username-collision rejection");
+    let (still_unlinked,): (Option<i32>,) =
+        sqlx::query_as("SELECT user_id FROM doctors WHERE id = $1")
+            .bind(doctor_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        still_unlinked.is_none(),
+        "doctor must remain unlinked after a username-collision rejection"
+    );
 }
