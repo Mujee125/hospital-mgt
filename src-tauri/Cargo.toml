@@ -35,7 +35,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"
-sqlx         = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "chrono", "uuid", "rust_decimal", "json"] }
+sqlx         = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "chrono", "uuid", "rust_decimal", "json"] }
 rust_decimal = { version = "1", features = ["serde-with-float"] }
 chrono       = { version = "0.4", features = ["serde"] }
 tokio        = { version = "1",   features = ["full"] }
@@ -56,8 +56,6 @@ time         = "0.3"
 # RCTF-FULL-SYSTEM-2026-09-08 F-11: backup-archive encryption at rest
 # (AES-256-GCM; key derived from the per-install entropy — see backup.rs).
 aes-gcm     = "0.10"
-# PDF receipt generation
-printpdf     = "0.7"
 # WhatsApp Business Cloud API (HTTP client)
 reqwest      = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # ── Security foundation (ISO 27001 A.9, A.12.4) ──────────────────────────────
@@ -93,7 +91,7 @@ rstest = "0.23"
 
 # sqlx is already a production dependency; here we enable the `migrate` feature
 # for test-only migration support (offline mode).
-sqlx = { version = "0.8", features = ["migrate"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "chrono", "uuid", "rust_decimal", "json", "migrate"] }
 
 # base64 — used by config_tests to decode the DPAPI blob (WP3-P01).
 base64 = "0.22"
