@@ -1,0 +1,195 @@
+# =============================================================================
+# cargo-audit exceptions — VitalFlow HMS (src-tauri)
+# =============================================================================
+# POLICY (do not weaken):
+#   * `cargo audit` MUST keep failing CI on any real vulnerability.
+#     The CI job (.github/workflows/ci.yml -> rust-audit) still runs
+#     `cargo audit --deny warnings`; this file does NOT relax that gate.
+#   * Only advisories that have NO upstream fix AND whose vulnerable code is
+#     NOT compiled into the shipped HMS binary belong in `ignore` below.
+#   * Any NEW advisory is a CI failure by default. Do not add entries here
+#     reflexively — fix the dependency instead (see docs/04 A.8.25).
+#
+# -- Why `rsa` / RUSTSEC-2023-0071 is still visible to `cargo audit` --------
+# 2026-09-28 dependency-policy change: `sqlx` in src-tauri/Cargo.toml now uses
+# `default-features = false` and enables only the features HMS actually uses
+# (postgres / runtime-tokio / tls-rustls / macros / chrono / uuid /
+# rust_decimal / json [+ migrate for dev]). This removed the MySQL and SQLite
+# drivers from the COMPILED graph:
+#
+#   $ cargo tree -i sqlx-mysql   -> warning: nothing to print
+#   $ cargo tree -i rsa          -> warning: nothing to print
+#   $ cargo tree | findstr sqlx  -> sqlx, sqlx-core, sqlx-macros,
+#                                   sqlx-macros-core, sqlx-postgres
+#                                   (NO sqlx-mysql, NO sqlx-sqlite)
+#
+# `cargo audit`, however, scans Cargo.lock, and Cargo.lock is feature-agnostic:
+# it still records sqlx's OPTIONAL `sqlx-mysql` package (and that crate's
+# optional `rsa` dependency) even though the `mysql` feature is off and neither
+# crate is ever compiled or linked. So the advisory below is a false positive
+# for the shipped HMS binary.
+# =============================================================================
+
+[advisories]
+# -- RUSTSEC-2023-0071 -- "Marvin attack: potential key recovery through
+#    timing sidechannels" (rsa 0.9.10, CVSS 5.9 medium)
+#
+# Advisory ID:     RUSTSEC-2023-0071
+# Package:         rsa 0.9.10
+# Dependency path: hospital-mgmt -> sqlx 0.8.6 -> sqlx-mysql 0.8.6 -> rsa 0.9.10
+#                  (recorded in Cargo.lock as an optional dep; NOT compiled --
+#                   the sqlx `mysql` feature is disabled. See `cargo tree -i`.)
+#
+# Why the vulnerable code path is NOT reachable / NOT used by HMS:
+#   1. VitalFlow HMS is PostgreSQL-only. Every runtime connection is
+#      PostgreSQL (sqlx::postgres::PgPool in src-tauri/src/db.rs; DATABASE_URL
+#      is postgresql://... both in CI and in the shipped config). The sqlx
+#      `mysql` feature is NOT enabled, so `sqlx-mysql` -- the only crate that
+#      pulls in `rsa` -- is never compiled into the binary. Verified with
+#      `cargo tree -i rsa` and `cargo tree -i sqlx-mysql` (both report
+#      "nothing to print").
+#   2. The Marvin attack targets RSA *decryption* (PKCS#1 v1.5 / OAEP) via
+#      adaptive chosen-ciphertext timing measurements. HMS performs no RSA
+#      operation of any kind:
+#        - license signing / verification  : Ed25519 (ed25519-dalek)
+#        - password hashing               : Argon2id
+#        - session tokens + HW fingerprint: SHA-256
+#        - TLS / Postgres SSL             : rustls + ring (ECDHE)
+#      There is no RSA private key anywhere in the app, in the keygen tool,
+#      or in config.json / entropy.key.
+#   3. Even if the feature were re-enabled, exploitation requires an attacker
+#      to submit many chosen ciphertexts to an RSA decryption oracle and to
+#      measure response timing precisely. HMS exposes no such endpoint.
+#
+# Why no upgrade is possible: RustSec reports "No fixed upgrade is available!"
+# for this advisory (the `rsa` crate is unmaintained upstream).
+#
+# Condition that allows this exception to be REMOVED:
+#   Delete this entry from `ignore` and re-run `cargo audit --deny warnings`
+#   in src-tauri as soon as ANY of the following becomes true:
+#     a) `sqlx` 0.9+ stops recording `sqlx-mysql` in its lockfile graph, or
+#     b) HMS ever enables any additional database driver (mysql/sqlite), or
+#     c) an `rsa` crate release publishes a Marvin-attack fix.
+#   NOTE: `cargo update` alone will NOT clear this entry, because Cargo.lock
+#   retains optional (feature-disabled) dependencies.
+#
+# =============================================================================
+# -- Informational warnings (NOT vulnerabilities) ----------------------------
+# =============================================================================
+# The three IDs below are the ONLY remaining findings from
+# `cargo audit --deny warnings`. Two are `unmaintained`, one is `unsound`;
+# none is a known exploitable vulnerability. They are recorded individually
+# because two are provably absent from the shipped Windows artifact, and the
+# third is a maintenance item rather than a defect.
+#
+# NOTE ON TARGET FILTERING (deliberately NOT used):
+#   A `[target] os = ["windows"]` section was evaluated and REJECTED.
+#   cargo-audit 0.22.2 does support `--target-os` / `[target] os`, and it was
+#   tested directly: `cargo audit --target-os windows` STILL reported all
+#   three of these advisories. Target filtering matches against OS metadata
+#   declared INSIDE each advisory, and none of these three advisory records
+#   declares any OS scope (verified by reading the advisory TOML in the local
+#   RustSec advisory-db). Adding a [target] section would therefore NOT
+#   filter anything, while falsely implying the audit is Windows-scoped. The
+#   per-advisory reachability evidence below is what actually justifies these.
+# =============================================================================
+
+# -- RUSTSEC-2024-0370 -- "proc-macro-error is unmaintained" ----------------
+# Advisory ID:     RUSTSEC-2024-0370
+# Crate / version: proc-macro-error 1.0.4
+# Kind:            unmaintained (informational) -- NOT a vulnerability
+# Complete path:   hospital-mgmt -> tauri 2.12.0 -> muda 0.20.0
+#                    -> gtk 0.18.2 -> atk 0.18.2 -> glib 0.18.5
+#                    -> glib-macros 0.18.5 (proc-macro) -> proc-macro-error 1.0.4
+#                  (secondary: gtk 0.18.2 -> gtk3-macros 0.18.2 -> proc-macro-error)
+# In Windows build: NO. `cargo tree -i proc-macro-error` on the Windows host
+#                   reports "nothing to print". It is a BUILD-TIME (proc-macro)
+#                   dependency reachable only through the Linux GTK/glib macro
+#                   stack, which Tauri compiles exclusively for Linux targets.
+# Why not actionable now:
+#   The advisory states the crate is unmaintained (no commits / releases for
+#   years) and depends on syn 1.x. It is NOT a vulnerability, carries no CVE,
+#   and reports no exploitable code path. There is no patched version to move
+#   to, and HMS cannot remove it: it is pulled in transitively by Tauri on
+#   Linux. Because the Windows production artifact never compiles it, that
+#   unmaintained code is not shipped.
+# Why narrowly scoped: ignores THIS advisory ID only. It does not suppress
+#   vulnerability findings, unmaintained advisories for any other crate, or
+#   anything present in the Windows build.
+# Remove / review when:
+#   a) proc-macro-error leaves Cargo.lock (Tauri drops the
+#      glib-macros/gtk3-macros path, or a syn-2 replacement lands), or
+#   b) HMS stops building the Linux target, or
+#   c) proc-macro-error publishes a release / successor crate.
+#   Re-check with: cargo tree -i proc-macro-error   (on the Windows host)
+
+# -- RUSTSEC-2024-0429 -- "Unsoundness in Iterator/DoubleEndedIterator impls
+#    for glib::VariantStrIter" ---------------------------------------------
+# Advisory ID:     RUSTSEC-2024-0429
+# Crate / version: glib 0.18.5
+# Kind:            unsound (informational) -- a soundness defect, NOT a
+#                  vulnerability with a known attack path
+# Complete path:   hospital-mgmt -> tauri 2.12.0
+#                    -> muda 0.20.0 / tao 0.37.1 / tauri-runtime(-wry)
+#                    -> gtk 0.18.2 -> atk 0.18.2 -> glib 0.18.5
+#                  (also via wry 0.57.0 -> cairo-rs 0.18.5 -> gdk 0.18.2
+#                   -> gdk-pixbuf 0.18.5 -> glib 0.18.5, and via gdkx11, pango,
+#                   soup3 / javascriptcore-rs -> webkit2gtk)
+# In Windows build: NO. `cargo tree -i glib` on the Windows host reports
+#                   "nothing to print". glib belongs to the Linux GTK GUI
+#                   stack; the Windows build of Tauri uses the WebView2 /
+#                   windows-rs path and never links GTK or glib.
+# Why not actionable now:
+#   The unsound code is the Iterator/DoubleEndedIterator impls for
+#   glib::VariantStrIter (upstream gtk-rs-core#1343), which HMS does not call
+#   -- HMS never parses GVariant strings. The fix is glib >=0.20.0, but the
+#   version is pinned transitively by Tauri's Linux GTK stack at 0.18.x and
+#   HMS cannot move it without Tauri adopting the gtk-rs 0.20 series. This
+#   entry makes NO claim that glib is sound or safe in general -- it records
+#   only that glib is not part of the Windows artifact VitalFlow HMS ships.
+# Why narrowly scoped: ignores THIS advisory ID only.
+# Remove / review when:
+#   a) Tauri upgrades its GTK stack to glib >=0.20.0, or
+#   b) HMS drops the Linux build target, or
+#   c) HMS begins calling glib::VariantStrIter APIs.
+#   Re-check with: cargo tree -i glib   (on the Windows host)
+
+# -- RUSTSEC-2025-0134 -- "rustls-pemfile is unmaintained" -----------------
+# Advisory ID:     RUSTSEC-2025-0134
+# Crate / version: rustls-pemfile 2.2.0
+# Kind:            unmaintained (informational) -- NOT a vulnerability
+# Complete path:   hospital-mgmt 0.1.0 -> rustls-pemfile 2.2.0
+#                  (DIRECT dependency, declared in src-tauri/Cargo.toml)
+# In Windows build: YES. This IS a genuine Windows production dependency and
+#                   is compiled into the shipped binary.
+# Used in:         src-tauri/src/tls_provision.rs:182
+#                     rustls_pemfile::certs(&mut reader)          (Postgres CA)
+#                   src-tauri/src/tls_provision.rs:208
+#                     rustls_pemfile::private_key(&mut key_reader)  (server key)
+#                   This is the PostgreSQL TLS certificate / private-key
+#                   provisioning path (see the rcgen 0.13 dependency, which
+#                   generates the self-signed certs parsed here).
+# Why not actionable now:
+#   The advisory is an unmaintained-status notice ONLY: the repository was
+#   archived in August 2025 and no further releases will be published. It
+#   reports NO vulnerability, NO CVE and NO exploitable code path, and there
+#   is no patched version to upgrade to. To be explicit and accurate: this
+#   crate IS reachable on Windows and IS used by HMS -- it is NOT dismissed
+#   as unreachable or as Linux-only. The justification is strictly that there
+#   is no defect to fix and no fix available, not that the code is absent.
+# Why narrowly scoped: ignores THIS advisory ID only.
+# Remove / review when:
+#   The upstream rustsec/pemfile#61 guidance is actioned as a dependency-
+#   maintenance task: migrate the two call sites in tls_provision.rs from
+#   `rustls_pemfile::certs` / `rustls_pemfile::private_key` to the equivalent
+#   `rustls_pki_types::pem::PemObject` API (available since rustls-pki-types
+#   1.9.0), then drop the rustls-pemfile dependency and delete this entry.
+#   That migration is deliberately NOT performed in this change -- it is an
+#   independent maintenance task with its own compile/test verification.
+#   Re-check with: cargo tree -i rustls-pemfile   (on the Windows host)
+ignore = [
+    "RUSTSEC-2023-0071",  # rsa 0.9.10 -- Marvin; sqlx-mysql feature-disabled (above)
+    "RUSTSEC-2024-0370",  # proc-macro-error 1.0.4 -- unmaintained; Linux-only proc-macro
+    "RUSTSEC-2024-0429",  # glib 0.18.5 -- unsound VariantStrIter; Linux GTK only
+    "RUSTSEC-2025-0134",  # rustls-pemfile 2.2.0 -- unmaintained; direct Windows dep, no defect
+]
