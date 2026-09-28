@@ -73,7 +73,10 @@ const CORE_DELEGATES: &[(&str, &str)] = &[
     // their guard helper directly in their own body, so they're covered by
     // GUARD_TOKENS below instead of needing an entry here.
     ("update_appointment", "update_appointment_core"),
-    ("update_appointment_status", "update_appointment_status_core"),
+    (
+        "update_appointment_status",
+        "update_appointment_status_core",
+    ),
 ];
 
 const GUARD_TOKENS: &[&str] = &[

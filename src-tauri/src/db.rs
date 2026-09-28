@@ -75,9 +75,9 @@ fn curated_hint(sqlstate: Option<&str>, constraint: Option<&str>) -> Option<Stri
             // curated hint here means the admin gets "already taken"
             // instead of the generic sanitized message, without exposing
             // the constraint/table name itself.
-            Some("users_username_key") => Some(
-                "This username is already taken. Choose a different one.".to_string(),
-            ),
+            Some("users_username_key") => {
+                Some("This username is already taken. Choose a different one.".to_string())
+            }
             // RCTF Step 6 (login-creation atomicity, Test P): doctors.user_id
             // is UNIQUE — the DB-level backstop for two admins concurrently
             // creating a login for the SAME doctor. Only one write wins; the
@@ -1049,10 +1049,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
         .execute(pool)
         .await
         .map_err(|e| format!("appointments.consultation_fee: {}", e))?;
-    sqlx::query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS fee_paid BOOLEAN NOT NULL DEFAULT FALSE")
-        .execute(pool)
-        .await
-        .map_err(|e| format!("appointments.fee_paid: {}", e))?;
+    sqlx::query(
+        "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS fee_paid BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("appointments.fee_paid: {}", e))?;
 
     // BILLING-LINK-2026-09-16: the appointment→billing bridge. Bills
     // previously had no reference back to the appointment they arose from,

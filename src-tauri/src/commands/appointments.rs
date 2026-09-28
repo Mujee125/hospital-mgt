@@ -5,6 +5,7 @@ use chrono::NaiveDate;
 use sqlx::PgPool;
 
 use crate::audit;
+use crate::commands::billing;
 use crate::config::AppConfig;
 use crate::models::{
     AppointmentStats, AppointmentWithDetails, CreateAppointment, CreateQueueToken,
@@ -12,7 +13,6 @@ use crate::models::{
 };
 use crate::rbac::{self, Permission, SessionState};
 use crate::whatsapp::{self, WhatsAppMessage};
-use crate::commands::billing;
 
 // ── RCTF own-appointment scoping ────────────────────────────────────────────
 //
@@ -53,13 +53,10 @@ async fn require_appointment_read_scope(
         return Ok((session, AppointmentScope::Full));
     }
     if session.has(Permission::AppointmentsViewOwn) {
-        let doctor_id =
-            crate::commands::doctors::doctor_id_for_user(pool, session.user_id).await?;
+        let doctor_id = crate::commands::doctors::doctor_id_for_user(pool, session.user_id).await?;
         return match doctor_id {
             Some(id) => Ok((session, AppointmentScope::Own(id))),
-            None => Err(
-                "Your account is not linked to a practitioner profile.".to_string(),
-            ),
+            None => Err("Your account is not linked to a practitioner profile.".to_string()),
         };
     }
     Err(format!(
@@ -87,9 +84,7 @@ async fn require_appointment_mutation_scope(
     let doctor_id = crate::commands::doctors::doctor_id_for_user(pool, session.user_id).await?;
     match doctor_id {
         Some(id) => Ok((session, AppointmentScope::Own(id))),
-        None => Err(
-            "Your account is not linked to a practitioner profile.".to_string(),
-        ),
+        None => Err("Your account is not linked to a practitioner profile.".to_string()),
     }
 }
 
@@ -553,7 +548,10 @@ pub async fn get_appointment(
     let (q, bind_own): (String, Option<i32>) = match scope {
         AppointmentScope::Full => (format!("{} WHERE a.id = $1", SELECT_WITH_DETAILS), None),
         AppointmentScope::Own(my_doctor_id) => (
-            format!("{} WHERE a.id = $1 AND a.doctor_id = $2", SELECT_WITH_DETAILS),
+            format!(
+                "{} WHERE a.id = $1 AND a.doctor_id = $2",
+                SELECT_WITH_DETAILS
+            ),
             Some(my_doctor_id),
         ),
     };
@@ -954,10 +952,12 @@ pub async fn delete_appointment(
         require_appointment_mutation_scope(pool.inner(), &session, Permission::AppointmentsDelete)
             .await?;
     let rows_affected = match scope {
-        AppointmentScope::Full => sqlx::query("DELETE FROM appointments WHERE id = $1")
-            .bind(id)
-            .execute(pool.inner())
-            .await,
+        AppointmentScope::Full => {
+            sqlx::query("DELETE FROM appointments WHERE id = $1")
+                .bind(id)
+                .execute(pool.inner())
+                .await
+        }
         AppointmentScope::Own(my_doctor_id) => {
             sqlx::query("DELETE FROM appointments WHERE id = $1 AND doctor_id = $2")
                 .bind(id)
@@ -1093,9 +1093,7 @@ pub async fn issue_queue_token_for_appointment(
         ));
     }
     if status != "arrived" {
-        return Err(
-            "Only mark the patient as arrived before issuing a queue token.".to_string(),
-        );
+        return Err("Only mark the patient as arrived before issuing a queue token.".to_string());
     }
 
     let token_id = crate::commands::queue::create_queue_token_core(

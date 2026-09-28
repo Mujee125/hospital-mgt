@@ -169,13 +169,12 @@ pub async fn global_search_core(
     // client-supplied filter, and silently omitted (not an error) if the
     // account has no linked profile, consistent with every other own-scope
     // appointment read in commands/appointments.rs.
-    let appt_own_doctor_id: Option<i32> = if !s.has(Permission::AppointmentsView)
-        && s.has(Permission::AppointmentsViewOwn)
-    {
-        crate::commands::doctors::doctor_id_for_user(pool, s.user_id).await?
-    } else {
-        None
-    };
+    let appt_own_doctor_id: Option<i32> =
+        if !s.has(Permission::AppointmentsView) && s.has(Permission::AppointmentsViewOwn) {
+            crate::commands::doctors::doctor_id_for_user(pool, s.user_id).await?
+        } else {
+            None
+        };
     if s.has(Permission::AppointmentsView) || appt_own_doctor_id.is_some() {
         let base = r#"
             SELECT a.id,

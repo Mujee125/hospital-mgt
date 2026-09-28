@@ -591,9 +591,8 @@ async fn wait_for_postgres_ready(
     for attempt in 1..=60u32 {
         let port_c = port;
         let health = tauri::async_runtime::spawn_blocking(move || {
-            let bin_dir = pg_provision::default_pg_bin_dir().unwrap_or_else(|| {
-                std::path::PathBuf::from(r"C:\ProgramData\HMS\pgsql\bin")
-            });
+            let bin_dir = pg_provision::default_pg_bin_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData\HMS\pgsql\bin"));
             pg_provision::check_postgres_health(&bin_dir, port_c)
         })
         .await
@@ -870,7 +869,10 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
                 .await
                 .map_err(|e| format!("SSL repair panicked: {}", e))??;
 
-                log_info!(app_handle, "SSL repair done — waiting for PostgreSQL to be ready");
+                log_info!(
+                    app_handle,
+                    "SSL repair done — waiting for PostgreSQL to be ready"
+                );
                 wait_for_postgres_ready(app_handle, cfg.db_port, " (after SSL repair)").await?;
             } else if needs_setup {
                 log_info!(app_handle, "First-time SSL setup");
