@@ -44,6 +44,7 @@ use hospital_mgmt_lib::commands::appointments::{
     delete_appointment, get_appointment, get_appointment_stats, get_appointments,
     update_appointment_core, update_appointment_status_core,
 };
+use hospital_mgmt_lib::commands::appointments::check_doctor_overlap;
 use hospital_mgmt_lib::commands::doctors::create_login_for_doctor;
 use hospital_mgmt_lib::models::UpdateAppointment;
 use hospital_mgmt_lib::rbac::SessionState;
@@ -588,4 +589,75 @@ async fn rctf_n_username_collision_rejected() {
         still_unlinked.is_none(),
         "doctor must remain unlinked after a username-collision rejection"
     );
+}
+
+// ── H3 regression: check_doctor_overlap parameter binding ───────────────────
+//
+// `check_doctor_overlap` grew a conditional `AND a.id != $5` clause for the
+// UPDATE path but kept a fixed four-value bind list, so every update died with
+// `bind message supplies 4 parameters, but prepared statement requires 5` and
+// appointment updates could never succeed in production. These two tests drive
+// the REAL function against REAL PostgreSQL — one per branch — so a future
+// re-introduction of the mismatch fails here rather than in the field.
+
+/// CREATE path: no excluded appointment, so the SQL has only $1..$4 and must
+/// bind exactly four values. A clashing slot must be refused.
+#[tokio::test]
+async fn h3_overlap_create_path_binds_four_and_detects_clash() {
+    let pool = test_pool().await;
+    let pw = fixture_pw();
+    let pat = seed_patient_with_phone(&pool, "H3Create", "Patient", "+92300222001").await;
+    let u = seed_user(&pool, "h3_create_doc", &pw, &["doctor"]).await;
+    let doc = seed_doctor_linked(&pool, u, "H3", "Create").await;
+
+    // 10:00-10:30 already on the books for this doctor.
+    let _existing = seed_appointment(&pool, pat, doc, "10:00").await;
+
+    // 10:15-10:45 overlaps it -> refused.
+    let clash = check_doctor_overlap(&pool, doc, today(), 10 * 60 + 15, 30, None).await;
+    assert!(
+        clash.is_err(),
+        "CREATE path must refuse a genuinely overlapping slot (this also proves \
+         the four-parameter bind list matches a $1..$4 query)"
+    );
+
+    // 14:00-14:30 is free -> allowed.
+    let free = check_doctor_overlap(&pool, doc, today(), 14 * 60, 30, None).await;
+    assert!(free.is_ok(), "CREATE path must allow a non-overlapping slot");
+}
+
+/// UPDATE path: the appointment being edited is passed as $5, so the SQL has
+/// $1..$5 and must bind exactly five values. The edited row must NOT be treated
+/// as a clash with itself, while a genuine clash with a DIFFERENT row still is.
+///
+/// This is the test that fails with the old code (4 binds vs 5 placeholders).
+#[tokio::test]
+async fn h3_overlap_update_path_binds_five_and_excludes_itself() {
+    let pool = test_pool().await;
+    let pw = fixture_pw();
+    let pat = seed_patient_with_phone(&pool, "H3Update", "Patient", "+92300222002").await;
+    let u = seed_user(&pool, "h3_update_doc", &pw, &["doctor"]).await;
+    let doc = seed_doctor_linked(&pool, u, "H3", "Update").await;
+
+    let mine = seed_appointment(&pool, pat, doc, "09:00").await;
+    let other = seed_appointment(&pool, pat, doc, "11:00").await;
+
+    // Re-submitting my own appointment unchanged: the $5 exclusion must stop
+    // the row colliding with itself. This is the exact call that previously
+    // failed with "bind message supplies 4 parameters ... requires 5".
+    let same = check_doctor_overlap(&pool, doc, today(), 9 * 60, 30, Some(mine)).await;
+    assert!(
+        same.is_ok(),
+        "UPDATE path must exclude the appointment being edited from the \
+         overlap check (proves $5 is bound)"
+    );
+
+    // Moving my appointment onto the OTHER row's slot must still be refused.
+    let clash = check_doctor_overlap(&pool, doc, today(), 11 * 60, 30, Some(mine)).await;
+    assert!(
+        clash.is_err(),
+        "UPDATE path must still refuse a clash against a DIFFERENT appointment \
+         (exclusion must not disable the guard)"
+    );
+    assert_ne!(mine, other, "fixture sanity: two distinct appointments");
 }

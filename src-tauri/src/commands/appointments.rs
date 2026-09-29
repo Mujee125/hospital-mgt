@@ -125,7 +125,10 @@ fn validate_appointment_status(status: &str) -> Result<(), String> {
 /// Timezone note: `appointment_time` is clinic-local; `::time` casts on
 /// both sides keep the comparison in local wall-clock time, consistent
 /// with how the rest of the module stores times.
-async fn check_doctor_overlap(
+///
+/// `pub` so the integration suite can exercise the real `$5` (UPDATE) path
+/// against PostgreSQL rather than re-implementing or mocking it.
+pub async fn check_doctor_overlap(
     pool: &PgPool,
     doctor_id: i32,
     date: chrono::NaiveDate,
@@ -134,11 +137,17 @@ async fn check_doctor_overlap(
     exclude_appointment_id: Option<i32>,
 ) -> Result<(), String> {
     let end_min = start_min + duration_minutes.max(1);
+    // The `$5` placeholder only exists when we are UPDATING an appointment
+    // (the row being edited must not collide with itself), so the bind list
+    // has to grow in lockstep with the SQL. Previously the SQL gained a fifth
+    // placeholder but the bind list stayed at four, so every UPDATE path died
+    // with `bind message supplies 4 parameters, but prepared statement
+    // requires 5` and appointment updates could never succeed.
     let id_clause = match exclude_appointment_id {
         Some(_id) => " AND a.id != $5",
         None => "",
     };
-    let overlap: Option<(i64,)> = sqlx::query_as(&format!(
+    let sql = format!(
         r#"
         SELECT 1 FROM appointments a
         WHERE a.doctor_id = $1
@@ -149,14 +158,21 @@ async fn check_doctor_overlap(
           {id_clause}
         LIMIT 1
         "#,
-    ))
+    );
+    let mut q = sqlx::query_as::<_, (i64,)>(&sql)
     .bind(doctor_id)
     .bind(date)
     .bind(start_min)
-    .bind(end_min)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    .bind(end_min);
+
+    if let Some(id) = exclude_appointment_id {
+        q = q.bind(id);
+    }
+
+    let overlap: Option<(i64,)> = q
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
     if overlap.is_some() {
         return Err(
             "This doctor already has an appointment that overlaps the selected time. Choose a different time or doctor.".to_string(),
@@ -187,11 +203,16 @@ async fn check_patient_overlap(
     exclude_appointment_id: Option<i32>,
 ) -> Result<(), String> {
     let end_min = start_min + duration_minutes.max(1);
+    // Same `$5` bind-count contract as `check_doctor_overlap` above: the SQL
+    // only grows a fifth placeholder on the UPDATE path, so the bind list has to
+    // grow with it. Previously this was left at four binds, so every patient-
+    // scoped update hit `bind message supplies 4 parameters, but prepared
+    // statement requires 5`.
     let id_clause = match exclude_appointment_id {
         Some(_id) => " AND a.id != $5",
         None => "",
     };
-    let overlap: Option<(i64,)> = sqlx::query_as(&format!(
+    let sql = format!(
         r#"
         SELECT 1 FROM appointments a
         WHERE a.patient_id = $1
@@ -202,14 +223,21 @@ async fn check_patient_overlap(
           {id_clause}
         LIMIT 1
         "#,
-    ))
-    .bind(patient_id)
-    .bind(date)
-    .bind(start_min)
-    .bind(end_min)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| crate::db::sanitize_db_error(&e))?;
+    );
+    let mut q = sqlx::query_as::<_, (i64,)>(&sql)
+        .bind(patient_id)
+        .bind(date)
+        .bind(start_min)
+        .bind(end_min);
+
+    if let Some(id) = exclude_appointment_id {
+        q = q.bind(id);
+    }
+
+    let overlap: Option<(i64,)> = q
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| crate::db::sanitize_db_error(&e))?;
     if overlap.is_some() {
         return Err(
             "This patient already has another appointment that overlaps the selected time. Choose a different time, or check the patient's existing bookings.".to_string(),
