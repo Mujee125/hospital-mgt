@@ -60,6 +60,31 @@ fn roles(r: &str) -> Vec<String> {
     vec![r.to_string()]
 }
 
+// Titles owned by NC-1/NC-2 alone. Every assertion below counts ONLY these.
+//
+// `fetch_feed().unread_count` is a GLOBAL count over every notification the
+// user can see, and the test database is shared per-process across suites
+// running in parallel. NC-4 concurrently emits a `role_target = 'doctor'`
+// role broadcast, which a doctor legitimately sees, so an absolute
+// `assert_eq!(unread_count, 2)` is racy: it passed with --test-threads=1 and
+// failed (3) under the default parallel runner. Counting our own titles
+// keeps the visibility guarantee under test (who can see WHAT) while being
+// immune to unrelated rows.
+const T_ROLE_BCAST: &str = "Role broadcast";
+const T_DIRECT_NURSE: &str = "Direct to nurse";
+const T_EVERYONE: &str = "Broadcast to all";
+
+/// Unread notifications among the given titles, from a fetched feed.
+fn unread_among(
+    feed: &hospital_mgmt_lib::commands::notifications::AppNotificationFeed,
+    titles: &[&str],
+) -> i64 {
+    feed.notifications
+        .iter()
+        .filter(|n| !n.read && titles.contains(&n.title.as_str()))
+        .count() as i64
+}
+
 // ── NC-1 + NC-2: visibility and per-user read state ───────────────────────────
 
 #[tokio::test]
@@ -78,77 +103,84 @@ async fn test_nc1_nc2_visibility_and_per_user_reads() {
     let nurse_roles = roles("nurse");
 
     // Three targeting modes.
-    emit(
-        &pool,
-        out(Some("doctor"), None, "role_bcast", "Role broadcast"),
-    )
-    .await
-    .unwrap();
-    emit(
-        &pool,
-        out(None, Some(nurse_id), "direct", "Direct to nurse"),
-    )
-    .await
-    .unwrap();
-    emit(&pool, out(None, None, "everyone", "Broadcast to all"))
+    emit(&pool, out(Some("doctor"), None, "role_bcast", T_ROLE_BCAST))
+        .await
+        .unwrap();
+    emit(&pool, out(None, Some(nurse_id), "direct", T_DIRECT_NURSE))
+        .await
+        .unwrap();
+    emit(&pool, out(None, None, "everyone", T_EVERYONE))
         .await
         .unwrap();
 
     // Doctor feed: sees the role broadcast + the everyone broadcast, NOT the
     // nurse-direct one. 2 rows, 2 unread.
     let d1 = fetch_feed(&pool, doc1, &doc1_roles).await.unwrap();
-    assert_eq!(d1.unread_count, 2, "doctor sees role bcast + everyone only");
-    assert!(d1.notifications.iter().any(|n| n.title == "Role broadcast"));
-    assert!(d1
-        .notifications
-        .iter()
-        .any(|n| n.title == "Broadcast to all"));
-    assert!(!d1
-        .notifications
-        .iter()
-        .any(|n| n.title == "Direct to nurse"));
+    assert_eq!(
+        unread_among(&d1, &[T_ROLE_BCAST, T_EVERYONE]),
+        2,
+        "doctor sees role bcast + everyone only"
+    );
+    assert!(d1.notifications.iter().any(|n| n.title == T_ROLE_BCAST));
+    assert!(d1.notifications.iter().any(|n| n.title == T_EVERYONE));
+    assert!(!d1.notifications.iter().any(|n| n.title == T_DIRECT_NURSE));
 
     // Nurse feed: sees the direct + everyone, NOT the doctor broadcast.
     let nf = fetch_feed(&pool, nurse_id, &nurse_roles).await.unwrap();
-    assert_eq!(nf.unread_count, 2);
-    assert!(nf
-        .notifications
-        .iter()
-        .any(|n| n.title == "Direct to nurse"));
-    assert!(!nf.notifications.iter().any(|n| n.title == "Role broadcast"));
+    assert_eq!(unread_among(&nf, &[T_DIRECT_NURSE, T_EVERYONE]), 2);
+    assert!(nf.notifications.iter().any(|n| n.title == T_DIRECT_NURSE));
+    assert!(!nf.notifications.iter().any(|n| n.title == T_ROLE_BCAST));
 
     // NC-2: doc1 marks the role broadcast read — doc2 still sees it unread.
     let bcast = d1
         .notifications
         .iter()
-        .find(|n| n.title == "Role broadcast")
+        .find(|n| n.title == T_ROLE_BCAST)
         .unwrap();
     mark_read_core(&pool, doc1, &doc1_roles, bcast.id)
         .await
         .unwrap();
 
     let d1_after = fetch_feed(&pool, doc1, &doc1_roles).await.unwrap();
-    assert_eq!(d1_after.unread_count, 1, "doc1 has everyone-broadcast left");
+    assert_eq!(
+        unread_among(&d1_after, &[T_ROLE_BCAST, T_EVERYONE]),
+        1,
+        "doc1 has everyone-broadcast left"
+    );
     let d2_after = fetch_feed(&pool, doc2, &doc2_roles).await.unwrap();
     assert_eq!(
-        d2_after.unread_count, 2,
+        unread_among(&d2_after, &[T_ROLE_BCAST, T_EVERYONE]),
+        2,
         "doc2's read state is independent — still 2 unread"
     );
     let d2_bcast = d2_after
         .notifications
         .iter()
-        .find(|n| n.title == "Role broadcast")
+        .find(|n| n.title == T_ROLE_BCAST)
         .unwrap();
     assert!(
         !d2_bcast.read,
         "the role broadcast must stay unread for doc2"
     );
 
-    // mark_all for doc2 clears everything visible to them.
-    let n = mark_all_read_core(&pool, doc2, &doc2_roles).await.unwrap();
-    assert_eq!(n, 2);
+    // mark_all for doc2 clears everything visible to them. The return value is
+    // a GLOBAL count, so assert on the per-user read rows for OUR two
+    // notifications instead of the number the core reports.
+    let _n_marked = mark_all_read_core(&pool, doc2, &doc2_roles).await.unwrap();
     let d2_final = fetch_feed(&pool, doc2, &doc2_roles).await.unwrap();
-    assert_eq!(d2_final.unread_count, 0);
+    assert_eq!(
+        unread_among(&d2_final, &[T_ROLE_BCAST, T_EVERYONE]),
+        0,
+        "mark_all must clear both of doc2's notifications"
+    );
+    assert!(
+        d2_final
+            .notifications
+            .iter()
+            .filter(|n| [T_ROLE_BCAST, T_EVERYONE].contains(&n.title.as_str()))
+            .all(|n| n.read),
+        "every notification mark_all touched must be read for doc2"
+    );
 }
 
 // ── NC-3: read-marking is visibility-scoped ──────────────────────────────────

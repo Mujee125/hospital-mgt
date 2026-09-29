@@ -253,7 +253,21 @@ jobs:
         run: cargo install cargo-llvm-cov
 
       - name: Run coverage
-        run: cargo llvm-cov --features hms-integration-tests --workspace --lcov --output-path lcov.info
+        # --test-threads=1 is REQUIRED here, not an optimisation choice.
+        # The integration suites share ONE per-process scratch database, and
+        # several assert on GLOBAL aggregates (queue token numbering is
+        # per-day sequential, `fetch_feed().unread_count` counts every
+        # visible notification, the billing/receivables reports sum the
+        # whole `payments`/`bills` tables). Running suites in parallel lets
+        # one suite's fixtures land inside another's exact-count assertion.
+        # Observed failures all of this shape, and all of them pass
+        # sequentially: notifications_tests saw unread_count 3 vs 2,
+        # reports_tests saw payments 2 vs 1, queue_tests saw the first
+        # token of the day numbered 5 vs 1.
+        # The `rust-tests` job already pins --test-threads=1 for the same
+        # reason (see its comment); this job was simply missing it, so
+        # coverage ran a configuration the suites were never written for.
+        run: cargo llvm-cov --features hms-integration-tests --workspace --lcov --output-path lcov.info -- --test-threads=1
         env:
           DATABASE_URL: postgresql://hms_test:hms_test@localhost:5432/hms_test
           HMS_TEST_DB_URL: postgresql://hms_test:hms_test@localhost:5432/postgres
