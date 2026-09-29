@@ -214,16 +214,15 @@ pub async fn setting_i64(pool: &PgPool, key: &str, default: i64) -> i64 {
     // "correct" number of `.flatten()` calls is a guess, and getting that guess
     // wrong is a compile error at best and a silently-defaulted safety knob at
     // worst.
-    let raw: Option<String> = match sqlx::query_scalar::<_, String>(
-        "SELECT value FROM settings WHERE key = $1",
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(v) => v,
-        Err(_) => None,
-    };
+    let raw: Option<String> =
+        match sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = $1")
+            .bind(key)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => None,
+        };
     raw.and_then(|v| v.trim().parse::<i64>().ok())
         .unwrap_or(default)
 }
@@ -2917,7 +2916,6 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     .await
     .map_err(|e| format!("fk_issue_override_verifier: {}", e))?;
 
-
     // Oversight register: one row per ABO-incompatible emergency release — the
     // queue a blood-bank supervisor works through and the source of truth for the
     // 24-hour quota. Kept separate from blood_issues so routine issues are
@@ -2980,7 +2978,6 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     .execute(pool)
     .await
     .ok();
-
 
     // ── FIX-C (2026-09-27): inventory stock can never go negative in the DB ────
     //
@@ -3047,10 +3044,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // pg_trgm GIN index would fix the scan, but CREATE EXTENSION requires
     // superuser, which locked-down hospital installs do not grant, so it is
     // deliberately not attempted here.
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_patients_created_id ON patients (created_at DESC, id DESC)")
-        .execute(pool)
-        .await
-        .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_patients_created_id ON patients (created_at DESC, id DESC)",
+    )
+    .execute(pool)
+    .await
+    .ok();
 
     // Sibling indexes for the other three bounded lists (FIX-B). Each matches its
     // command's new ORDER BY, including the id tiebreaker that makes paging
@@ -3060,10 +3059,12 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
         .execute(pool)
         .await
         .ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_bills_created_id ON bills (created_at DESC, id DESC)")
-        .execute(pool)
-        .await
-        .ok();
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_bills_created_id ON bills (created_at DESC, id DESC)",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_appointments_date_time ON appointments (appointment_date DESC, appointment_time ASC)")
         .execute(pool)
         .await

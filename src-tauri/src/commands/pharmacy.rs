@@ -641,10 +641,16 @@ pub async fn dispense_prescription_item_core(
             med_name,
             usable[0].2,
             usable[0].0,
-            usable[0].3.map(|d| d.to_string()).unwrap_or_else(|| "none".into()),
+            usable[0]
+                .3
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "none".into()),
             usable[1].2,
             usable[1].0,
-            usable[1].3.map(|d| d.to_string()).unwrap_or_else(|| "none".into()),
+            usable[1]
+                .3
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "none".into()),
         ));
     }
 

@@ -90,6 +90,9 @@ fn wp3_u06_default_is_v1() {
 /// disk, the entropy-protected DPAPI blob IS on disk (the VF-VERIF-003
 /// regression guard), version = 3, and `entropy.key` was created next to
 /// the config.
+// DPAPI-specific: secrets degrades to PLAINTEXT on non-Windows by design, so
+// these assertions are only meaningful on Windows (see src/secrets.rs).
+#[cfg(target_os = "windows")]
 #[test]
 fn wp3_u07_save_encrypts_password_on_disk() {
     let hms = test_hms_dir("u07");
@@ -263,8 +266,11 @@ fn wp3_i05_bak_created_once_not_clobbered() {
 /// observable failure: DPAPI decrypt fails. The app must degrade to an
 /// EMPTY password (never garbage) so startup redirects to the repair
 /// screen. (True cross-machine testing needs a second machine — tracked
-/// in the verification report §5; the corrupted-blob equivalent is
+// DPAPI-specific: secrets degrades to PLAINTEXT on non-Windows by design, so
 /// proven here.)
+#[test]
+// these assertions are only meaningful on Windows (see src/secrets.rs).
+#[cfg(target_os = "windows")]
 #[test]
 fn wp3_n01_n02_wrong_key_or_corrupted_blob() {
     let hms = test_hms_dir("n01");
@@ -317,10 +323,13 @@ fn wp3_n04_unknown_version_rejected() {
 
 // ── G.3.4 Penetration tests (WP3-P01, P02) ───────────────────────────────────
 
-/// WP3-P01 — config theft: the on-disk artifact contains NO recoverable
+// DPAPI-specific: secrets degrades to PLAINTEXT on non-Windows by design, so
 /// password. Asserts (a) no plaintext on disk, (b) the base64-decoded
 /// blob does not contain the plaintext either (it is real DPAPI
 /// ciphertext, not a re-encoding of the password).
+#[test]
+// these assertions are only meaningful on Windows (see src/secrets.rs).
+#[cfg(target_os = "windows")]
 #[test]
 fn wp3_p01_stolen_config_yields_nothing() {
     let hms = test_hms_dir("p01");
@@ -704,7 +713,6 @@ fn rctf_f01_v2_source_config_is_not_migrated_until_explicit_save() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-
 /// F-01 HERMETIC migration rehearsal.
 ///
 /// ORIGINAL INTENT (preserved): prove the exact pipeline the new installer runs
@@ -755,10 +763,7 @@ fn rctf_f01_v2_copy_migration_rehearsal() {
         "migrated copy must carry the entropy-protected blob"
     );
     assert!(dir.join("entropy.key").exists(), "entropy.key created");
-    assert!(
-        dir.join("config.json.bak").exists(),
-        "v2 .bak written"
-    );
+    assert!(dir.join("config.json.bak").exists(), "v2 .bak written");
 
     // The .bak is the v2 shape and still decrypts (both recovery paths).
     let bak_json: serde_json::Value =

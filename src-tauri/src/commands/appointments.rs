@@ -160,10 +160,10 @@ pub async fn check_doctor_overlap(
         "#,
     );
     let mut q = sqlx::query_as::<_, (i64,)>(&sql)
-    .bind(doctor_id)
-    .bind(date)
-    .bind(start_min)
-    .bind(end_min);
+        .bind(doctor_id)
+        .bind(date)
+        .bind(start_min)
+        .bind(end_min);
 
     if let Some(id) = exclude_appointment_id {
         q = q.bind(id);
@@ -539,7 +539,9 @@ pub async fn get_appointments(
     // patient registry had. The bound is appended AFTER the dynamic $n numbering
     // above so the paging parameters always take the next free placeholder.
     let (lim, off) = crate::db::page_bounds(limit, offset);
-    let n = 1 + date_filter.is_some() as i32 + status_filter.is_some() as i32
+    let n = 1
+        + date_filter.is_some() as i32
+        + status_filter.is_some() as i32
         + effective_doctor_filter.is_some() as i32;
     query.push_str(&format!(" LIMIT ${} OFFSET ${}", n, n + 1));
 

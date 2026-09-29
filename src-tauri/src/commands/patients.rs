@@ -125,16 +125,14 @@ pub async fn search_patient_options(
         // arbitrary alphabetical slice of the hospital's patients: useless to the
         // user, and a bulk-PHI disclosure to any view that forgets to require a
         // search term first.
-        None => sqlx::query_as::<_, PatientOption>(&format!(
-            "{} WHERE FALSE",
-            PICKER_COLS
-        ))
-        .fetch_all(pool.inner())
-        .await,
+        None => {
+            sqlx::query_as::<_, PatientOption>(&format!("{} WHERE FALSE", PICKER_COLS))
+                .fetch_all(pool.inner())
+                .await
+        }
     };
     rows.map_err(|e| crate::db::sanitize_db_error(&e))
 }
-
 
 #[tauri::command]
 pub async fn get_patient(

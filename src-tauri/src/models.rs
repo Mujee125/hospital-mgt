@@ -1982,7 +1982,6 @@ pub struct PendingEmergencyVerification {
     pub severity: String,
 }
 
-
 #[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
 pub struct BloodTransfusion {

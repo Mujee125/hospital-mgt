@@ -40,11 +40,11 @@
 mod common;
 
 use common::*;
+use hospital_mgmt_lib::commands::appointments::check_doctor_overlap;
 use hospital_mgmt_lib::commands::appointments::{
     delete_appointment, get_appointment, get_appointment_stats, get_appointments,
     update_appointment_core, update_appointment_status_core,
 };
-use hospital_mgmt_lib::commands::appointments::check_doctor_overlap;
 use hospital_mgmt_lib::commands::doctors::create_login_for_doctor;
 use hospital_mgmt_lib::models::UpdateAppointment;
 use hospital_mgmt_lib::rbac::SessionState;
@@ -170,9 +170,10 @@ async fn rctf_a_b_c_own_list_ignores_malicious_doctor_filter() {
     // Test B: malicious doctor_filter = Doctor B — still only Doctor A's own.
     let app2 = app_for(&pool, doc_a_user, "hash_rctf_abc_doc_a").await;
     let (pool_s2, sess_s2) = states(&app2);
-    let with_malicious_filter = get_appointments(pool_s2, sess_s2, None, None, Some(doc_b), None, None)
-        .await
-        .expect("doctor A list (doctor_filter = B)");
+    let with_malicious_filter =
+        get_appointments(pool_s2, sess_s2, None, None, Some(doc_b), None, None)
+            .await
+            .expect("doctor A list (doctor_filter = B)");
     assert!(
         with_malicious_filter.iter().all(|a| a.doctor_id == doc_a),
         "doctor_filter=B must be ignored/overridden for an own-scope session, got: {:?}",
@@ -623,7 +624,10 @@ async fn h3_overlap_create_path_binds_four_and_detects_clash() {
 
     // 14:00-14:30 is free -> allowed.
     let free = check_doctor_overlap(&pool, doc, today(), 14 * 60, 30, None).await;
-    assert!(free.is_ok(), "CREATE path must allow a non-overlapping slot");
+    assert!(
+        free.is_ok(),
+        "CREATE path must allow a non-overlapping slot"
+    );
 }
 
 /// UPDATE path: the appointment being edited is passed as $5, so the SQL has

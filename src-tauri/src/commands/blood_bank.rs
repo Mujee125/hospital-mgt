@@ -147,7 +147,6 @@ struct EmergencyOverride {
     patient_untyped: bool,
 }
 
-
 /// FIX-A: validate the override documentation and return
 /// `(reason_code, indication, physician_order_ref)`.
 ///
@@ -158,14 +157,20 @@ struct EmergencyOverride {
 /// resuscitation, so each one must name the exact missing field and say what
 /// "good" looks like — an operator must never have to guess how to satisfy the
 /// control, or they will look for a way around it.
-fn validate_emergency_override(issue: &CreateBloodIssue) -> Result<(String, String, String), String> {
+fn validate_emergency_override(
+    issue: &CreateBloodIssue,
+) -> Result<(String, String, String), String> {
     let reason_code = issue
         .override_reason_code
         .as_deref()
         .unwrap_or("")
         .trim()
         .to_string();
-    validate_enum(&reason_code, VALID_OVERRIDE_REASON_CODES, "override_reason_code")?;
+    validate_enum(
+        &reason_code,
+        VALID_OVERRIDE_REASON_CODES,
+        "override_reason_code",
+    )?;
 
     let indication = issue
         .clinical_indication
@@ -238,16 +243,15 @@ async fn enforce_emergency_release_quota(
 
     // Read through the transaction so a NULL / missing / unparsable setting
     // falls back to the code default rather than to "no limit".
-    let raw: Option<String> = match sqlx::query_scalar::<_, String>(
-        "SELECT value FROM settings WHERE key = $1",
-    )
-    .bind(SETTING_KEY_RELEASE_LIMIT)
-    .fetch_optional(&mut **tx)
-    .await
-    {
-        Ok(v) => v,
-        Err(_) => None,
-    };
+    let raw: Option<String> =
+        match sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = $1")
+            .bind(SETTING_KEY_RELEASE_LIMIT)
+            .fetch_optional(&mut **tx)
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => None,
+        };
     let limit = raw
         .and_then(|v| v.trim().parse::<i64>().ok())
         .unwrap_or(DEFAULT_RELEASES_PER_24H)
@@ -272,14 +276,11 @@ async fn enforce_emergency_release_quota(
              their co-sign deadline count double). A second blood-bank holder must co-sign the \
              pending overrides (verify_blood_issue) — or, for a genuine mass-casualty event, a \
              supervisor raises '{}' in the settings table.",
-            weighted,
-            limit,
-            SETTING_KEY_RELEASE_LIMIT
+            weighted, limit, SETTING_KEY_RELEASE_LIMIT
         ));
     }
     Ok(())
 }
-
 
 fn validate_enum(value: &str, allowed: &[&str], field_name: &str) -> Result<(), String> {
     if !allowed.contains(&value) {
@@ -2453,12 +2454,7 @@ pub async fn issue_blood(
                          issue_type='emergency' with override_reason_code, a >=25-character \
                          clinical_indication and physician_order_ref; the release is then \
                          recorded for mandatory second-person review.",
-                        issue.unit_id,
-                        unit_bt.0,
-                        unit_bt.1,
-                        issue.patient_id,
-                        p_group,
-                        p_rh
+                        issue.unit_id, unit_bt.0, unit_bt.1, issue.patient_id, p_group, p_rh
                     )
                 };
                 return Err(reason);
@@ -2471,7 +2467,8 @@ pub async fn issue_blood(
             // be corrected later.
             let patient_untyped = p_group.is_empty() || p_rh.is_empty();
 
-            let (reason_code, indication, physician_order_ref) = validate_emergency_override(&issue)?;
+            let (reason_code, indication, physician_order_ref) =
+                validate_emergency_override(&issue)?;
 
             // Quota is checked INSIDE the transaction, on the SAME connection,
             // before the unit is claimed: a rejected release then rolls back
@@ -2585,11 +2582,20 @@ pub async fn issue_blood(
         emergency_override
             .as_ref()
             .map(|o| o.indication.clone())
-            .or_else(|| issue.clinical_indication.as_deref().map(|v| v.trim().to_string())),
+            .or_else(|| {
+                issue
+                    .clinical_indication
+                    .as_deref()
+                    .map(|v| v.trim().to_string())
+            }),
     )
     .bind(issue.special_instructions.as_deref())
     .bind(emergency_override.as_ref().map(|o| o.reason_code.clone()))
-    .bind(emergency_override.as_ref().map(|o| o.physician_order_ref.clone()))
+    .bind(
+        emergency_override
+            .as_ref()
+            .map(|o| o.physician_order_ref.clone()),
+    )
     // The flag IS the quarantine: TRUE until verify_blood_issue() clears it.
     .bind(emergency_override.is_some())
     .bind(override_due_at)
@@ -2898,16 +2904,20 @@ pub async fn verify_blood_issue(
     // Lock the oversight row. FOR UPDATE is what makes "already co-signed" a
     // decision made on fresh data: two verifiers clicking at the same moment
     // cannot both write a signature.
-    let row: Option<(i32, Option<i32>, bool, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as(
-            r#"SELECT id, issued_by_user_id, verification_required, verified_at
+    let row: Option<(
+        i32,
+        Option<i32>,
+        bool,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = sqlx::query_as(
+        r#"SELECT id, issued_by_user_id, verification_required, verified_at
                FROM blood_emergency_overrides
                WHERE issue_id = $1 FOR UPDATE"#,
-        )
-        .bind(issue_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| sanitize_db_error(&e))?;
+    )
+    .bind(issue_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| sanitize_db_error(&e))?;
 
     let (override_id, issued_by_user_id, required, already_verified) = row.ok_or_else(|| {
         format!(
@@ -2950,8 +2960,6 @@ pub async fn verify_blood_issue(
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty());
-
-
 
     sqlx::query(
         r#"UPDATE blood_emergency_overrides
@@ -3022,7 +3030,6 @@ pub async fn verify_blood_issue(
     }
     Ok(())
 }
-
 
 /// Receive/return blood back to the bank (unused return).
 /// RBAC: `BloodBankIssue`. Audit-logged. Moves the unit back to 'available'.
@@ -4224,7 +4231,10 @@ mod tests {
             Some(&long),
         ))
         .expect_err("an 81-character order reference must be refused");
-        assert!(err.contains("80 characters"), "message should state the cap: {err}");
+        assert!(
+            err.contains("80 characters"),
+            "message should state the cap: {err}"
+        );
     }
 
     #[test]

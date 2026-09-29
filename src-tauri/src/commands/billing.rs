@@ -67,7 +67,10 @@ pub async fn get_bills(
     // two correlated SUM subqueries per row, so an unbounded list is not just
     // "a lot of rows" — it is two extra scans per row, on the money table.
     let (lim, off) = crate::db::page_bounds(limit, offset);
-    let has_status = status_filter.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+    let has_status = status_filter
+        .as_deref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
     let q = if has_status {
         format!(
             "{} WHERE b.status = $1 ORDER BY b.created_at DESC, b.id DESC LIMIT $2 OFFSET $3",
