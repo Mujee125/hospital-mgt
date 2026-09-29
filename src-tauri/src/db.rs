@@ -410,6 +410,24 @@ pub fn validate_db_identifier(name: &str) -> Result<(), String> {
 //   6. Billing & finance         (bills, bill_items, payments)
 //   7. Inventory                 (inventory_items)
 //   8. System                    (settings, license_state)
+//
+// NOT CONCURRENCY-SAFE. The statements are individually idempotent
+// (`IF NOT EXISTS`), but that is not sufficient: `CREATE OR REPLACE FUNCTION`
+// is not idempotent, and two sessions issuing it against the same function
+// collide with SQLSTATE 40001 "tuple concurrently updated". A second caller
+// arriving while a first is still migrating will therefore FAIL partway
+// rather than wait.
+//
+// Callers MUST serialise. In production this holds naturally -- `main`
+// migrates once at startup before the app serves anything. Test harnesses do
+// NOT get that for free (integration tests migrate from many parallel
+// threads), so they must gate the call behind a `OnceCell` / mutex. See
+// `tests/common/mod.rs::shared_pool`, which deliberately migrates only inside
+// the provisioning `OnceCell` for this reason.
+//
+// A future change making this safe for concurrent callers should take a
+// `&mut PgConnection` and wrap the body in a transaction holding
+// `pg_advisory_xact_lock`, rather than taking `&PgPool`.
 
 pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")

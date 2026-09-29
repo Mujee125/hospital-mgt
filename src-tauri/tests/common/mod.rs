@@ -207,11 +207,18 @@ pub async fn shared_pool() -> PgPool {
     DB_PROVISIONED
         .get_or_init(|| async { provision_once().await })
         .await;
-    let pool = new_test_pool(8, 30).await;
-    hospital_mgmt_lib::db::run_migrations(&pool)
-        .await
-        .expect("run_migrations failed on test DB");
-    pool
+    // Deliberately does NOT call run_migrations again. provision_once already
+    // migrated the database once, under the OnceCell, so re-running here is
+    // pure redundancy -- and actively harmful. run_migrations is NOT
+    // concurrency-safe: it issues `CREATE OR REPLACE FUNCTION`, and two
+    // sessions doing that against the same function collide with
+    // SQLSTATE 40001 "tuple concurrently updated" (observed in
+    // ipc_security_tests, where whichever test lost the race panicked in
+    // `audit guard function:`). Tests in one binary run on parallel threads
+    // by default, so every one of them would re-migrate simultaneously.
+    // The DB is per-process, so a single migration under the OnceCell
+    // covers every test in the binary.
+    new_test_pool(8, 30).await
 }
 
 /// Legacy alias used by the Blood Bank suites (IT-001).
