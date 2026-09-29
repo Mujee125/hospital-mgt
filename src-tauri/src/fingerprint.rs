@@ -38,6 +38,12 @@ pub fn compute() -> Result<String, String> {
 /// Values some OEM/VM vendors write into SMBIOS serial fields instead of a
 /// real serial. Treating them as "present" would let fleets of identical
 /// white-box machines share fingerprints.
+/// Only referenced by the Windows WMI path and by the `#[cfg(test)]`
+/// fail-closed matrix below. On a non-Windows non-test build nothing uses
+/// them, so `dead_code` is an ERROR under CI's `-D warnings`. The `test`
+/// arm keeps the matrix tests running on the Linux runners -- they are pure
+/// string/hash logic and need no Windows hardware.
+#[cfg(any(target_os = "windows", test))]
 const FILLER_VALUES: &[&str] = &[
     "default string",
     "to be filled by o.e.m.",
@@ -57,6 +63,7 @@ const FILLER_VALUES: &[&str] = &[
 
 /// Is this identifier usable for fingerprinting? (non-empty after trim,
 /// and not one of the known filler values OEMs ship instead of a serial)
+#[cfg(any(target_os = "windows", test))]
 fn usable(value: &str) -> bool {
     let v = value.trim();
     !v.is_empty() && !FILLER_VALUES.iter().any(|f| v.eq_ignore_ascii_case(f))
@@ -66,6 +73,7 @@ fn usable(value: &str) -> bool {
 /// identifiers, then hashes the usable components (normalized by trim).
 /// Exposed separately so tests can exercise the degenerate-identifier
 /// matrix without owning the hardware that produces it.
+#[cfg(any(target_os = "windows", test))]
 fn effective_fingerprint(cpu_id: &str, board_sn: &str, bios_sn: &str) -> Result<String, String> {
     let components = [("cpu", cpu_id), ("baseboard", board_sn), ("bios", bios_sn)];
     let usable_count = components.iter().filter(|(_, v)| usable(v)).count();
