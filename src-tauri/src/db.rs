@@ -541,18 +541,29 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // then attach the CHECK. DROP IF EXISTS first keeps the ADD idempotent.
     sqlx::query("UPDATE appointments SET status = 'cancelled' WHERE status NOT IN ('scheduled','confirmed','arrived','completed','cancelled','no-show')")
         .execute(pool).await.map_err(|e| format!("appointments status normalize: {}", e))?;
-    sqlx::query("ALTER TABLE appointments DROP CONSTRAINT IF EXISTS chk_appointments_status")
-        .execute(pool)
-        .await
-        .map_err(|e| format!("appointments chk drop: {}", e))?;
     // PK-2026-09-14 gap-1: added 'arrived' between 'confirmed' and
     // 'completed' — Pakistani front-desk workflow tracks phone/WhatsApp
     // confirmation (a day ahead) separately from physical check-in at the
     // counter (same day). Previously both collapsed into "confirmed",
     // so reception had no signal of who was actually present in the
     // waiting area vs. who had merely confirmed by phone.
-    sqlx::query("ALTER TABLE appointments ADD CONSTRAINT chk_appointments_status CHECK (status IN ('scheduled','confirmed','arrived','completed','cancelled','no-show'))")
-        .execute(pool).await.map_err(|e| format!("appointments chk: {}", e))?;
+    //
+    // CONCURRENCY: the DROP and the ADD MUST be one statement. As two separate
+    // statements a concurrent migrator can interleave between them (we drop,
+    // the other migrator adds, we add -> "already exists"), and any session
+    // can write rows in the window where the constraint is absent. A single
+    // DO block is atomic and holds ACCESS EXCLUSIVE on the table for its
+    // duration, so concurrent migrators serialise instead of racing.
+    sqlx::query(
+        r#"
+        DO $$ BEGIN
+            ALTER TABLE appointments DROP CONSTRAINT IF EXISTS chk_appointments_status;
+            ALTER TABLE appointments ADD CONSTRAINT chk_appointments_status
+                CHECK (status IN ('scheduled','confirmed','arrived','completed','cancelled','no-show'));
+        END $$;
+        "#,
+    )
+    .execute(pool).await.map_err(|e| format!("appointments chk: {e}"))?;
 
     // RCTF-FULL-SYSTEM-2026-09-08 F-23 (H3 remainder): the app-level
     // check_doctor_overlap guard is check-then-act — two receptionists
@@ -603,24 +614,28 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| format!("appointments conflict heal: {}", e))?;
-    sqlx::query("ALTER TABLE appointments DROP CONSTRAINT IF EXISTS excl_appt_doctor_slot")
-        .execute(pool)
-        .await
-        .map_err(|e| format!("appointments excl drop: {}", e))?;
+    // CONCURRENCY: DROP+ADD must be ONE statement (see the note at
+    // chk_appointments_status) so a concurrent migrator cannot interleave
+    // between them, and no writer can slip rows in while the constraint is
+    // absent. A single DO block is atomic and holds ACCESS EXCLUSIVE on the
+    // table for its duration.
     sqlx::query(
         r#"
-        ALTER TABLE appointments ADD CONSTRAINT excl_appt_doctor_slot
-          EXCLUDE USING gist (
-            doctor_id WITH =,
-            appointment_date WITH =,
-            (hms_appt_tsrange(appointment_date, appointment_time, duration_minutes)) WITH &&
-          )
-          WHERE (status IN ('scheduled', 'confirmed', 'arrived'))
+        DO $$ BEGIN
+            ALTER TABLE appointments DROP CONSTRAINT IF EXISTS excl_appt_doctor_slot;
+            ALTER TABLE appointments ADD CONSTRAINT excl_appt_doctor_slot
+              EXCLUDE USING gist (
+                doctor_id WITH =,
+                appointment_date WITH =,
+                (hms_appt_tsrange(appointment_date, appointment_time, duration_minutes)) WITH &&
+              )
+              WHERE (status IN ('scheduled', 'confirmed', 'arrived'));
+        END $$;
         "#,
     )
     .execute(pool)
     .await
-    .map_err(|e| format!("appointments excl constraint: {}", e))?;
+    .map_err(|e| format!("appointments excl constraint: {e}"))?;
 
     sqlx::query(
         r#"
@@ -923,17 +938,21 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     sqlx::query("UPDATE patients SET rh_factor = NULL WHERE rh_factor IS NOT NULL AND rh_factor NOT IN ('+', '-')")
         .execute(pool).await
         .map_err(|e| format!("patients.rh_factor normalize: {}", e))?;
-    sqlx::query("ALTER TABLE patients DROP CONSTRAINT IF EXISTS chk_patients_rh_factor")
-        .execute(pool)
-        .await
-        .ok();
+    // CONCURRENCY: DROP+ADD must be ONE statement (see the note at
+    // chk_appointments_status) so a concurrent migrator cannot interleave and
+    // no writer can slip rows in while the constraint is absent.
     sqlx::query(
-        "ALTER TABLE patients ADD CONSTRAINT chk_patients_rh_factor \
-         CHECK (rh_factor IS NULL OR rh_factor IN ('+', '-'))",
+        r#"
+        DO $$ BEGIN
+            ALTER TABLE patients DROP CONSTRAINT IF EXISTS chk_patients_rh_factor;
+            ALTER TABLE patients ADD CONSTRAINT chk_patients_rh_factor
+                CHECK (rh_factor IS NULL OR rh_factor IN ('+', '-'));
+        END $$;
+        "#,
     )
     .execute(pool)
     .await
-    .map_err(|e| format!("patients.rh_factor check: {}", e))?;
+    .map_err(|e| format!("chk_patients_rh_factor: {e}"))?;
 
     sqlx::query(
         r#"
@@ -1323,26 +1342,37 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // critical result may sit 'entered' (alert raised, awaiting
     // acknowledgment), but may only be 'approved' (released to clinicians)
     // AFTER its critical flag has been acknowledged.
-    sqlx::query("ALTER TABLE lab_order_tests DROP CONSTRAINT IF EXISTS chk_lot_approval_status")
-        .execute(pool)
-        .await
-        .ok();
+    // CONCURRENCY: DROP+ADD must be ONE statement (see the note at
+    // chk_appointments_status) so a concurrent migrator cannot interleave and
+    // no writer can slip rows in while the constraint is absent.
     sqlx::query(
-        "ALTER TABLE lab_order_tests ADD CONSTRAINT chk_lot_approval_status \
-         CHECK (approval_status IS NULL OR approval_status IN ('entered','approved','amended'))",
+        r#"
+        DO $$ BEGIN
+            ALTER TABLE lab_order_tests DROP CONSTRAINT IF EXISTS chk_lot_approval_status;
+            ALTER TABLE lab_order_tests ADD CONSTRAINT chk_lot_approval_status
+                CHECK (approval_status IS NULL OR approval_status IN ('entered','approved','amended'));
+        END $$;
+        "#,
     )
     .execute(pool)
     .await
-    .map_err(|e| format!("chk_lot_approval_status: {}", e))?;
-    sqlx::query("ALTER TABLE lab_order_tests DROP CONSTRAINT IF EXISTS chk_lot_critical_release")
-        .execute(pool)
-        .await
-        .ok();
+    .map_err(|e| format!("chk_lot_approval_status: {e}"))?;
+    // CONCURRENCY: DROP+ADD must be ONE statement (see the note at
+    // chk_appointments_status) so a concurrent migrator cannot interleave and
+    // no writer can slip rows in while the constraint is absent.
     sqlx::query(
-        "ALTER TABLE lab_order_tests ADD CONSTRAINT chk_lot_critical_release \
-         CHECK (approval_status IS DISTINCT FROM 'approved' OR result_abnormal_flag IS DISTINCT FROM 'critical' \
-                OR critical_acknowledged_at IS NOT NULL)",
-    ).execute(pool).await.map_err(|e| format!("chk_lot_critical_release: {}", e))?;
+        r#"
+        DO $$ BEGIN
+            ALTER TABLE lab_order_tests DROP CONSTRAINT IF EXISTS chk_lot_critical_release;
+            ALTER TABLE lab_order_tests ADD CONSTRAINT chk_lot_critical_release
+                CHECK (approval_status IS DISTINCT FROM 'approved' OR result_abnormal_flag IS DISTINCT FROM 'critical'
+                    OR critical_acknowledged_at IS NOT NULL);
+        END $$;
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("chk_lot_critical_release: {e}"))?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_lab_orders_status ON lab_orders(status, ordered_at DESC)",
     )
@@ -1578,17 +1608,21 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // Cancellation status vocabulary: legacy draft/unpaid/paid/partial
     // remain ('pending' is tolerated — the 10k synthetic seed used it
     // historically); 'cancelled' marks a credit-noted bill.
-    sqlx::query("ALTER TABLE bills DROP CONSTRAINT IF EXISTS chk_bills_status")
-        .execute(pool)
-        .await
-        .ok();
+    // CONCURRENCY: DROP+ADD must be ONE statement (see the note at
+    // chk_appointments_status) so a concurrent migrator cannot interleave and
+    // no writer can slip rows in while the constraint is absent.
     sqlx::query(
-        "ALTER TABLE bills ADD CONSTRAINT chk_bills_status \
-         CHECK (status IN ('draft','unpaid','partial','paid','pending','cancelled'))",
+        r#"
+        DO $$ BEGIN
+            ALTER TABLE bills DROP CONSTRAINT IF EXISTS chk_bills_status;
+            ALTER TABLE bills ADD CONSTRAINT chk_bills_status
+                CHECK (status IN ('draft','unpaid','partial','paid','pending','cancelled'));
+        END $$;
+        "#,
     )
     .execute(pool)
     .await
-    .map_err(|e| format!("chk_bills_status: {}", e))?;
+    .map_err(|e| format!("chk_bills_status: {e}"))?;
 
     // ── 6c. Accounts — expense ledger (SRS §2.15 — Phase 8, 2026-09-06) ──
     //
@@ -2099,17 +2133,21 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     "#).execute(pool).await.map_err(|e| format!("medication_administrations: {}", e))?;
 
     // Integrity: MAR status must be a known value.
-    sqlx::query("ALTER TABLE medication_administrations DROP CONSTRAINT IF EXISTS chk_mar_status")
-        .execute(pool)
-        .await
-        .ok();
+    // CONCURRENCY: DROP+ADD must be ONE statement (see the note at
+    // chk_appointments_status) so a concurrent migrator cannot interleave and
+    // no writer can slip rows in while the constraint is absent.
     sqlx::query(
-        "ALTER TABLE medication_administrations ADD CONSTRAINT chk_mar_status \
-         CHECK (status IN ('administered', 'held', 'refused'))",
+        r#"
+        DO $$ BEGIN
+            ALTER TABLE medication_administrations DROP CONSTRAINT IF EXISTS chk_mar_status;
+            ALTER TABLE medication_administrations ADD CONSTRAINT chk_mar_status
+                CHECK (status IN ('administered', 'held', 'refused'));
+        END $$;
+        "#,
     )
     .execute(pool)
     .await
-    .map_err(|e| format!("chk_mar_status: {}", e))?;
+    .map_err(|e| format!("chk_mar_status: {e}"))?;
 
     // Indexes for the ward workflow queries.
     sqlx::query(
@@ -2816,15 +2854,21 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     .await
     .map_err(|e| format!("beds status normalize: {}", e))?;
 
-    sqlx::query("ALTER TABLE beds DROP CONSTRAINT IF EXISTS chk_beds_status")
-        .execute(pool)
-        .await
-        .map_err(|e| format!("beds chk drop: {}", e))?;
-
-    sqlx::query("ALTER TABLE beds ADD CONSTRAINT chk_beds_status CHECK (status IN ('available','occupied','maintenance'))")
-        .execute(pool)
-        .await
-        .map_err(|e| format!("beds chk: {}", e))?;
+    // CONCURRENCY: DROP+ADD must be ONE statement (see the note at
+    // chk_appointments_status) so a concurrent migrator cannot interleave and
+    // no writer can slip rows in while the constraint is absent.
+    sqlx::query(
+        r#"
+        DO $$ BEGIN
+            ALTER TABLE beds DROP CONSTRAINT IF EXISTS chk_beds_status;
+            ALTER TABLE beds ADD CONSTRAINT chk_beds_status
+                CHECK (status IN ('available','occupied','maintenance'));
+        END $$;
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("chk_beds_status: {e}"))?;
 
     // Pre-attach heal: if any bed somehow has two 'admitted' rows (shouldn't
     // happen through the app, but possible via direct SQL or a stale buggy

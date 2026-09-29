@@ -32,6 +32,24 @@ fn maintenance_url() -> String {
     )
 }
 
+/// Name of THIS process's test database.
+///
+/// CARGO RUNS TEST BINARIES CONCURRENTLY. `--test-threads=1` only serialises
+/// threads *inside* one binary, so every integration binary is its own OS
+/// process. They all used to share one hard-coded `hospital_db_test`, and
+/// `fresh_test_db()` does `pg_terminate_backend` + `DROP DATABASE` +
+/// `CREATE DATABASE` on it -- so N processes tore the database down and
+/// recreated it underneath each other, interleaving two `run_migrations`
+/// passes and failing with e.g.
+///   constraint "chk_beds_status" for relation "beds" already exists.
+///
+/// A per-process database removes the collision entirely: no two binaries
+/// ever touch the same schema, and each gets a pristine, fully-migrated
+/// database. It also makes the suite safe to run alongside a live app.
+fn test_db_name() -> String {
+    format!("hospital_db_test_{}", std::process::id())
+}
+
 fn test_db_url() -> String {
     let url = maintenance_url();
     // Review Pass 3, P3-8: preserve the query string. The old
@@ -45,9 +63,10 @@ fn test_db_url() -> String {
     let (prefix, _db) = base
         .rsplit_once('/')
         .expect("HMS_TEST_DB_URL must end with a database name");
+    let name = test_db_name();
     match query {
-        Some(q) => format!("{}/hospital_db_test?{}", prefix, q),
-        None => format!("{}/hospital_db_test", prefix),
+        Some(q) => format!("{}/{name}?{q}", prefix),
+        None => format!("{}/{name}", prefix),
     }
 }
 
@@ -122,19 +141,20 @@ pub async fn fresh_test_db() -> PgPool {
     std::env::set_var("ProgramData", &tmp_pd);
 
     let maint = maintenance_pool().await;
-    let _ = sqlx::query(
+    let db = test_db_name();
+    let _ = sqlx::query(&format!(
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
-         WHERE datname = 'hospital_db_test' AND pid <> pg_backend_pid()",
-    )
+         WHERE datname = '{db}' AND pid <> pg_backend_pid()"
+    ))
     .execute(&maint)
     .await;
-    let _ = sqlx::query("DROP DATABASE IF EXISTS hospital_db_test")
+    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
         .execute(&maint)
         .await;
-    sqlx::query("CREATE DATABASE hospital_db_test")
+    sqlx::query(&format!("CREATE DATABASE {db}"))
         .execute(&maint)
         .await
-        .expect("failed to create hospital_db_test");
+        .expect("failed to create the per-process test database");
     maint.close().await;
 
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -142,7 +162,7 @@ pub async fn fresh_test_db() -> PgPool {
         .acquire_timeout(std::time::Duration::from_secs(60))
         .connect(&test_db_url())
         .await
-        .expect("failed to connect to hospital_db_test");
+        .expect("failed to connect to the per-process test database");
 
     hospital_mgmt_lib::db::run_migrations(&pool)
         .await
