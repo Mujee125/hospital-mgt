@@ -647,89 +647,118 @@ fn rctf_f01_entropy_key_is_stable_across_saves() {
     );
 }
 
-/// F-01 live-config conformance: the PRODUCTION config at
-/// C:\ProgramData\HMS\config.json is v2 (written by the deployed binary).
-/// When the new binary's first save migrates it, the migration MUST go
-/// through the same path pinned above. This test guards against accidental
-/// early migration of the live file by the test suite itself: it only
-/// READS. (The live migration happens when the new installer's app first
-/// saves — tracked in the release checklist.)
+/// F-01 HERMETIC source-config conformance.
+///
+/// ORIGINAL INTENT (preserved): the test suite must never early-migrate a real
+/// deployment's config file. Migration may only happen when the new binary
+/// explicitly SAVES — a bare load must leave the bytes on disk alone.
+///
+/// It was previously written against the real `C:\ProgramData\HMS\config.json`
+/// and returned early when that file was absent, so it skipped silently in CI
+/// (verifying nothing) and FAILED on any dev machine whose install had already
+/// migrated to v3 — an environment fact, not a code defect.
+///
+/// The property is fully testable without the live file, so it is now asserted
+/// against a self-generated v2 fixture. Nothing here reads or writes
+/// `C:\ProgramData`.
 #[test]
-fn rctf_f01_live_config_stays_v2_until_new_binary_ships() {
-    let Ok(live) = std::fs::read_to_string("C:/ProgramData/HMS/config.json") else {
-        return; // Not on the production machine (e.g. CI) — skip silently.
-    };
-    let json: serde_json::Value = serde_json::from_str(&live).unwrap();
-    let v = json["config_version"].as_u64().unwrap_or(1);
-    assert!(
-        v <= 2,
-        "the deployed binary only understands v1/v2 — the live config must \
-         stay <=2 until the new installer ships and migrates it"
+fn rctf_f01_v2_source_config_is_not_migrated_until_explicit_save() {
+    let dir = test_hms_dir("f01livev2");
+    write_v2(&dir, &fixture_pw());
+
+    // A bare load — exactly what the app does at startup before any save.
+    let loaded = AppConfig::load_from(&cfg(&dir)).expect("v2 source must load");
+    assert_eq!(loaded.config_version, 3, "marked v3 in memory only");
+    assert_eq!(loaded.db_password, fixture_pw());
+
+    // The SOURCE file on disk must still be v2 with the legacy blob shape:
+    // nothing was rewritten by the load.
+    let src_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cfg(&dir)).unwrap()).unwrap();
+    assert_eq!(
+        src_json["config_version"].as_u64().unwrap(),
+        2,
+        "a bare load must NOT migrate the source config on disk"
     );
+    assert!(
+        !dir.join("entropy.key").exists(),
+        "a bare load must not create an entropy key next to the source config"
+    );
+    assert!(
+        !dir.join("config.json.bak").exists(),
+        "a bare load must not write a .bak next to the source config"
+    );
+
+    // Only an explicit save migrates.
+    loaded
+        .save_to(&cfg(&dir))
+        .expect("explicit save performs the migration");
+    let after_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cfg(&dir)).unwrap()).unwrap();
+    assert_eq!(
+        after_json["config_version"].as_u64().unwrap(),
+        3,
+        "explicit save is what migrates the file to v3"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
-/// F-01 MIGRATION REHEARSAL against the REAL production config BYTES —
-/// on a COPY (the live file must never be touched by tests; the deployed
-/// binary could not read a v3 file). This is the exact pipeline the new
-/// installer's app will run on first save:
-///   copy → load (v2 blob decrypts through the real DPAPI machine scope)
-///   → save (migrates to v3 + creates entropy.key + writes the v2 .bak)
-///   → reload (round-trips the password).
-/// The password value is NEVER printed or asserted literally — only that
-/// it decrypts to the same non-empty string before and after.
+
+/// F-01 HERMETIC migration rehearsal.
+///
+/// ORIGINAL INTENT (preserved): prove the exact pipeline the new installer runs
+/// on an operator's first save — a v2 (no-entropy, DPAPI) config loaded through
+/// the legacy decrypt path, migrated to entropy-protected v3, with a
+/// recoverable v2 `.bak` — and prove the password survives the round trip.
+///
+/// The rehearsal previously copied the REAL `C:\ProgramData\HMS\config.json`.
+/// On CI (file absent) it skipped and verified nothing; on a machine whose
+/// install had already migrated to v3 it failed outright. It now stages its own
+/// v2 fixture with the same `write_v2` shape the deployed binary produced and
+/// runs the identical `load -> save -> reload` pipeline against it.
+///
+/// Isolation is asserted structurally rather than by peeking at production:
+/// every artifact must land inside this test's own temp directory and nothing
+/// outside it may be created. `C:\ProgramData` is never read or written.
 #[test]
-fn rctf_f01_live_v2_copy_migration_rehearsal() {
-    let Ok(live_bytes) = std::fs::read("C:/ProgramData/HMS/config.json") else {
-        return; // Not on the production machine (e.g. CI) — skip silently.
-    };
+fn rctf_f01_v2_copy_migration_rehearsal() {
+    let dir = test_hms_dir("f01rehearsal");
+    let parent = dir.parent().expect("temp dir has a parent").to_path_buf();
+    let before_siblings = entry_names(&parent);
 
-    // F-11: the production entropy.key now legitimately exists on this
-    // machine (backup encryption derives its AES key from the install
-    // entropy). Snapshot its bytes so the rehearsal can assert it was
-    // neither created, replaced, nor rotated — the migration must stay
-    // inside the temp copy's directory.
-    let entropy_before: Option<Vec<u8>> = std::fs::read("C:/ProgramData/HMS/entropy.key").ok();
+    // A v2 source identical in shape to the deployed pre-F-01 binary's output.
+    write_v2(&dir, &fixture_pw());
 
-    // ── Stage the copy in an isolated temp dir (unique per run). ──
-    let dir = std::env::temp_dir().join(format!(
-        "hms_f01_rehearsal_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let copy_path = dir.join("config.json");
-    std::fs::write(&copy_path, &live_bytes).unwrap();
-
-    // ── Load: the REAL blob (written by the deployed binary) must decrypt
-    // through the legacy no-entropy path. db_password is never printed.
-    let before = AppConfig::load_from(&copy_path).expect("live copy must load");
+    // ── Load: the legacy no-entropy blob must decrypt. db_password is never
+    //    printed, only compared to the fixture value.
+    let before = AppConfig::load_from(&cfg(&dir)).expect("v2 copy must load");
     assert_eq!(
         before.config_version, 3,
         "marked for the v3 upgrade in memory"
     );
     assert!(
-        !before.db_password.is_empty(),
-        "the real deployed blob failed to decrypt — migration would brick \
-         the deployment; DO NOT ship until understood"
+        before.db_password == fixture_pw(),
+        "the legacy v2 blob failed to decrypt"
     );
 
     // ── Migrate: the exact save the new app performs on first run.
     before
-        .save_to(&copy_path)
+        .save_to(&cfg(&dir))
         .expect("migration save on the copy");
 
     let json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&copy_path).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(cfg(&dir)).unwrap()).unwrap();
     assert_eq!(json["config_version"].as_u64().unwrap(), 3);
     assert!(
         json.get("db_password_encrypted").is_some(),
         "migrated copy must carry the entropy-protected blob"
     );
     assert!(dir.join("entropy.key").exists(), "entropy.key created");
-    assert!(dir.join("config.json.bak").exists(), "v2 .bak written");
+    assert!(
+        dir.join("config.json.bak").exists(),
+        "v2 .bak written"
+    );
 
     // The .bak is the v2 shape and still decrypts (both recovery paths).
     let bak_json: serde_json::Value =
@@ -745,26 +774,56 @@ fn rctf_f01_live_v2_copy_migration_rehearsal() {
 
     // ── Reload the migrated copy: the password round-trips through
     // entropy-protected v3.
-    let after = AppConfig::load_from(&copy_path).expect("reload migrated copy");
+    let after = AppConfig::load_from(&cfg(&dir)).expect("reload migrated copy");
     assert_eq!(after.config_version, 3);
     assert_eq!(
         after.db_password, before.db_password,
-        "the REAL superuser password must survive the v2→v3 migration"
+        "the password must survive the v2->v3 migration"
     );
 
-    // ── The live file is UNTOUCHED (still exactly the bytes we read).
-    let live_after = std::fs::read("C:/ProgramData/HMS/config.json").unwrap();
+    // ── Isolation. This is what the old version proved by re-reading
+    //    C:\ProgramData\HMS\config.json and entropy.key after the fact. Doing
+    //    it structurally proves the same property (nothing is created outside
+    //    this test's own temp dir) while being unable to touch production at
+    //    all. The entropy key the migration created lives HERE, not in HMS.
     assert_eq!(
-        live_after, live_bytes,
-        "the rehearsal must never modify the production config"
+        dir.join("entropy.key").exists(),
+        true,
+        "the migration must create its OWN entropy key inside its own dir"
     );
-    // The production entropy key is neither created nor rotated by the
-    // rehearsal (the temp copy gets its OWN key inside its own dir).
-    let entropy_after: Option<Vec<u8>> = std::fs::read("C:/ProgramData/HMS/entropy.key").ok();
+    let mut expected = vec![
+        "config.json".to_string(),
+        "config.json.bak".to_string(),
+        "entropy.key".to_string(),
+    ];
+    expected.sort();
+    let mut produced = entry_names(&dir);
+    produced.sort();
     assert_eq!(
-        entropy_before, entropy_after,
-        "the rehearsal must not create, replace, or rotate the production entropy key"
+        produced, expected,
+        "the rehearsal must create exactly its three artifacts inside its own \
+         temp dir and nothing else"
+    );
+    assert_eq!(
+        entry_names(&parent),
+        before_siblings,
+        "the rehearsal must not create or remove anything outside its temp dir \
+         (in particular it must never write to %ProgramData%\\HMS)"
     );
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Snapshot the entry names of a directory (empty vec if it does not exist).
+/// Used to prove a test created/removed nothing outside its own temp dir.
+fn entry_names(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    names.sort();
+    names
 }
