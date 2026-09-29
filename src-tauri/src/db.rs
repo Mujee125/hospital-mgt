@@ -1063,13 +1063,9 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     // dashboard revenue never moved. The UNIQUE constraint is the
     // idempotency guarantee: at most one bill per appointment, so a
     // re-completion or an IPC retry can never double-charge a patient.
-    sqlx::query(
-        "ALTER TABLE bills ADD COLUMN IF NOT EXISTS appointment_id \
-         INT UNIQUE REFERENCES appointments(id) ON DELETE SET NULL",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| format!("bills.appointment_id: {}", e))?;
+    // BILLING-LINK-2026-09-16: the appointment-to-billing bridge now lives
+    // immediately AFTER the `bills` CREATE TABLE in section 6 below, because
+    // an ALTER TABLE cannot precede the table it alters. See the note there.
 
     // PK-2026-09-14 gap-4: national ID (CNIC) on the patient record.
     // Reception routinely confirms identity by CNIC before check-in;
@@ -1383,6 +1379,28 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| format!("bills: {}", e))?;
+
+    // BILLING-LINK-2026-09-16: the appointment-to-billing bridge. Bills
+    // previously had no reference back to the appointment they arose from,
+    // so completing an appointment could never produce (or be reconciled
+    // against) an invoice -- the Billing section showed "No invoices" and
+    // dashboard revenue never moved. The UNIQUE constraint is the
+    // idempotency guarantee: at most one bill per appointment, so a
+    // re-completion or an IPC retry can never double-charge a patient.
+    //
+    // PLACEMENT CONSTRAINT: this ALTER must stay AFTER the `bills` CREATE
+    // TABLE immediately above. It previously sat ~300 lines earlier, before
+    // `bills` existed, and `run_migrations` aborted with
+    // `relation "bills" does not exist`, which failed every integration
+    // suite that needs a migrated DB. An ALTER TABLE cannot precede the
+    // table it alters.
+    sqlx::query(
+        "ALTER TABLE bills ADD COLUMN IF NOT EXISTS appointment_id \
+         INT UNIQUE REFERENCES appointments(id) ON DELETE SET NULL",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("bills.appointment_id: {}", e))?;
 
     sqlx::query(
         r#"
