@@ -115,9 +115,16 @@ pub async fn test_pool() -> PgPool {
     DB_PROVISIONED
         .get_or_init(|| async { provision_once().await })
         .await;
+    new_test_pool(8, 30).await
+}
+
+/// Open a fresh pool to the per-process test database on the CURRENT test's
+/// runtime. Never returned as a static: see the zombie-connection note on
+/// DB_PROVISIONED.
+async fn new_test_pool(max_connections: u32, acquire_secs: u64) -> PgPool {
     sqlx::postgres::PgPoolOptions::new()
-        .max_connections(8)
-        .acquire_timeout(std::time::Duration::from_secs(30))
+        .max_connections(max_connections)
+        .acquire_timeout(std::time::Duration::from_secs(acquire_secs))
         .connect(&test_db_url())
         .await
         .expect("connect to hospital_db_test")
@@ -142,19 +149,29 @@ pub async fn fresh_test_db() -> PgPool {
 
     let maint = maintenance_pool().await;
     let db = test_db_name();
-    let _ = sqlx::query(&format!(
-        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
-         WHERE datname = '{db}' AND pid <> pg_backend_pid()"
-    ))
-    .execute(&maint)
-    .await;
-    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db}"))
+    // `WITH (FORCE)` terminates the remaining sessions as part of the DROP
+    // itself. A separate pg_terminate_backend first is racy: a connection can
+    // reappear in between, the DROP then fails with "being used by other
+    // users", and -- because that error was discarded -- CREATE DATABASE hits
+    // `duplicate key ... pg_database_datname_index` instead.
+    let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
         .execute(&maint)
         .await;
-    sqlx::query(&format!("CREATE DATABASE {db}"))
+    // 42P04/23505 = the name is taken. Tolerated only because the name is
+    // per-process: it can only mean a previous run that reused this pid left
+    // the database behind and the DROP above failed to remove it. Provisioning
+    // is serialized by DB_PROVISIONED, so this is not a live race.
+    if let Err(e) = sqlx::query(&format!("CREATE DATABASE {db}"))
         .execute(&maint)
         .await
-        .expect("failed to create the per-process test database");
+    {
+        let already_exists = e
+            .as_database_error()
+            .is_some_and(|d| matches!(d.code().as_deref(), Some("42P04" | "23505")));
+        if !already_exists {
+            panic!("failed to create the per-process test database {db}: {e}");
+        }
+    }
     maint.close().await;
 
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -179,20 +196,22 @@ async fn provision_once() {
 /// Connect to an EXISTING test DB (no drop/create) — used by suites that run
 /// after another suite already provisioned it within the same cargo test run.
 pub async fn shared_pool() -> PgPool {
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(8)
-        .connect(&test_db_url())
+    // MUST go through DB_PROVISIONED. This function used to try a plain
+    // connect first and fall back to `fresh_test_db()` when that failed --
+    // but `fresh_test_db` DROPs and CREATEPDATABASEs, so N tests running in
+    // parallel inside one process all missed on the (not-yet-created) DB and
+    // all ran the create concurrently, colliding on
+    // `pg_database_datname_index`. The old single shared name usually already
+    // existed, which is why the fallback rarely fired; per-process names
+    // exposed it. The OnceCell makes "create + migrate" happen exactly once.
+    DB_PROVISIONED
+        .get_or_init(|| async { provision_once().await })
         .await;
-    match pool {
-        Ok(p) => {
-            // Idempotent: safe even if another binary already migrated.
-            hospital_mgmt_lib::db::run_migrations(&p)
-                .await
-                .expect("run_migrations failed on test DB");
-            p
-        }
-        Err(_) => fresh_test_db().await,
-    }
+    let pool = new_test_pool(8, 30).await;
+    hospital_mgmt_lib::db::run_migrations(&pool)
+        .await
+        .expect("run_migrations failed on test DB");
+    pool
 }
 
 /// Legacy alias used by the Blood Bank suites (IT-001).

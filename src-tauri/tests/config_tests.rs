@@ -265,11 +265,10 @@ fn wp3_i05_bak_created_once_not_clobbered() {
 /// WP3-N01/N02 — wrong-machine key and corrupted blob share the same
 /// observable failure: DPAPI decrypt fails. The app must degrade to an
 /// EMPTY password (never garbage) so startup redirects to the repair
-/// screen. (True cross-machine testing needs a second machine — tracked
+/// screen. (True cross-machine testing needs a second machine, which is
+/// not available here.)
 // DPAPI-specific: secrets degrades to PLAINTEXT on non-Windows by design, so
-/// proven here.)
-#[test]
-// these assertions are only meaningful on Windows (see src/secrets.rs).
+// this assertion is only meaningful on Windows (see src/secrets.rs).
 #[cfg(target_os = "windows")]
 #[test]
 fn wp3_n01_n02_wrong_key_or_corrupted_blob() {
@@ -323,12 +322,12 @@ fn wp3_n04_unknown_version_rejected() {
 
 // ── G.3.4 Penetration tests (WP3-P01, P02) ───────────────────────────────────
 
+/// WP3-P01 — a stolen config file yields nothing: the password is not
+/// recoverable without the machine key. Asserts (a) no plaintext on disk,
+/// (b) the base64-decoded blob does not contain the plaintext either (it is
+/// real DPAPI ciphertext, not a re-encoding of the password).
 // DPAPI-specific: secrets degrades to PLAINTEXT on non-Windows by design, so
-/// password. Asserts (a) no plaintext on disk, (b) the base64-decoded
-/// blob does not contain the plaintext either (it is real DPAPI
-/// ciphertext, not a re-encoding of the password).
-#[test]
-// these assertions are only meaningful on Windows (see src/secrets.rs).
+// this assertion is only meaningful on Windows (see src/secrets.rs).
 #[cfg(target_os = "windows")]
 #[test]
 fn wp3_p01_stolen_config_yields_nothing() {
@@ -526,6 +525,9 @@ fn rctf_f01_v2_migrates_to_entropy_protected_v3() {
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(cfg(&hms)).unwrap()).unwrap();
     assert_eq!(json["config_version"].as_u64().unwrap(), 3);
+    // Read only by the Windows-gated F-01 pin below; on other platforms
+    // `secrets` is pass-through, so there is nothing meaningful to assert.
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
     let blob = json["db_password_encrypted"].as_str().unwrap();
     assert!(
         std::fs::read(entropy_key(&hms)).is_ok(),
@@ -791,9 +793,8 @@ fn rctf_f01_v2_copy_migration_rehearsal() {
     //    it structurally proves the same property (nothing is created outside
     //    this test's own temp dir) while being unable to touch production at
     //    all. The entropy key the migration created lives HERE, not in HMS.
-    assert_eq!(
+    assert!(
         dir.join("entropy.key").exists(),
-        true,
         "the migration must create its OWN entropy key inside its own dir"
     );
     let mut expected = vec![

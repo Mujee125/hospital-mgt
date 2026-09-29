@@ -244,14 +244,11 @@ async fn enforce_emergency_release_quota(
     // Read through the transaction so a NULL / missing / unparsable setting
     // falls back to the code default rather than to "no limit".
     let raw: Option<String> =
-        match sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = $1")
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = $1")
             .bind(SETTING_KEY_RELEASE_LIMIT)
             .fetch_optional(&mut **tx)
             .await
-        {
-            Ok(v) => v,
-            Err(_) => None,
-        };
+            .unwrap_or_default();
     let limit = raw
         .and_then(|v| v.trim().parse::<i64>().ok())
         .unwrap_or(DEFAULT_RELEASES_PER_24H)
@@ -2901,15 +2898,20 @@ pub async fn verify_blood_issue(
 
     let mut tx = pool.begin().await.map_err(|e| sanitize_db_error(&e))?;
 
-    // Lock the oversight row. FOR UPDATE is what makes "already co-signed" a
-    // decision made on fresh data: two verifiers clicking at the same moment
-    // cannot both write a signature.
-    let row: Option<(
+    // Row shape of the SELECT above. Named so the tuple does not have to be
+    // spelled inline (clippy::type_complexity) and so the column order is
+    // documented in one place.
+    type OverrideRow = (
         i32,
         Option<i32>,
         bool,
         Option<chrono::DateTime<chrono::Utc>>,
-    )> = sqlx::query_as(
+    );
+
+    // Lock the oversight row. FOR UPDATE is what makes "already co-signed" a
+    // decision made on fresh data: two verifiers clicking at the same moment
+    // cannot both write a signature.
+    let row: Option<OverrideRow> = sqlx::query_as(
         r#"SELECT id, issued_by_user_id, verification_required, verified_at
                FROM blood_emergency_overrides
                WHERE issue_id = $1 FOR UPDATE"#,

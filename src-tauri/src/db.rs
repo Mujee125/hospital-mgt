@@ -215,14 +215,11 @@ pub async fn setting_i64(pool: &PgPool, key: &str, default: i64) -> i64 {
     // wrong is a compile error at best and a silently-defaulted safety knob at
     // worst.
     let raw: Option<String> =
-        match sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = $1")
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = $1")
             .bind(key)
             .fetch_optional(pool)
             .await
-        {
-            Ok(v) => v,
-            Err(_) => None,
-        };
+            .unwrap_or_default();
     raw.and_then(|v| v.trim().parse::<i64>().ok())
         .unwrap_or(default)
 }

@@ -377,7 +377,7 @@ pub async fn create_appointment(
     .bind(&appointment.reason)
     .bind(&appointment.notes)
     .bind(s.user_id)
-    .bind(&appointment.consultation_fee)
+    .bind(appointment.consultation_fee)
     .bind(appointment.fee_paid.unwrap_or(false))
     .fetch_one(pool.inner())
     .await
@@ -756,7 +756,7 @@ pub async fn update_appointment_core(
             .bind(&appointment.reason)
             .bind(&appointment.notes)
             .bind(appointment.id)
-            .bind(&appointment.consultation_fee)
+            .bind(appointment.consultation_fee)
             .bind(appointment.fee_paid.unwrap_or(false))
             .execute(pool)
             .await
@@ -782,7 +782,7 @@ pub async fn update_appointment_core(
             .bind(&appointment.reason)
             .bind(&appointment.notes)
             .bind(appointment.id)
-            .bind(&appointment.consultation_fee)
+            .bind(appointment.consultation_fee)
             .bind(appointment.fee_paid.unwrap_or(false))
             .execute(pool)
             .await
