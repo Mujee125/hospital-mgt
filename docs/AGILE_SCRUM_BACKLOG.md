@@ -129,9 +129,9 @@ All 14 modified files + 2 untracked files formed one coherent **SEAT-REGISTRY** 
 | Story | ID | Pri | Pts | Status | Owner |
 |-------|-----|-----|-----|--------|-------|
 | Triage + commit uncommitted changes (SEAT-REGISTRY) | — | M | 3 | Done | Dev lead |
-| Add missing `client_seat_tests.rs` + wire `revoke_seat` as IPC command | HMS-107 | M | 8 | In Progress | Backend |
-| Verify `migrate_client_license` implementation exists in `license.rs` | HMS-108 | M | 3 | In Progress | Backend |
-| Run full test suite on `batch-5-hardening` (cargo fmt/clippy/test, tsc/eslint/vitest) | HMS-504 | S | 13 | To Do | QA |
+| Add missing `client_seat_tests.rs` + wire `revoke_seat` as IPC command | HMS-107 | M | 8 | Done | Backend |
+| Verify `migrate_client_license` implementation exists in `license.rs` | HMS-108 | M | 3 | Done | Backend |
+| Run full test suite on `batch-5-hardening` (cargo fmt/clippy/test, tsc/eslint/vitest) | HMS-504 | S | 13 | In Progress | QA |
 | DPAPI encrypt `config.json` `db_password` | HMS-101 | M | 8 | To Do | Backend |
 | Wire CI gates (typecheck/lint/cargo check/cargo audit/npm audit) | HMS-201 | M | 5 | To Do | DevOps |
 | Rebuild installers + fresh-machine install test | HMS-204 | M | 5 | To Do | Release |
