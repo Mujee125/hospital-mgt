@@ -422,7 +422,7 @@ A consolidated list of Tauri IPC commands exposed by the Rust backend, grouped b
 | Messaging | `send_message` (RBAC-gated `MessagingSend` + sender from session since CR-16 v0.2.0), `get_messages` (RBAC `MessagingView`), `delete_message`, `get_rooms` |
 | WhatsApp | `send_whatsapp_notification`, `send_whatsapp_to_patient`, `send_whatsapp_test`, `get_notification_log`, `get_whatsapp_config`, `set_whatsapp_config`, `test_whatsapp_api` |
 
-**Known IPC gap (Planned for Batch 5 cleanup):** `clear_config` is implemented in `config.rs` but is NOT registered in `tauri::generate_handler![]`, so it cannot be invoked from the frontend. Either register it or delete the dead function in Batch 5.
+**`clear_config` registration (RESOLVED):** `clear_config` was previously implemented in `config.rs` but NOT registered in `tauri::generate_handler![]`, so the client "Reconfigure" button could never invoke it. It is now registered. Its gate is: `SettingsManage` session required once `setup_complete=true` (unchanged on all builds), PLUS — **on `client-build` only** — an unauthenticated reset is permitted when the backend independently confirms init/connectivity failure (no `PgPool` managed in Tauri state AND a live TCP probe of the configured `db_host:db_port` fails). Both conditions are derived from Rust-side state; no frontend-supplied flag participates. Server builds are unchanged and remain fail-closed.
 
 ---
 

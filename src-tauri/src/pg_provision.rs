@@ -101,21 +101,36 @@ pub fn hba_requires_ssl(pgdata_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// SEAT-REGISTRY: does pg_hba.conf grant LAN access to the per-device
+/// client roles (i.e. is it a seat-registry-era rule set)?
+///
+/// Older installs restrict LAN access to a single hard-coded user
+/// (`postgres`), which would reject every `hms_client_*` role at
+/// authentication time — pairing would appear to succeed server-side, but
+/// the client's own `verify_pairing` connection would fail with an auth
+/// error. `lib.rs` folds this into its `needs_repair` check so the rule set
+/// is rewritten (and PostgreSQL restarted) on the next server boot.
+pub fn hba_allows_client_roles(pgdata_dir: &Path) -> bool {
+    let hba_path = pgdata_dir.join("pg_hba.conf");
+    let needle = format!("+{}", crate::client_seats::BASE_ROLE);
+    std::fs::read_to_string(&hba_path)
+        .map(|c| c.contains(&needle))
+        .unwrap_or(false)
+}
+
 /// Full SSL provisioning: writes ssl config to postgresql.conf, writes
 /// hostssl rules to pg_hba.conf, sets key permissions, restarts service.
 /// This is called both for first-time setup AND for repair.
 ///
-/// SEC-15: `app_db_user` is the Postgres role the HMS app uses to
-/// connect. The LAN-side pg_hba rules now restrict access to that user
-/// only (previously `all all`, which allowed ANY Postgres role to
-/// connect from the LAN — a defense-in-depth weakness). The loopback
-/// rule stays as `all all` so local admin tools (pgAdmin, psql) can
-/// still connect as any role from the server PC itself.
+/// SEC-15 → SEAT-REGISTRY: `app_db_user` used to be interpolated into the
+/// LAN-side pg_hba rules; LAN access is now granted to `+hms_app_client`
+/// members instead (see the rule block below), so the parameter is kept for
+/// call-site stability but no longer used.
 pub fn write_ssl_config_and_restart(
     pgdata_dir: &Path,
     cert_path: &Path,
     key_path: &Path,
-    app_db_user: &str,
+    _app_db_user: &str,
 ) -> Result<(), String> {
     let conf_path = pgdata_dir.join("postgresql.conf");
 
@@ -152,37 +167,30 @@ pub fn write_ssl_config_and_restart(
 
     // Write pg_hba.conf with hostssl rules.
     //
-    // SEC-15: LAN rules now restrict to the HMS app's DB user only —
-    // previously `all all` allowed ANY Postgres role to connect from
-    // the LAN, so a misconfigured or attacker-created role (e.g. a
-    // `pharmacy_readonly` role that an admin created with overly-broad
-    // grants) could be used to read PHI from a client PC. With this
-    // change, only the app's own DB user can authenticate over the LAN.
+    // SEC-15 → SEAT-REGISTRY (2026-10): LAN rules now restrict access to
+    // MEMBERS of the unprivileged base role (`+hms_app_client` — the
+    // per-device `hms_client_*` roles minted at pairing). Previously they
+    // named the app's own DB user (`postgres`), which both allowed the
+    // superuser over the LAN and would reject every per-device role. The
+    // server app itself connects via loopback (rules 1–2, `all all`), so
+    // the superuser is no longer reachable from the LAN at all; local
+    // admin tools (pgAdmin, psql) keep working over loopback.
     //
-    // The loopback rule stays `all all` so local admin tools (pgAdmin,
-    // psql) running on the server PC itself can still connect as any
-    // role — local trust is appropriate for the reception PC's console.
-    //
-    // `app_db_user` is interpolated (not parameterised) because pg_hba.conf
-    // is a config file, not SQL — there's no bind-parameter mechanism.
-    // The value comes from `AppConfig.db_user` (defaults to `postgres`
-    // per config.rs), which is operator-controlled and not exposed to
-    // untrusted network input. We do NOT call `validate_db_identifier`
-    // here because pg_hba user-field syntax is slightly different from
-    // SQL identifier syntax (it allows `+role`, `@group`, etc.) —
-    // instead we rely on the config being operator-set. A future
-    // hardening could quote the value with double-quotes to escape any
-    // embedded quotes.
+    // `+group` matches any role that is a member of the group. Until the
+    // first pairing creates `hms_app_client`, the LAN rules simply match
+    // nothing — no client can exist before pairing anyway.
     let hba_path = pgdata_dir.join("pg_hba.conf");
+    let base = crate::client_seats::BASE_ROLE;
     let hba_rules = format!(
         "# HMS managed — LAN + loopback, SSL required, scram-sha-256 auth.\n\
-         # SEC-15: LAN rules restricted to the HMS app DB user (was: all all).\n\
-         hostssl  all  all           127.0.0.1/32    scram-sha-256\n\
-         hostssl  all  all           ::1/128         scram-sha-256\n\
-         hostssl  all  {app_user}    10.0.0.0/8      scram-sha-256\n\
-         hostssl  all  {app_user}    172.16.0.0/12   scram-sha-256\n\
-         hostssl  all  {app_user}    192.168.0.0/16  scram-sha-256\n",
-        app_user = app_db_user
+         # SEC-15/SEAT-REGISTRY: LAN restricted to +{base} members\n\
+         # (per-device hms_client_* roles); loopback stays all for local admin.\n\
+         hostssl  all  all        127.0.0.1/32    scram-sha-256\n\
+         hostssl  all  all        ::1/128         scram-sha-256\n\
+         hostssl  all  +{base}    10.0.0.0/8      scram-sha-256\n\
+         hostssl  all  +{base}    172.16.0.0/12   scram-sha-256\n\
+         hostssl  all  +{base}    192.168.0.0/16  scram-sha-256\n",
+        base = base
     );
     std::fs::write(&hba_path, hba_rules).map_err(|e| format!("Cannot write pg_hba.conf: {}", e))?;
 

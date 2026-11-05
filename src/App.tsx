@@ -24,7 +24,7 @@ import { AuditLog as AuditLogPage } from "@/pages/AuditLog";
 import { Users as UsersPage } from "@/pages/Users";
 import { Reports } from "@/pages/Reports";
 import { Backup } from "@/pages/Backup";
-import { Toaster } from "sonner";
+import { Toaster, toast } from "sonner";
 import { Loader2, KeyRound, Fingerprint, Copy, Check, ArrowRight, ArrowLeft } from "lucide-react";
 import logo from "@/assets/logo_transparant.png";
 import { AuthProvider, useAuth } from "@/lib/auth";
@@ -152,6 +152,28 @@ function App() {
   };
 
   const verifyLicenseAndBoot = async (cfg: AppConfig | null) => {
+    const buildMode = (import.meta as { env?: { VITE_HMS_BUILD_MODE?: string } }).env?.VITE_HMS_BUILD_MODE || "server";
+
+    // R-6.3: client PCs are NOT separately licensed. A client is authorized by
+    // the server it pairs to (which holds the signed license and the seat
+    // registry), so we must NOT gate the client on a local license.json. Older
+    // client releases ran this same verify_license gate, so a client may still
+    // have a stray license.json in ProgramData\HMS — retire it (rename to
+    // license.json.migrated) so it can never satisfy a local check again, then
+    // boot. This is best-effort: if the command is unavailable (older backend)
+    // or fails, the client still boots — the server is the source of truth.
+    if (buildMode === "client") {
+      setPhase("booting");
+      setInitStatus("Connecting to hospital server...");
+      try {
+        await invoke("migrate_client_license");
+      } catch (err) {
+        console.warn("Client license retirement skipped:", err);
+      }
+      await bootApp(cfg);
+      return;
+    }
+
     setPhase("verifyingLicense");
     setInitStatus("Verifying license...");
     try {
@@ -166,15 +188,34 @@ function App() {
     await bootApp(cfg);
   };
 
+  // Client reconfiguration. Clearing the config is destructive to the saved
+  // server connection, so it is confirmed explicitly — and, crucially, a
+  // REFUSAL from the backend must be visible. The previous version only did
+  // console.error, so a rejected clear looked identical to a successful one
+  // from the user's side (silent failure).
+  const [confirmingReconfigure, setConfirmingReconfigure] = useState(false);
+  const [reconfiguring, setReconfiguring] = useState(false);
+
   const handleReconfigureClient = async () => {
     const buildMode = (import.meta as { env?: { VITE_HMS_BUILD_MODE?: string } }).env?.VITE_HMS_BUILD_MODE || "server";
     if (buildMode !== "client") return;
     try {
+      setReconfiguring(true);
       await invoke("clear_config");
-      setPhase("needsSetup");
+      setConfirmingReconfigure(false);
+      setConfig(null);
+      setLicenseInfo(null);
       setInitError(null);
+      // Return the user to the pairing/setup flow. Reloading the webview
+      // re-runs checkSetupThenBoot(), which now sees no config and routes to
+      // needsSetup — the same entry point a brand-new client uses.
+      window.location.reload();
     } catch (err) {
       console.error("Failed to clear config:", err);
+      setConfirmingReconfigure(false);
+      toast.error(String(err), { duration: 12000 });
+    } finally {
+      setReconfiguring(false);
     }
   };
 
@@ -272,11 +313,44 @@ function App() {
                 Try again
               </button>
               {isClient && (
-                <button onClick={handleReconfigureClient} className="h-11 px-5 border border-border bg-card text-foreground rounded-lg text-sm font-semibold hover:bg-muted transition-all active:scale-[0.98]">
-                  Reconfigure
+                <button
+                  onClick={() => setConfirmingReconfigure(true)}
+                  disabled={reconfiguring}
+                  className="h-11 px-5 border border-border bg-card text-foreground rounded-lg text-sm font-semibold hover:bg-muted transition-all active:scale-[0.98] disabled:opacity-60"
+                >
+                  {reconfiguring ? "Clearing…" : "Reconfigure"}
                 </button>
               )}
             </div>
+
+            {confirmingReconfigure && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                <div className="surface-elevated p-6 w-full max-w-sm">
+                  <h4 className="text-display-md text-foreground mb-2">Reconfigure this PC?</h4>
+                  <p className="text-sm text-muted-foreground leading-relaxed mb-6">
+                    This removes the saved server connection and the pairing details
+                    stored on this PC. You will need to pair with the hospital
+                    server again using a new pairing code.
+                  </p>
+                  <div className="flex gap-2 justify-end">
+                    <button
+                      onClick={() => setConfirmingReconfigure(false)}
+                      disabled={reconfiguring}
+                      className="h-10 px-4 border border-border bg-card text-foreground rounded-lg text-sm font-semibold hover:bg-muted transition-all disabled:opacity-60"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleReconfigureClient}
+                      disabled={reconfiguring}
+                      className="h-10 px-4 bg-destructive text-destructive-foreground rounded-lg text-sm font-semibold transition-all active:scale-[0.98] disabled:opacity-60"
+                    >
+                      {reconfiguring ? "Clearing…" : "Clear and re-pair"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </motion.div>
         </div>
       </WithTitleBar>

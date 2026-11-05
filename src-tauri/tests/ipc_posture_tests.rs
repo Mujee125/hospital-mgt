@@ -36,6 +36,11 @@ const ALLOWLIST: &[&str] = &[
     "get_hardware_fingerprint",
     "get_license_public_key_fingerprint",
     "get_install_fingerprint",
+    // R-6.3 client boot: retires a stray client-side license.json (renames
+    // it to .migrated) — filesystem-only, runs pre-login on client builds
+    // where the local license is deliberately NOT authoritative. It is a
+    // no-op on server builds (the Rust fn is cfg'd to client-build).
+    "migrate_client_license",
     // pairing: first-run client setup, pre-login by definition
     "generate_pairing_code",
     "get_pairing_status",
@@ -51,8 +56,11 @@ const ALLOWLIST: &[&str] = &[
     "complete_pairing_and_connect",
     // permission-free redacted READ (db_password is skip_serializing; boot
     // screens need it pre-login, receipts/closure warnings need it for any
-    // signed-in non-admin — config WRITES stay fail-closed in
-    // save_config/repair_server_config/clear_config)
+    // signed-in non-admin). Config WRITES are NOT here — save_config /
+    // repair_server_config / clear_config each gate themselves via
+    // require_config_mutation (strict fail-closed on server builds; on
+    // client-build, clear_config additionally requires backend-verified
+    // init/connectivity failure before allowing an unauthenticated reset).
     "get_config",
 ];
 

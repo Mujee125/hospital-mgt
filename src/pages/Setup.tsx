@@ -154,21 +154,51 @@ export function Setup({ onSetupComplete }: SetupProps) {
     if (!creds) return;
     setInitializing(true);
 
-    // Show live progress from the backend
-    const unlisten = await listen<string>("init_status", (event) => {
-      toast.info(event.payload, { id: "init-progress" });
-    });
+    // NOTE (silent-failure fix): the `listen()` call MUST stay inside the
+    // try. It used to sit above it, so if `listen` rejected, the whole
+    // async handler rejected BEFORE the try was ever entered — meaning
+    // `toast.error` never ran, `finally` never ran (spinner stuck on),
+    // and the real backend error from `complete_pairing_and_connect`
+    // was swallowed with nothing logged. Symptom: button spins for a
+    // second or two, then absolutely nothing happens.
+    // The listener is also resolved defensively: a failure to subscribe
+    // must not abort pairing, so we fall back to a no-op unlisten.
+    let unlisten: (() => void) | null = null;
 
     try {
+      try {
+        unlisten = await listen<string>("init_status", (event) => {
+          toast.info(event.payload, { id: "init-progress" });
+        });
+      } catch (listenErr) {
+        console.error("Could not subscribe to init_status:", listenErr);
+        unlisten = () => {};
+      }
+
       await invoke("complete_pairing_and_connect");
       toast.success("Setup complete!", { id: "init-progress" });
       const finalConfig = await invoke<AppConfig>("get_config");
-      onSetupComplete(finalConfig!);
+      if (!finalConfig) {
+        throw new Error(
+          "Setup reported success but no configuration could be read back. Please pair again."
+        );
+      }
+      onSetupComplete(finalConfig);
     } catch (err: unknown) {
-      toast.error(`Setup failed: ${String(err)}`);
+      const msg = String(err);
+      // Log as well as toast: `console.error` is the only signal if the
+      // toast itself is what failed to render.
       console.error("complete_pairing_and_connect error:", err);
+      toast.error(`Setup failed: ${msg}`, {
+        id: "init-progress",
+        duration: 12000,
+      });
     } finally {
-      unlisten();
+      try {
+        unlisten?.();
+      } catch (e) {
+        console.error("Failed to unlisten:", e);
+      }
       setInitializing(false);
     }
   };

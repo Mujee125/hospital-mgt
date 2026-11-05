@@ -34,6 +34,14 @@ pub mod models;
 #[cfg(not(feature = "hms-integration-tests"))]
 mod models;
 mod pairing;
+// Per-client seat registry + per-client PostgreSQL credentials. Only the server
+// provisions seats, so it is compiled on `server-build` only. Declared `pub`
+// under the integration-test feature so the tests can drive provision_seat /
+// revoke_seat directly against a live cluster.
+#[cfg(feature = "server-build")]
+mod client_seats;
+#[cfg(all(feature = "hms-integration-tests", not(feature = "server-build")))]
+pub mod client_seats;
 #[cfg(feature = "server-build")]
 mod pg_provision;
 #[cfg(feature = "hms-integration-tests")]
@@ -626,6 +634,30 @@ async fn wait_for_postgres_ready(
 
 pub fn diagnose_db_error(err: &str) -> String {
     let e = err.to_lowercase();
+    if e.contains("certificate not valid for name")
+        || e.contains("invalid peer certificate")
+        || e.contains("certificate verify failed")
+    {
+        // The server's self-signed cert bakes its SANs at generation time. If
+        // the server's DHCP lease changed after the cert was issued, every
+        // client fails exactly like this. Extract the offending detail so the
+        // message points at the real cause instead of a generic "re-pair".
+        let detail = err
+            .split_once("invalid peer certificate:")
+            .map(|(_, rest)| rest.trim().to_string());
+        return match detail {
+            Some(d) => format!(
+                "The server's TLS certificate does not cover the address you dialled \
+                 ({}).\n\nThis normally means the server PC's IP address changed after \
+                 the certificate was issued.\nRestart HMS Server on the reception PC \
+                 so it can issue a certificate for its current IP, then pair again.",
+                d.lines().next().unwrap_or("").trim()
+            ),
+            None => "SSL certificate verification failed. \
+                     The pinned cert may be stale. Re-pair from Setup."
+                .to_string(),
+        };
+    }
     if e.contains("certificate fingerprint mismatch") || e.contains("fingerprint") {
         return "The server TLS certificate changed since pairing. \
                 Go to Setup → Re-pair with the server."
@@ -843,15 +875,29 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
             .await
             .unwrap_or(false);
 
+            // SEAT-REGISTRY: pre-seat-registry installs restrict LAN pg_hba
+            // access to a single role (`postgres`), which rejects every
+            // per-device `hms_client_*` role at authentication. Treat a rule
+            // set that does not mention `+hms_app_client` as needing repair
+            // so the rewritten rules (and restart) apply on next boot.
+            let pgdata_c = pgdata_dir.clone();
+            let hba_client_roles = tauri::async_runtime::spawn_blocking(move || {
+                pg_provision::hba_allows_client_roles(&pgdata_c)
+            })
+            .await
+            .unwrap_or(false);
+
             log_info!(
                 app_handle,
-                "SSL state: marker={} ssl_conf={} hba={}",
+                "SSL state: marker={} ssl_conf={} hba={} hba_client_roles={}",
                 marker_exists,
                 ssl_in_conf,
-                hba_ssl
+                hba_ssl,
+                hba_client_roles
             );
 
-            let needs_repair = marker_exists && (!ssl_in_conf || !hba_ssl);
+            let needs_repair =
+                marker_exists && (!ssl_in_conf || !hba_ssl || !hba_client_roles);
             let needs_setup = !marker_exists;
 
             if needs_repair {
@@ -923,8 +969,11 @@ async fn initialize_as_server(app_handle: &tauri::AppHandle) -> Result<Role, Str
             pairing::start_pairing_listener(
                 pairing_service,
                 pairing::PairingCreds {
-                    db_user: cfg.db_user.clone(),
-                    db_password: cfg.db_password.clone(),
+                    // SEAT-REGISTRY: the pool is NOT yet in Tauri state at
+                    // this point (db::initialize runs after
+                    // initialize_as_server) — the listener resolves it per
+                    // connection, along with the on-disk seat cap.
+                    app: app_handle.clone(),
                     db_name: cfg.db_name.clone(),
                     db_port: cfg.db_port,
                 },
@@ -1492,6 +1541,7 @@ pub fn run() {
             config::test_server_connection,
             config::repair_server_config,
             config::get_config_path,
+            config::clear_config,
             // Discovery
             discovery::get_server_role,
             // Pairing
@@ -1529,6 +1579,12 @@ pub fn run() {
             license::get_hardware_fingerprint,
             license::get_license_public_key_fingerprint,
             license::get_install_fingerprint,
+            // R-6.3: client PCs are authorized by the paired server, not by a
+            // local license file. This command retires any stale client-side
+            // license.json on first client boot. Registered on client-build
+            // only (the Rust fn is #[cfg(feature = "client-build")]).
+            #[cfg(feature = "client-build")]
+            license::migrate_client_license,
             // ── Dashboard ────────────────────────────────────────────────────
             commands::dashboard::get_dashboard_kpis,
             // Patients

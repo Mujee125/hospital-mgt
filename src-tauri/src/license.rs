@@ -104,7 +104,6 @@ const COMPANY_KEYS: &[EmbeddedKey] = &[EmbeddedKey {
 }];
 
 // ── License file structure ────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LicenseFile {
     pub license_id: String,
@@ -137,8 +136,86 @@ pub struct LicenseFile {
     /// their existing signatures still verify.
     #[serde(default)]
     pub key_id: Option<String>,
+    /// Signed entitlement block (seat cap, concurrency, modules, grace).
+    ///
+    /// `None` on a `license_schema_version: 1` (legacy) license → resolves to
+    /// "unlimited clients" so already-deployed servers never break. `Some(...)`
+    /// on a v2+ license → the seat registry enforces `max_client_devices`.
+    ///
+    /// CRITICAL (backward compatibility): the canonical bytes EXCLUDE this
+    /// field entirely when `None`, so every pre-existing v1 signature keeps
+    /// verifying byte-for-byte. When present, `entitlements` and
+    /// `license_schema_version` are folded into the canonical bytes, so a
+    /// vendor tampering with the seat cap invalidates the signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entitlements: Option<Entitlements>,
+    /// Schema version of this license file. `None`/absent or `1` = legacy
+    /// (no entitlements, unlimited clients). `2` = carries a signed
+    /// `entitlements` block. Included in canonical bytes only when `Some`,
+    /// preserving v1 signatures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_schema_version: Option<u32>,
     /// Base64 Ed25519 signature over the canonical form of every other field.
     pub signature: String,
+}
+
+/// Signed commercial entitlements carried by a v2+ license.
+///
+/// Clinical-safety invariant: these caps gate *pairing of NEW devices* and
+/// *concurrent sessions*, never read access to existing patient data. When a
+/// cap is hit the server refuses additional work; clinicians already holding a
+/// session keep full read access.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Entitlements {
+    /// Maximum simultaneously-registered (non-revoked) client PCs. Legacy (v1)
+    /// licenses resolve to `u32::MAX` (unlimited). Pairing beyond this cap is
+    /// refused with an operator-actionable message.
+    #[serde(default = "default_unlimited_seats")]
+    pub max_client_devices: u32,
+    /// Optional maximum concurrent active sessions. `None` = unlimited.
+    #[serde(default)]
+    pub max_concurrent_sessions: Option<u32>,
+    /// Entitled module keys (informational; module gating is separate).
+    #[serde(default)]
+    pub modules: Vec<String>,
+    /// Days a license may run past `expiration_date` in limited (read-only)
+    /// operation before a hard stop. Defaults to the build's
+    /// `LICENSE_GRACE_PERIOD_DAYS`.
+    #[serde(default = "default_grace_days")]
+    pub offline_grace_days: u32,
+}
+
+fn default_unlimited_seats() -> u32 {
+    u32::MAX
+}
+
+fn default_grace_days() -> u32 {
+    LICENSE_GRACE_PERIOD_DAYS as u32
+}
+
+impl LicenseFile {
+    /// Effective client-device seat cap. Legacy v1 licenses (no
+    /// `entitlements`) resolve to `u32::MAX` so existing deployments are
+    /// unaffected. v2+ licenses use their signed cap.
+    pub fn max_client_devices(&self) -> u32 {
+        self.entitlements
+            .as_ref()
+            .map(|e| e.max_client_devices)
+            .unwrap_or(u32::MAX)
+    }
+
+    /// Effective concurrent-session cap (`None` = unlimited).
+    pub fn max_concurrent_sessions(&self) -> Option<u32> {
+        self.entitlements
+            .as_ref()
+            .and_then(|e| e.max_concurrent_sessions)
+    }
+
+    /// True when this license carries a signed v2+ entitlement block.
+    pub fn is_schema_v2(&self) -> bool {
+        self.entitlements.is_some()
+            || matches!(self.license_schema_version, Some(v) if v >= 2)
+    }
 }
 
 impl LicenseFile {
@@ -183,6 +260,18 @@ impl LicenseFile {
         // existing signatures valid (their canonical bytes are unchanged).
         if let Some(kid) = &self.key_id {
             map.insert("key_id", serde_json::json!(kid));
+        }
+        // Entitlements + schema version participate in the signed bytes ONLY
+        // when present (v2+ licenses). A legacy v1 license has both `None`,
+        // so its canonical bytes are byte-for-byte identical to before this
+        // feature existed → pre-existing signatures keep verifying. A v2
+        // license folds the seat cap into the signature, so tampering with
+        // `max_client_devices` breaks verification.
+        if let Some(ent) = &self.entitlements {
+            map.insert("entitlements", serde_json::json!(ent));
+        }
+        if let Some(ver) = self.license_schema_version {
+            map.insert("license_schema_version", serde_json::json!(ver));
         }
         serde_json::to_vec(&map).expect("canonical serialization is infallible")
     }
@@ -314,6 +403,29 @@ pub fn license_file_path(app_handle: &tauri::AppHandle) -> PathBuf {
 }
 
 // ── Core verification ─────────────────────────────────────────────────────────
+
+/// Read ONLY the effective client-device seat cap from the on-disk license.
+///
+/// This is deliberately a best-effort, unverified read: the seat cap is an
+/// *entitlement* used by the server's pairing path, which only runs after
+/// `verify_license` has already gated boot. We do not re-verify the signature
+/// here because pairing is not a licensing decision point — and, critically,
+/// this must NEVER fail boot. If the license is missing, unparseable, or
+/// malformed, we fall back to `u32::MAX` (legacy behaviour: no cap), matching
+/// how a v1 license is treated.
+///
+/// In debug builds this prefers the per-user dev license, exactly like
+/// [`license_file_path`].
+pub fn max_client_devices_on_disk(app_handle: &tauri::AppHandle) -> u32 {
+    let path = license_file_path(app_handle);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return u32::MAX;
+    };
+    let Ok(license) = serde_json::from_str::<LicenseFile>(&content) else {
+        return u32::MAX;
+    };
+    license.max_client_devices()
+}
 
 /// Reads the license file from disk, verifies signature + fingerprint + expiry,
 /// and returns a `LicenseInfo` summary. Never panics; returns a descriptive
@@ -458,6 +570,37 @@ pub async fn verify_license(app_handle: tauri::AppHandle) -> Result<LicenseInfo,
         });
     }
     Ok(info)
+}
+
+/// R-6.3 client retirement (2026-10): client PCs are NOT separately licensed.
+/// A client is authorized by the *server* it pairs to (which holds the signed
+/// license and the seat registry), not by any local license file.
+///
+/// Earlier releases shipped a client-side `verify_license` gate and some client
+/// PCs therefore have a stray `license.json` in ProgramData\HMS. This command
+/// retires that file on CLIENT builds only: it renames it to
+/// `license.json.migrated` so (a) the stale file can never satisfy a local
+/// check again, and (b) the original content is preserved as forensic evidence
+/// for any licensing investigation (see open item K).
+///
+/// It is a no-op on server builds (where the license file is authoritative and
+/// must never be moved) and when no file is present.
+#[cfg(feature = "client-build")]
+#[tauri::command]
+pub async fn migrate_client_license(app_handle: tauri::AppHandle) -> Result<bool, String> {
+    let path = license_file_path(&app_handle);
+    if !path.exists() {
+        return Ok(false); // nothing to retire
+    }
+    let migrated = path.with_extension("json.migrated");
+    std::fs::rename(&path, &migrated)
+        .map_err(|e| format!("Failed to retire client license file: {}", e))?;
+    eprintln!(
+        "[HMS LICENSE] Retired client license file {} -> {} (R-6.3: clients are authorized by the server)",
+        path.display(),
+        migrated.display()
+    );
+    Ok(true)
 }
 
 /// Returns the current machine's hardware fingerprint, so the installer can
@@ -770,6 +913,8 @@ mod tests {
             software_version_max: "999.999.999".to_string(),
             dev: false,
             key_id: None,
+            entitlements: None,
+            license_schema_version: None,
             signature: "placeholder".to_string(),
         };
         let bytes1 = license.canonical_bytes();
@@ -803,6 +948,8 @@ mod tests {
             software_version_max: "x".to_string(),
             dev: true,
             key_id: None,
+            entitlements: None,
+            license_schema_version: None,
             signature: "x".to_string(),
         };
         let bytes = String::from_utf8(license.canonical_bytes()).unwrap();
@@ -836,6 +983,148 @@ mod tests {
         }"#;
         let license: LicenseFile = serde_json::from_str(json).unwrap();
         assert!(!license.dev, "missing dev field must default to false");
+    }
+
+    // ── Entitlement schema (seat registry, 2026-10) ───────────────────────────
+    //
+    // Backward-compatibility contract: a v1 license (entitlements =
+    // None) MUST produce byte-for-byte identical canonical bytes to a
+    // pre-entitlement build, so every already-deployed signature keeps
+    // verifying. A v2 license (entitlements = Some) folds the seat cap into
+    // the signed bytes, so tampering with it breaks verification.
+
+    fn v1_license() -> LicenseFile {
+        LicenseFile {
+            license_id: "LIC-V1".to_string(),
+            hospital_id: "H1".to_string(),
+            hospital_name: "H".to_string(),
+            deployment_id: "D1".to_string(),
+            hardware_fingerprint: "fp".to_string(),
+            license_version: "1.0".to_string(),
+            product_edition: "Enterprise".to_string(),
+            enabled_modules: vec!["dashboard".to_string()],
+            issue_date: "2026-01-01T00:00:00Z".to_string(),
+            expiration_date: None,
+            maintenance_until: "2099-12-31".to_string(),
+            software_version_min: "0.0.0".to_string(),
+            software_version_max: "999.999.999".to_string(),
+            dev: false,
+            key_id: Some("k-prod-2026-09".to_string()),
+            entitlements: None,
+            license_schema_version: None,
+            signature: "x".to_string(),
+        }
+    }
+
+    #[test]
+    fn v1_license_canonical_bytes_exclude_entitlements() {
+        // The canonical bytes of a v1 license must NOT contain the
+        // entitlements or schema-version keys at all — otherwise every
+        // pre-existing signature would break.
+        let bytes = String::from_utf8(v1_license().canonical_bytes()).unwrap();
+        assert!(
+            !bytes.contains("entitlements"),
+            "v1 canonical bytes must exclude entitlements; got: {}",
+            bytes
+        );
+        assert!(
+            !bytes.contains("license_schema_version"),
+            "v1 canonical bytes must exclude license_schema_version; got: {}",
+            bytes
+        );
+    }
+
+    #[test]
+    fn v1_license_resolves_to_unlimited_seats() {
+        assert_eq!(
+            v1_license().max_client_devices(),
+            u32::MAX,
+            "legacy v1 licenses must be treated as unlimited so existing deployments never break"
+        );
+        assert_eq!(v1_license().max_concurrent_sessions(), None);
+        assert!(!v1_license().is_schema_v2());
+    }
+
+    #[test]
+    fn v2_license_folds_entitlements_into_canonical_bytes() {
+        let mut lic = v1_license();
+        lic.entitlements = Some(Entitlements {
+            max_client_devices: 5,
+            max_concurrent_sessions: Some(10),
+            modules: vec!["lab".to_string()],
+            offline_grace_days: 14,
+        });
+        lic.license_schema_version = Some(2);
+        let bytes = String::from_utf8(lic.canonical_bytes()).unwrap();
+        assert!(
+            bytes.contains("entitlements"),
+            "v2 canonical bytes must include entitlements; got: {}",
+            bytes
+        );
+        assert!(
+            bytes.contains("\"max_client_devices\":5"),
+            "seat cap must be inside the signed bytes; got: {}",
+            bytes
+        );
+        assert!(lic.is_schema_v2());
+    }
+
+    #[test]
+    fn tampering_with_seat_cap_changes_canonical_bytes() {
+        let base = {
+            let mut lic = v1_license();
+            lic.entitlements = Some(Entitlements {
+                max_client_devices: 5,
+                max_concurrent_sessions: None,
+                modules: vec![],
+                offline_grace_days: 7,
+            });
+            lic.license_schema_version = Some(2);
+            lic
+        };
+        let mut tampered = base.clone();
+        if let Some(e) = &mut tampered.entitlements {
+            e.max_client_devices = 999;
+        }
+        assert_ne!(
+            base.canonical_bytes(),
+            tampered.canonical_bytes(),
+            "raising the seat cap must invalidate the signature (canonical bytes change)"
+        );
+    }
+
+    #[test]
+    fn entitlements_survive_serialization_round_trip() {
+        let mut lic = v1_license();
+        lic.entitlements = Some(Entitlements {
+            max_client_devices: 8,
+            max_concurrent_sessions: Some(16),
+            modules: vec!["billing".to_string()],
+            offline_grace_days: 30,
+        });
+        lic.license_schema_version = Some(2);
+        let bytes1 = lic.canonical_bytes();
+        let serialized = serde_json::to_string(&lic).unwrap();
+        let de: LicenseFile = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(bytes1, de.canonical_bytes());
+        assert_eq!(de.max_client_devices(), 8);
+        assert_eq!(de.max_concurrent_sessions(), Some(16));
+    }
+
+    #[test]
+    fn legacy_json_without_entitlements_defaults_correctly() {
+        // A real on-disk v1 license file has no entitlements key.
+        let json = r#"{
+            "license_id":"x","hospital_id":"x","hospital_name":"x","deployment_id":"x",
+            "hardware_fingerprint":"x","license_version":"1.0","product_edition":"x",
+            "enabled_modules":[],"issue_date":"x","expiration_date":null,
+            "maintenance_until":"x","software_version_min":"x","software_version_max":"x",
+            "signature":"x"
+        }"#;
+        let lic: LicenseFile = serde_json::from_str(json).unwrap();
+        assert!(lic.entitlements.is_none());
+        assert!(lic.license_schema_version.is_none());
+        assert_eq!(lic.max_client_devices(), u32::MAX);
     }
 
     // ── Phase 5 license verification tests (2026-09-05) ─────────────────────
@@ -883,17 +1172,30 @@ mod tests {
             software_version_max: "999.999.999".to_string(),
             dev: false,
             key_id: key_id.map(|k| k.to_string()),
+            entitlements: None,
+            license_schema_version: None,
             signature: String::new(),
         };
         let signing = SigningKey::from_bytes(&TEST_SIGNING_KEY);
         let sig = signing.sign(&license.canonical_bytes());
         license.signature = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
 
+        // Temp filenames must be UNIQUE even when tests run in parallel: the
+        // prior `Utc::now().timestamp_nanos_opt()` scheme collided because the
+        // Windows system clock has ~15 ms granularity, so concurrent tests in
+        // the same 15 ms tick wrote to the SAME file — one test overwrote
+        // another's license and the tampered-signature test intermittently read
+        // back a *valid* license (flaky failure under `--test-threads>1`, green
+        // under `--test-threads=1`). A process-global atomic counter appended to
+        // the timestamp guarantees per-call uniqueness with no external deps.
+        static LIC_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = LIC_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("hms_lic_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!(
-            "{}.json",
-            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            "{}_{}.json",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            seq
         ));
         std::fs::write(&path, serde_json::to_string(&license).unwrap()).unwrap();
         (license, path)

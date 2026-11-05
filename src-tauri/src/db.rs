@@ -1816,6 +1816,63 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), String> {
     .await
     .map_err(|e| format!("license_state: {}", e))?;
 
+    // ── 9. Client device seat registry (SEC-LIC Phase 2) ────────────────
+    //
+    // Tracks every paired client PC. The row is the SERVER-SIDE source of
+    // truth for the signed seat cap (`LicenseFile::entitlements.max_client_
+    // devices`): enforcement is "COUNT(*) WHERE revoked_at IS NULL < cap",
+    // computed here in the database a modified client cannot forge.
+    //
+    // Idempotency (NFR-31): `IF NOT EXISTS` + idempotent column adds mean a
+    // re-run on an already-migrated server is a no-op. Re-pairing an existing
+    // device (matched by hardware_fingerprint) UPDATES this row rather than
+    // inserting a new one, so repeated re-pairs never consume an extra seat.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS client_devices (
+            id                    SERIAL PRIMARY KEY,
+            device_id             UUID NOT NULL UNIQUE,
+            device_name           TEXT NOT NULL,
+            hardware_fingerprint  TEXT NOT NULL,
+            paired_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen             TIMESTAMPTZ,
+            last_seen_ip          INET,
+            revoked_at            TIMESTAMPTZ,
+            revoked_by            TEXT,
+            replaced_by_device_id UUID,
+            db_role               TEXT NOT NULL,
+            created_by            TEXT
+        )
+    "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("client_devices: {}", e))?;
+
+    // Idempotent column backfill for deployments whose client_devices table
+    // predates a later addition. ADD COLUMN IF NOT EXISTS is a no-op when the
+    // column already exists, so this is safe on every boot.
+    sqlx::query("ALTER TABLE client_devices ADD COLUMN IF NOT EXISTS created_by TEXT")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("client_devices.created_by: {}", e))?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_client_devices_fingerprint ON client_devices(hardware_fingerprint)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("idx_client_devices_fingerprint: {}", e))?;
+
+    // Partial index: only active (non-revoked) seats — the exact predicate the
+    // seat-count query uses, so the cap check is an index scan.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_client_devices_active ON client_devices(revoked_at) WHERE revoked_at IS NULL",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("idx_client_devices_active: {}", e))?;
+
     // ── 9. WhatsApp Business API config ───────────────────────────────────
     // Stores Meta Business API credentials for fully-automatic message
     // sending (no user interaction). When configured, the app sends via the
@@ -3147,12 +3204,25 @@ pub async fn initialize(
     db_name: &str,
     sslrootcert_path: Option<&Path>,
 ) -> Result<PgPool, String> {
-    let root = connect_root(host, port, user, password, sslrootcert_path).await?;
-    ensure_database(&root, db_name).await?;
-    root.close().await;
+    // SEAT-REGISTRY (2026-10): a paired client connects as its per-device
+    // `hms_client_*` role, which holds only DML on the app schema — it can
+    // neither open the maintenance connection nor run DDL. Root-level
+    // bootstrap (maintenance connect + CREATE DATABASE) and migrations are
+    // the SERVER's job; the client build skips both and connects directly.
+    // (On server and dev/fallback builds nothing changes: the configured
+    // user is a superuser and owns the schema.)
+    #[cfg(not(feature = "client-build"))]
+    {
+        let root = connect_root(host, port, user, password, sslrootcert_path).await?;
+        ensure_database(&root, db_name).await?;
+        root.close().await;
+    }
 
     let pool = connect_app(host, port, user, password, db_name, sslrootcert_path).await?;
+
+    #[cfg(not(feature = "client-build"))]
     run_migrations(&pool).await?;
+
     Ok(pool)
 }
 

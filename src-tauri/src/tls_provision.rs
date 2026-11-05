@@ -56,8 +56,175 @@ fn key_path(hms_dir: &Path) -> PathBuf {
     hms_dir.join("tls").join("server.key")
 }
 
-/// Load the existing cert/key if present, otherwise generate a fresh
-/// self-signed pair and persist it. Idempotent — safe to call every launch.
+/// Persist a freshly generated key + cert pair, key first.
+///
+/// The key is written before the cert on purpose — see the call site for the
+/// full rationale (a partial rotation must never be published).
+///
+/// SELF-REPAIR: SEC-13 later restricts the key to SYSTEM/Administrators with
+/// the current user at READ only. On a *regeneration* the app runs
+/// non-elevated, so overwriting that key fails with "Access is denied
+/// (os error 5)" — the exact scenario an IP change triggers. Rather than
+/// dead-ending the whole server boot, we make one best-effort attempt to
+/// grant the current user Full Control on the key and retry once. If that
+/// also fails (a genuine permission problem, or no `icacls`), the error is
+/// returned with actionable guidance rather than a bare OS error, because
+/// the operator's fix is a one-line manual command.
+#[cfg(feature = "server-build")]
+fn write_key_and_cert(
+    k_path: &Path,
+    key_pem: &str,
+    crt_path: &Path,
+    cert_pem: &str,
+) -> Result<(), String> {
+    if let Err(first) = std::fs::write(k_path, key_pem) {
+        // Retry once after trying to take ownership of the key. Only the file
+        // owner or an admin can change its ACL; `icacls /grant` is best-effort
+        // and its own failure is intentionally ignored.
+        #[cfg(target_os = "windows")]
+        {
+            let user = std::env::var("USERNAME").unwrap_or_default();
+            let domain = std::env::var("USERDOMAIN").unwrap_or_default();
+            let account = if user.is_empty() {
+                String::new()
+            } else if domain.is_empty() {
+                user.clone()
+            } else {
+                format!("{}\\{}", domain, user)
+            };
+
+            if !account.is_empty() {
+                let _ = std::process::Command::new("icacls")
+                    .arg(k_path.as_os_str())
+                    .args(["/grant"])
+                    .arg(format!("{}:F", account))
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+
+            if let Ok(()) = std::fs::write(k_path, key_pem) {
+                eprintln!(
+                    "[HMS TLS] Reclaimed write access to the private key after an \
+                     ACL repair attempt."
+                );
+            } else {
+                // MUST return here on every path: falling through would write
+                // a new cert beside an UNWRITTEN key, publishing a cert that
+                // does not match the key on disk.
+                return Err(format!(
+                    "Cannot write the TLS private key at {}: {}\n\n\
+                     The file is ACL-locked to SYSTEM/Administrators (SEC-13 hardening) \
+                     and the app could not reclaim write access.\n\
+                     Open PowerShell as Administrator and run:\n    \
+                     takeown /f \"{}\"\n    \
+                     icacls \"{}\" /grant \"$env:USERNAME\":F\n\
+                     then restart HMS Server.",
+                    k_path.display(),
+                    first,
+                    k_path.display(),
+                    k_path.display()
+                ));
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        return Err(format!(
+            "Cannot write the TLS private key at {}: {}",
+            k_path.display(),
+            first
+        ));
+    }
+
+    std::fs::write(crt_path, cert_pem).map_err(|e| {
+        format!(
+            "Cannot write the TLS certificate at {}: {}\n\n\
+             The private key was updated but the certificate was not — restart \
+             HMS Server, which will regenerate a consistent pair.",
+            crt_path.display(),
+            e
+        )
+    })
+}
+
+/// Does `cert_pem`'s SAN list contain `ip`?
+///
+/// `ip` may be either a bare address ("192.168.1.2") or a host:port pair
+/// ("192.168.1.2:5432"); a port suffix is stripped before comparing.
+///
+/// Exposed (rather than inlined) so the SAN-matching matrix can be unit
+/// tested on any platform — it is pure string logic and needs no Windows,
+/// no crypto, and no filesystem.
+#[cfg(feature = "server-build")]
+pub fn san_contains_ip(cert_pem: &str, ip: &str) -> bool {
+    let needle = ip.trim();
+    let needle = needle.rsplit_once(':').map_or(needle, |(host, _)| host);
+    if needle.is_empty() {
+        return false;
+    }
+    san_entries(cert_pem)
+        .iter()
+        .any(|entry| entry.eq_ignore_ascii_case(needle))
+}
+
+/// Extract the IP-address entries from a certificate's SAN extension.
+///
+/// Returns an empty Vec when the cert has no SAN extension at all. rcgen
+/// writes `IP Address:1.2.3.4`, and openssl/libpq render it the same way,
+/// so we match the `IP Address:` prefix case-insensitively and take
+/// everything after it up to the next comma. A `DNS Name:` entry is NOT an
+/// IP and is deliberately ignored — pinning `localhost` must not satisfy a
+/// check for a LAN address.
+#[cfg(feature = "server-build")]
+fn san_entries(cert_pem: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in cert_pem.lines() {
+        // The SAN block may be folded across lines by some writers, so work
+        // on the whole PEM lowercased rather than trusting line structure.
+        let lower = line.to_ascii_lowercase();
+        let mut rest = lower.as_str();
+        while let Some(idx) = rest.find("ip address:") {
+            let after = &rest[idx + "ip address:".len()..];
+            let end = after.find(',').unwrap_or(after.len());
+            let value = after[..end].trim();
+            // Guard against swallowing a following extension's text.
+            let value = value
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .trim_matches(|c: char| !c.is_ascii_graphic())
+                .to_string();
+            if !value.is_empty() {
+                out.push(value);
+            }
+            rest = &after[end..];
+        }
+    }
+    out
+}
+
+/// Load the existing cert/key if present AND still valid for `local_ip`,
+/// otherwise generate a fresh self-signed pair and persist it.
+///
+/// Idempotent for a stable IP — safe to call every launch.
+///
+/// IP-CHANGE RECOVERY: the original implementation reused any existing
+/// cert purely on file existence. Because the SAN is baked in at generation
+/// time, a server whose DHCP lease changes (a very common event on a clinic
+/// LAN) kept serving a certificate valid only for the OLD address. Every
+/// client then failed with:
+///     invalid peer certificate: certificate not valid for name
+///     "192.168.1.2"; certificate is only valid for ...
+/// and there was no way for the server to self-heal — `ensure_tls_material`
+/// returned early forever. We now compare the on-disk cert's SAN against the
+/// CURRENT local IP and transparently regenerate when it no longer matches.
+///
+/// Regeneration changes the server's TLS fingerprint, which is exactly what
+/// client-side pinning is designed to detect: already-paired clients will
+/// fail closed and must re-pair. That is the correct security posture
+/// (fail loudly rather than trust a new identity), and it is preferable to
+/// the previous behaviour where the whole deployment was permanently broken
+/// with no recovery path short of manually deleting files.
 #[cfg(feature = "server-build")]
 pub fn ensure_tls_material(hms_dir: &Path, local_ip: &str) -> Result<TlsMaterial, String> {
     let crt_path = cert_path(hms_dir);
@@ -68,12 +235,25 @@ pub fn ensure_tls_material(hms_dir: &Path, local_ip: &str) -> Result<TlsMaterial
             .map_err(|e| format!("Cannot read existing TLS cert: {}", e))?;
         let key_pem = std::fs::read_to_string(&k_path)
             .map_err(|e| format!("Cannot read existing TLS key: {}", e))?;
-        let fingerprint_hex = fingerprint_of_pem(&cert_pem)?;
-        return Ok(TlsMaterial {
-            cert_pem,
-            key_pem,
-            fingerprint_hex,
-        });
+
+        if san_contains_ip(&cert_pem, local_ip) {
+            let fingerprint_hex = fingerprint_of_pem(&cert_pem)?;
+            return Ok(TlsMaterial {
+                cert_pem,
+                key_pem,
+                fingerprint_hex,
+            });
+        }
+
+        // Stale cert: its SAN does not cover the address we are reachable on.
+        // Fall through to regenerate. The old file is left in place until the
+        // new pair has been generated successfully, so a failure here cannot
+        // leave the server with NO certificate at all.
+        eprintln!(
+            "[HMS TLS] Existing certificate is not valid for the current LAN IP ({}); \
+             regenerating. Already-paired clients will need to re-pair.",
+            local_ip
+        );
     }
 
     std::fs::create_dir_all(crt_path.parent().unwrap())
@@ -102,8 +282,23 @@ pub fn ensure_tls_material(hms_dir: &Path, local_ip: &str) -> Result<TlsMaterial
     let cert_pem = cert.pem();
     let key_pem = key_pair.serialize_pem();
 
-    std::fs::write(&crt_path, &cert_pem).map_err(|e| format!("Cannot write cert: {}", e))?;
-    std::fs::write(&k_path, &key_pem).map_err(|e| format!("Cannot write key: {}", e))?;
+    // Write the KEY FIRST, then the cert.
+    //
+    // SEC-13 hardens the key to SYSTEM+Administrators Full Control with the
+    // current user granted READ ONLY. A read-only ACE denies the subsequent
+    // overwrite, so once a key exists, `fs::write` on it fails with
+    // "Access is denied. (os error 5)" for the non-elevated app.
+    //
+    // The original order was cert-then-key, so on a regeneration the CERT was
+    // replaced (writable) but the KEY write then failed, aborting setup and
+    // leaving a cert/key pair that does not correspond — a broken state that
+    // no longer matches either the old or the new identity. Writing the key
+    // first means a failure leaves the OLD cert paired with the OLD key
+    // (still consistent), and we never publish a half-rotated identity.
+    //
+    // Note PostgreSQL reads the cert+key at startup, so both must be updated
+    // before the service is asked to reload them.
+    write_key_and_cert(&k_path, &key_pem, &crt_path, &cert_pem)?;
 
     // SEC-13: harden the private key's ACL IMMEDIATELY after writing it,
     // before any other work happens. The previous implementation relied on
@@ -428,4 +623,74 @@ pub fn build_pinned_client_config(expected_fingerprint_hex: String) -> Arc<rustl
         .with_no_client_auth();
     config.alpn_protocols = vec![];
     Arc::new(config)
+}
+#[cfg(all(test, feature = "server-build"))]
+mod san_tests {
+    use super::san_contains_ip;
+
+    /// A realistic single-line SAN extension as rcgen emits it.
+    const SAN_LINE: &str = "            X509v3 Subject Alternative Name: \n                DNS:localhost, IP Address:127.0.0.1, IP Address:192.168.1.2";
+
+    fn pem_with(san_body: &str) -> String {
+        format!(
+            "-----BEGIN CERTIFICATE-----\nMIIB\n{}\nMIIB\n-----END CERTIFICATE-----\n",
+            san_body
+        )
+    }
+
+    #[test]
+    fn finds_ip_in_san_list() {
+        let pem = pem_with(SAN_LINE);
+        assert!(san_contains_ip(&pem, "192.168.1.2"));
+        assert!(san_contains_ip(&pem, "127.0.0.1"));
+    }
+
+    #[test]
+    fn missing_ip_is_not_matched() {
+        // THE REGRESSION: cert issued for .4, server now reachable on .2.
+        let pem = pem_with(
+            "X509v3 Subject Alternative Name: \n                DNS:localhost, IP Address:127.0.0.1, IP Address:192.168.1.4",
+        );
+        assert!(!san_contains_ip(&pem, "192.168.1.2"));
+    }
+
+    #[test]
+    fn dns_name_never_satisfies_an_ip_check() {
+        // Guards against `localhost` being read as an IP and masking a
+        // genuinely stale certificate.
+        let pem = pem_with("X509v3 Subject Alternative Name: \n                DNS:localhost");
+        assert!(!san_contains_ip(&pem, "localhost"));
+        assert!(!san_contains_ip(&pem, "192.168.1.2"));
+    }
+
+    #[test]
+    fn host_port_form_is_accepted() {
+        let pem = pem_with(SAN_LINE);
+        assert!(san_contains_ip(&pem, "192.168.1.2:5432"));
+    }
+
+    #[test]
+    fn cert_without_san_extension_is_treated_as_stale() {
+        let pem = pem_with("X509v3 Basic Constraints: critical, CA:FALSE");
+        assert!(!san_contains_ip(&pem, "192.168.1.2"));
+    }
+
+    #[test]
+    fn empty_input_never_matches() {
+        let pem = pem_with(SAN_LINE);
+        assert!(!san_contains_ip(&pem, ""));
+        assert!(!san_contains_ip(&pem, "   "));
+        assert!(!san_contains_ip("", "192.168.1.2"));
+    }
+
+    #[test]
+    fn trailing_other_extension_does_not_leak_into_the_value() {
+        // SAN followed by another extension on the same line must not cause
+        // the following extension's name to be parsed as an IP.
+        let pem = pem_with(
+            "X509v3 Subject Alternative Name: \n                IP Address:192.168.1.2, X509v3 Key Usage: critical",
+        );
+        assert!(san_contains_ip(&pem, "192.168.1.2"));
+        assert!(!san_contains_ip(&pem, "critical"));
+    }
 }

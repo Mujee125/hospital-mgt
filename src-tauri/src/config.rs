@@ -4,6 +4,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use tauri::Manager;
 
+// `log_warn!` is a crate-root `macro_rules!` in lib.rs; macro_rules! macros are
+// only visible after their definition point and are NOT importable by path, so
+// `use crate::log_warn` does not resolve. Call the underlying `crate::log`
+// function directly instead — same effect, no macro plumbing.
+use crate::log as write_app_log;
+
+/// Emit a WARN line through the shared startup log.
+fn warn(app_handle: &tauri::AppHandle, msg: &str) {
+    write_app_log(app_handle, "WARN ", msg);
+}
+
 /// Serializes every config write within this process (RCTF-FULL-SYSTEM-
 /// 2026-09-09 F-01). The v3 save is a TWO-FILE commit — `entropy.key`
 /// (possibly created) and `config.json` — so the write path must be atomic
@@ -62,6 +73,14 @@ pub struct AppConfig {
     /// the client falls back to V1 (fingerprint-keyed) broadcasts.
     #[serde(default)]
     pub pinned_broadcast_secret_hex: String,
+    /// SEAT-REGISTRY (2026-10): this installation's stable device UUID —
+    /// minted by `redeem_pairing_code` on first pairing and persisted so
+    /// every subsequent re-pair presents the same identity (the server
+    /// reclaims the existing seat instead of consuming a new one; NFR-31).
+    /// `save_config` never touches it: the UI-merge list does not include
+    /// the field, so Settings edits preserve the on-disk value.
+    #[serde(default)]
+    pub device_id: String,
     /// RCTF-IMPL-001 WP-3: config format version.
     /// 1 = legacy (plaintext db_password); 2 = DPAPI-encrypted db_password
     /// (machine scope, no per-install entropy — RCTF F-01: decryptable by
@@ -152,6 +171,7 @@ impl Default for AppConfig {
             pinned_server_cert_pem: String::new(),
             pinned_server_fingerprint: String::new(),
             pinned_broadcast_secret_hex: String::new(),
+            device_id: String::new(),
             config_version: 1,
             db_password_encrypted: None,
             auto_backup_enabled: cfg!(feature = "server-build"),
@@ -1033,40 +1053,146 @@ pub async fn get_config_path(app_handle: tauri::AppHandle) -> Result<String, Str
 }
 
 /// Deletes the config file to allow re-setup (used on client builds when reconfiguring).
-/// Registered in generate_handler![] — cargo doesn't see the macro-expanded usage.
+/// Registered in generate_handler![] (see lib.rs). Cargo does not see the
+/// macro-expanded usage, hence the `#[allow(dead_code)]` below.
 #[allow(dead_code)]
 #[tauri::command]
 pub async fn clear_config(
     app_handle: tauri::AppHandle,
     session_state: tauri::State<'_, crate::rbac::SessionState>,
 ) -> Result<(), String> {
-    // Review Pass 2 Finding 1 + Pass 3 P3-4: fail-closed tri-state gate —
-    // see save_config. clear_config on a configured machine is effectively
-    // an auth-reset primitive (deleting config re-opens the unauthenticated
-    // first-run window), so it must never be reachable without a
-    // SettingsManage session once the machine is configured (or corrupt).
     let disk = AppConfig::disk_config_state(&app_handle);
-    match crate::rbac::require_config_mutation(
-        &session_state,
-        disk,
-        crate::rbac::Permission::SettingsManage,
-    )? {
+
+    // ── Client-build recovery escape hatch (client-build ONLY) ──────────────
+    //
+    // "Reconfigure" lives on the `initError` screen, shown BEFORE login — so
+    // there is no session, and the strict gate would refuse forever, leaving a
+    // client whose server moved permanently stuck. A no-session clear is
+    // allowed ONLY when the BACKEND independently proves the server is
+    // unusable: (a) no `PgPool` is managed in Tauri state, AND (b) a fresh TCP
+    // probe of the CONFIGURED host:port fails. Both are computed in Rust from
+    // real backend state — no frontend flag participates, so a caller cannot
+    // spoof it. A reachable server makes (b) false, routing back to the strict
+    // gate unchanged.
+    #[cfg(feature = "client-build")]
+    let grant = if backend_init_failure_confirmed(&app_handle).await {
+        warn(
+            &app_handle,
+            "clear_config: allowing unauthenticated reset — backend-verified \
+             init/connectivity failure (no managed pool + server unreachable)",
+        );
+        crate::rbac::ConfigMutationGrant::FirstRun
+    } else {
+        require_config_mutation_grant(&session_state, disk)?
+    };
+
+    #[cfg(not(feature = "client-build"))]
+    let grant = require_config_mutation_grant(&session_state, disk)?;
+
+    // Best-effort audit. The pool may be absent or unreachable — precisely the
+    // client recovery case — and a failed audit write must never block the
+    // reset, or the recovery path deadlocks. Fall back to a local log line.
+    match grant {
         crate::rbac::ConfigMutationGrant::Authorized(s) => {
-            crate::audit::for_session(
-                &app_handle.state::<sqlx::PgPool>(),
-                &s,
-                "config_clear",
-                "config",
-                None,
-                None,
-            )
-            .await;
+            match app_handle.try_state::<sqlx::PgPool>() {
+                Some(pool) => {
+                    crate::audit::for_session(
+                        pool.inner(),
+                        &s,
+                        "config_clear",
+                        "config",
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+                None => warn(
+                    &app_handle,
+                    "clear_config: no database pool available — skipping the \
+                     audit row for config_clear (reset still permitted)",
+                ),
+            }
         }
         crate::rbac::ConfigMutationGrant::FirstRun => { /* no principal to audit */ }
     }
+
+    // Delete ONLY config.json. `entropy.key`, `backups/` and every other file
+    // under the HMS data dir are deliberately left in place: entropy.key must
+    // survive so the client can still decrypt a future config, and backups/
+    // is clinical data that must never be destroyed by a re-pair.
     let path = AppConfig::config_path(&app_handle);
     if path.exists() {
-        fs::remove_file(&path).map_err(|e| e.to_string())?;
+        fs::remove_file(&path)
+            .map_err(|e| format!("Could not remove the configuration file: {}", e))?;
+        warn(
+            &app_handle,
+            &format!(
+                "clear_config: removed {} — this PC must be paired again",
+                path.display()
+            ),
+        );
     }
     Ok(())
+}
+
+/// Shared fail-closed gate for `clear_config`.
+fn require_config_mutation_grant(
+    session_state: &crate::rbac::SessionState,
+    disk: crate::rbac::ConfigDiskState,
+) -> Result<crate::rbac::ConfigMutationGrant, String> {
+    crate::rbac::require_config_mutation(
+        session_state,
+        disk,
+        crate::rbac::Permission::SettingsManage,
+    )
+}
+/// Pure half of the gate decision — separated so it can be unit-tested with
+/// NO Tauri runtime and NO network (see the `clear_*` decision tests).
+///
+/// `pool_managed` mirrors `app_handle.try_state::<PgPool>().is_some()`, i.e.
+/// "the backend completed a successful DB init in this process".
+/// `server_reachable` is the live TCP probe result against the configured
+/// address.
+///
+/// Returns true only when BOTH indicate a genuine init/connectivity failure.
+#[cfg(feature = "client-build")]
+pub fn init_failure_confirmed_from(pool_managed: bool, server_reachable: bool) -> bool {
+    !pool_managed && !server_reachable
+}
+
+/// CLIENT-BUILD ONLY: does the backend independently confirm that this PC's
+/// configured server is unusable?
+///
+/// Returns true ONLY when BOTH hold:
+///   (a) no `PgPool` is managed in Tauri state — `initialize_database` calls
+///       `app_handle.manage(pool)` strictly AFTER `db::initialize` returns
+///       Ok, so a missing pool proves initialization never completed;
+///   (b) a fresh TCP probe of the CONFIGURED `db_host:db_port` fails.
+///
+/// Neither input can be supplied or influenced by the frontend: (a) is Tauri
+/// managed state populated only by a successful init, and (b) is a live socket
+/// to the address recorded on disk. A server that is up makes (b) false, which
+/// routes the caller back to the strict RBAC gate. Compiled out entirely on
+/// server builds, so their behaviour is byte-for-byte unchanged.
+#[cfg(feature = "client-build")]
+pub async fn backend_init_failure_confirmed(app_handle: &tauri::AppHandle) -> bool {
+    // (a) Backend never completed a successful DB init in this process.
+    let pool_managed = app_handle.try_state::<sqlx::PgPool>().is_some();
+
+    // (b) The configured server is not answering on its DB port right now.
+    let server_reachable = match AppConfig::load(app_handle) {
+        Some(cfg) if !cfg.db_host.is_empty() => {
+            tauri::async_runtime::spawn_blocking({
+                let host = cfg.db_host.clone();
+                let port = cfg.db_port;
+                move || crate::discovery::is_reachable(&host, port, 2500)
+            })
+            .await
+            .unwrap_or(false)
+        }
+        // No config / no host to probe — nothing meaningful to clear; stay strict.
+        _ => return false,
+    };
+
+    init_failure_confirmed_from(pool_managed, server_reachable)
 }
