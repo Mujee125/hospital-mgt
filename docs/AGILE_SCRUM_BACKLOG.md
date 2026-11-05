@@ -132,7 +132,7 @@ All 14 modified files + 2 untracked files formed one coherent **SEAT-REGISTRY** 
 | Add missing `client_seat_tests.rs` + wire `revoke_seat` as IPC command | HMS-107 | M | 8 | Done | Backend |
 | Verify `migrate_client_license` implementation exists in `license.rs` | HMS-108 | M | 3 | Done | Backend |
 | Run full test suite on `batch-5-hardening` (cargo fmt/clippy/test, tsc/eslint/vitest) | HMS-504 | S | 13 | In Progress | QA |
-| DPAPI encrypt `config.json` `db_password` | HMS-101 | M | 8 | To Do | Backend |
+| DPAPI encrypt `config.json` `db_password` | HMS-101 | M | 8 | Done | Infrastructure complete: `secrets.rs` provides `encrypt`/`decrypt` (v2 legacy DPAPI) + `encrypt_with_entropy`/`decrypt_with_entropy` (v3 per-install entropy); `AppConfig` has `config_version` + `db_password_encrypted`; `load_from_inner` auto-decrypts; `save_to_inner` persists v3; `maybe_migrate_to_v3` auto-migrates at boot; `serialize_v2` creates `.bak` rollback artifact. Non-Windows pass-through with warning log.
 | Wire CI gates (typecheck/lint/cargo check/cargo audit/npm audit) | HMS-201 | M | 5 | To Do | DevOps |
 | Rebuild installers + fresh-machine install test | HMS-204 | M | 5 | To Do | Release |
 | Audit log immutability trigger (append-only trigger, M-08) | HMS-104 | S | 5 | To Do | Backend |
