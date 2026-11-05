@@ -76,6 +76,20 @@ pub enum SeatError {
     Other(String),
 }
 
+impl std::fmt::Display for SeatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SeatError::Exhausted { active, max } => {
+                write!(
+                    f,
+                    "seat cap exhausted: {active} of {max} client seats in use"
+                )
+            }
+            SeatError::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
 /// Derive the per-device role name from a device UUID.
 ///
 /// Rejects anything that is not a canonical UUID, replaces hyphens with
@@ -464,7 +478,7 @@ pub async fn revoke_seat_command(
 
     let device_uuid = Uuid::parse_str(&device_id).map_err(|e| format!("invalid device_id: {e}"))?;
 
-    revoke_seat(pool, device_uuid, None)
+    revoke_seat(&*pool, device_uuid, None)
         .await
         .map_err(|e| format!("revoke seat: {e}"))?;
 
