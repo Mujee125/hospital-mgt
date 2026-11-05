@@ -58,7 +58,7 @@
 
 | ID | User story | Pri | Pts | Status | Acceptance criteria | Source |
 |----|------------|-----|-----|--------|---------------------|--------|
-| HMS-201 | Wire CI to run `typecheck` + `lint` + `cargo check` + `cargo audit` + `npm audit` | M | 5 | To Do | `.github/workflows/ci.yml` job runs all five gates on PR + main; failures block merge | SDLC-DOC-01; CHANGELOG known follow-ups |
+| HMS-201 | Wire CI to run `typecheck` + `lint` + `cargo check` + `cargo audit` + `npm audit` | M | 5 | In Progress | `.github/workflows/ci.yml` job runs all five gates on PR + main; failures block merge | SDLC-DOC-01; CHANGELOG known follow-ups |
 | HMS-202 | Add SAST + DAST + dependency scanning to CI | S | 8 | To Do | SAST (Rust/TS scanner), DAST skeleton, dependency scan (`cargo audit` + `npm audit`) configured; results reviewed | CHANGELOG known follow-ups |
 | HMS-203 | Authenticode code-signing for Windows installers | C | 13 | Blocked | Requires purchased certificate; both NSIS installers signed; signature verified on install | QA-GAP H6 deferred |
 | HMS-204 | Rebuild both installers (NSIS hook changed) + fresh-machine install test | M | 5 | To Do | Server + client NSIS installers rebuilt; clean Windows VM install + first-run + pairing smoke test passes | QA-GAP release gate deferred |
@@ -133,7 +133,7 @@ All 14 modified files + 2 untracked files formed one coherent **SEAT-REGISTRY** 
 | Verify `migrate_client_license` implementation exists in `license.rs` | HMS-108 | M | 3 | Done | Backend |
 | Run full test suite on `batch-5-hardening` (cargo fmt/clippy/test, tsc/eslint/vitest) | HMS-504 | S | 13 | In Progress | QA |
 | DPAPI encrypt `config.json` `db_password` | HMS-101 | M | 8 | Done | Infrastructure complete: `secrets.rs` provides `encrypt`/`decrypt` (v2 legacy DPAPI) + `encrypt_with_entropy`/`decrypt_with_entropy` (v3 per-install entropy); `AppConfig` has `config_version` + `db_password_encrypted`; `load_from_inner` auto-decrypts; `save_to_inner` persists v3; `maybe_migrate_to_v3` auto-migrates at boot; `serialize_v2` creates `.bak` rollback artifact. Non-Windows pass-through with warning log.
-| Wire CI gates (typecheck/lint/cargo check/cargo audit/npm audit) | HMS-201 | M | 5 | To Do | DevOps |
+| Wire CI gates (typecheck/lint/cargo check/cargo audit/npm audit) | HMS-201 | M | 5 | In Progress | DevOps |
 | Rebuild installers + fresh-machine install test | HMS-204 | M | 5 | To Do | Release |
 | Audit log immutability trigger (append-only trigger, M-08) | HMS-104 | S | 5 | To Do | Backend |
 | `clear_config` IPC cleanup | HMS-106 | S | 2 | Done | Backend |
@@ -178,6 +178,6 @@ All 14 modified files + 2 untracked files formed one coherent **SEAT-REGISTRY** 
 1. ~~Review `git diff` on the 14 modified files; decide commit vs revert; confirm purpose of untracked `client_seats.rs`.~~ — **Done.** Committed as `c346c22` on `batch-5-hardening`.
 2. ~~Create branch `batch-5-hardening` from `main`; commit triaged work.~~ — **Done.** Branch created; commit `c346c22`.
 3. **In Progress:** Work HMS-107 (`client_seat_tests.rs` + `revoke_seat` IPC) and HMS-108 (verify `migrate_client_license` in `license.rs`).
-4. **To Do:** Run full test suite on `batch-5-hardening` (HMS-504); pull HMS-101, HMS-201, HMS-204, HMS-104 into Sprint 1; run Sprint Planning.
+4. **In Progress:** Run full test suite on `batch-5-hardening` (HMS-504); pull HMS-101, HMS-201, HMS-204, HMS-104 into Sprint 1; run Sprint Planning.
 5. **To Do:** Update `CHANGELOG.md` with the v0.5.0 planning note; `git add docs/AGILE_SCRUM_BACKLOG.md` and commit to `batch-5-hardening`.
 
