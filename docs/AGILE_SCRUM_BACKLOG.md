@@ -58,7 +58,7 @@
 
 | ID | User story | Pri | Pts | Status | Acceptance criteria | Source |
 |----|------------|-----|-----|--------|---------------------|--------|
-| HMS-201 | Wire CI to run `typecheck` + `lint` + `cargo check` + `cargo audit` + `npm audit` | M | 5 | In Progress | `.github/workflows/ci.yml` job runs all five gates on PR + main; failures block merge | SDLC-DOC-01; CHANGELOG known follow-ups |
+| HMS-201 | Wire CI to run `typecheck` + `lint` + `cargo check` + `cargo audit` + `npm audit` | M | 5 | Done | `.github/workflows/ci.yml` structured with `rust-quality` job (cargo fmt + clippy + cargo test + cargo audit + npm audit) and `frontend-quality` job (tsc + eslint + vitest + npm audit); `ci-success` job depends on all prerequisite jobs; gates block merge on failures |
 | HMS-202 | Add SAST + DAST + dependency scanning to CI | S | 8 | To Do | SAST (Rust/TS scanner), DAST skeleton, dependency scan (`cargo audit` + `npm audit`) configured; results reviewed | CHANGELOG known follow-ups |
 | HMS-203 | Authenticode code-signing for Windows installers | C | 13 | Blocked | Requires purchased certificate; both NSIS installers signed; signature verified on install | QA-GAP H6 deferred |
 | HMS-204 | Rebuild both installers (NSIS hook changed) + fresh-machine install test | M | 5 | To Do | Server + client NSIS installers rebuilt; clean Windows VM install + first-run + pairing smoke test passes | QA-GAP release gate deferred |
