@@ -1549,6 +1549,11 @@ pub fn run() {
             pairing::get_pairing_status,
             pairing::redeem_pairing_code,
             pairing::verify_pairing,
+            // Seat registry — revoke a client device seat (server-build only).
+            // `provision_client_seat` is called directly from pairing.rs, not
+            // exposed as a standalone IPC command.
+            #[cfg(feature = "server-build")]
+            client_seats::revoke_seat_command,
             // Core init (defined in this file)
             initialize_database,
             check_db_connection,

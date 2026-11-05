@@ -31,6 +31,8 @@
 
 use rand::RngCore;
 use sqlx::PgPool;
+use tauri::Manager;
+use uuid::Uuid;
 
 /// Unprivileged base role that owns DML privileges on the application schema.
 pub const BASE_ROLE: &str = "hms_app_client";
@@ -81,7 +83,11 @@ pub enum SeatError {
 /// Guarantees a safe identifier with no quote-injection surface.
 fn sanitize_device_role(device_id: &str) -> Result<String, SeatError> {
     let compact = device_id.trim().replace('-', "_");
-    if compact.is_empty() || !compact.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    if compact.is_empty()
+        || !compact
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
         return Err(SeatError::Other(format!(
             "device_id is not a valid UUID: {:?}",
             device_id
@@ -109,12 +115,11 @@ fn generate_password() -> String {
 /// is naturally idempotent. Must run as a superuser (the app connects as
 /// `postgres`), which is why this lives in the server build.
 async fn ensure_base_role(pool: &PgPool) -> Result<(), SeatError> {
-    let exists: Option<i32> =
-        sqlx::query_scalar("SELECT 1 FROM pg_roles WHERE rolname = $1")
-            .bind(BASE_ROLE)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| SeatError::Other(format!("check base role: {}", e)))?;
+    let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM pg_roles WHERE rolname = $1")
+        .bind(BASE_ROLE)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| SeatError::Other(format!("check base role: {}", e)))?;
 
     if exists.is_none() {
         let create = format!(
@@ -151,9 +156,7 @@ async fn ensure_base_role(pool: &PgPool) -> Result<(), SeatError> {
     let statements = [
         format!("GRANT CONNECT ON DATABASE \"{dbname}\" TO {base}"),
         format!("GRANT USAGE ON SCHEMA public TO {base}"),
-        format!(
-            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {base}"
-        ),
+        format!("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {base}"),
         format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {base}"),
         format!(
             "ALTER DEFAULT PRIVILEGES IN SCHEMA public \
@@ -179,11 +182,7 @@ async fn ensure_base_role(pool: &PgPool) -> Result<(), SeatError> {
 /// Idempotent on the role name: if the role already exists (re-pair, or
 /// replace), `ALTER` it back to a login-capable, limited role and set the new
 /// password rather than failing on `CREATE`.
-async fn upsert_client_role(
-    pool: &PgPool,
-    role: &str,
-    password: &str,
-) -> Result<(), SeatError> {
+async fn upsert_client_role(pool: &PgPool, role: &str, password: &str) -> Result<(), SeatError> {
     let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM pg_roles WHERE rolname = $1")
         .bind(role)
         .fetch_optional(pool)
@@ -444,3 +443,30 @@ pub async fn revoke_seat(
     Ok(())
 }
 
+/// Tauri command: revoke a client device seat.
+///
+/// Flips the device's DB role to `NOLOGIN` and stamps the registry row with
+/// `revoked_at` / `revoked_by`. Idempotent — revoking an unknown or already
+/// revoked device is a no-op success.
+///
+/// The pool is resolved from Tauri app state (the pairing listener starts
+/// before `db::initialize` manages the pool, so it cannot be captured at
+/// startup). This is the IPC surface for `revoke_seat` — previously pending.
+#[cfg(feature = "server-build")]
+#[tauri::command]
+pub async fn revoke_seat_command(
+    app_handle: tauri::AppHandle,
+    device_id: String,
+) -> Result<(), String> {
+    let pool = app_handle
+        .try_state::<sqlx::PgPool>()
+        .ok_or_else(|| "database pool not available".to_string())?;
+
+    let device_uuid = Uuid::parse_str(&device_id).map_err(|e| format!("invalid device_id: {e}"))?;
+
+    revoke_seat(pool, device_uuid, None)
+        .await
+        .map_err(|e| format!("revoke seat: {e}"))?;
+
+    Ok(())
+}
