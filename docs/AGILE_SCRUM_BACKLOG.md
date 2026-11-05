@@ -50,7 +50,9 @@
 | HMS-103 | Least-privilege DB role (stop connecting as `postgres` superuser) | M | 13 | Blocked | Dedicated app DB role with least privileges; installer + pairing + config coordinated; tested against fresh PostgreSQL | QA-GAP C1 remainder deferred |
 | HMS-104 | Audit log immutability (append-only trigger, M-08) | S | 5 | To Do | PostgreSQL trigger rejects UPDATE/DELETE on `audit_logs`; integration test proves immutability | QA-GAP M-08; CHANGELOG known follow-ups |
 | HMS-105 | MFA for admin login | C | 8 | To Do | TOTP-based MFA enroll/verify for admin role; enforced at Settings; backup codes | CHANGELOG known follow-ups |
-| HMS-106 | `clear_config` dead IPC command cleanup | S | 2 | To Do | Either register `clear_config` in `generate_handler![]` or remove the implementation + tests; no orphan IPC surface | CHANGELOG known follow-ups |
+| HMS-106 | `clear_config` dead IPC command cleanup | S | 2 | Done | `clear_config` registered in `generate_handler![]`; gate: `SettingsManage` once `setup_complete=true` on all builds, plus client-only unauthenticated reset when backend confirms init/connectivity failure | CHANGELOG known follow-ups; committed in c346c22 |
+| HMS-107 | Add missing `client_seat_tests.rs` + wire `revoke_seat` as IPC command | M | 8 | In Progress | `tests/client_seat_tests.rs` created (referenced in `client_seats.rs` dead-code note); `revoke_seat` exposed as a `#[tauri::command]` registered in `generate_handler![]`; tests cover seat provision, reuse on re-pair (NFR-31), cap enforcement, revoke → NOLOGIN | Diff review gap (c346c22) |
+| HMS-108 | Verify `migrate_client_license` implementation exists in `license.rs` | M | 3 | In Progress | Function confirmed present and matches the `generate_handler![]` registration in `lib.rs`; wired to frontend `invoke("migrate_client_license")` in `App.tsx` client boot path | Diff review gap (c346c22) |
 
 ### Epic E2 — CI/CD, release engineering & supply chain
 
@@ -103,37 +105,48 @@
 
 ---
 
-## 4. Uncommitted work in the working tree (triage first)
+## 4. Uncommitted work — triage status (DONE)
 
-14 modified files (~1,327 insertions) + 2 untracked files are **not yet on `main`**. Before planning new sprints, triage these:
+All 14 modified files + 2 untracked files formed one coherent **SEAT-REGISTRY** feature (client-seat provisioning, per-device DB roles, seat-cap enforcement, `clear_config` registration, TLS cert repair, frontend client-boot changes). Reviewed in full; nothing accidental.
 
-- `src-tauri/src/{config,db,lib,license,pairing,pg_provision,tls_provision}.rs` — large Rust changes (likely DPAPI config / pairing / TLS hardening — in-progress Batch 5)
-- `src-tauri/tests/{ipc_posture_tests,clear_config_tests}.rs` + untracked `clear_config_tests.rs` — IPC posture / clear_config tests
-- `src-tauri/src/client_seats.rs` (untracked) — new file; purpose to confirm
-- `docs/01-SRS-Software-Requirements.md`, `docs/02-SDD-Software-Design.md` — doc deltas to reconcile
-- `src/App.tsx`, `src/pages/Setup.tsx`, `package.json`, `package-lock.json` — frontend/setup changes
+**Committed to `batch-5-hardening`** as `c346c22` — `feat(seat-registry): per-device client DB roles + seat-cap enforcement` (17 files, +2,329 / −199). Branch is ahead of `main` by 1 commit.
 
-**Recommended first action:** review `git diff`, commit or revert, then branch `release/v0.5.0` (or `batch-5-hardening`) and pull HMS-101/HMS-104/HMS-201/HMS-204 into Sprint 1.
+**Not committed:** `docs/AGILE_SCRUM_BACKLOG.pdf` (appeared in working tree but was not created by this session — left untracked intentionally).
+
+**Gaps identified during diff review (added to Sprint 1):**
+- `client_seats.rs` references `tests/client_seat_tests.rs` in a `#[allow(dead_code)]` comment — that test file does **not exist** yet; `revoke_seat` has no IPC command or test coverage.
+- `migrate_client_license` is registered in `lib.rs::generate_handler![]` — must confirm the function actually exists in `license.rs`.
+- No `cargo test` run has been verified against the committed changes yet.
 
 ---
 
-## 5. Suggested Sprint 1 — "v0.5.0 Hardening & Release Gate" (2 weeks)
+## 5. Sprint 1 — "v0.5.0 Hardening & Release Gate" (2 weeks) — branch `batch-5-hardening`
 
-**Goal:** Ship v0.5.0 with the uncommitted security work committed, CI gates wired, installers rebuilt + install-tested, and the highest-priority compliance items closed.
+**Goal:** Ship v0.5.0 with the committed SEAT-REGISTRY work tested, CI gates wired, installers rebuilt + install-tested, and the highest-priority compliance items closed.
 
-| Story | ID | Pri | Pts | Owner |
-|-------|-----|-----|-----|-------|
-| Triage + commit uncommitted changes | — | M | 3 | Dev lead |
-| DPAPI encrypt `config.json` `db_password` | HMS-101 | M | 8 | Backend |
-| Wire CI gates (typecheck/lint/cargo check/cargo audit/npm audit) | HMS-201 | M | 5 | DevOps |
-| Rebuild installers + fresh-machine install test | HMS-204 | M | 5 | Release |
-| Audit log immutability trigger | HMS-104 | S | 5 | Backend |
-| `clear_config` IPC cleanup | HMS-106 | S | 2 | Backend |
-| Fix Windows test manifest (remove manual step) | HMS-205 | S | 5 | QA |
-| CHANGELOG + docs reconciliation | — | S | 3 | Tech writer |
+**Branch:** `batch-5-hardening` (ahead of `main` by 1 commit: `c346c22`)
 
-**Sprint 1 capacity:** ~41 points (adjust to team velocity).  
+| Story | ID | Pri | Pts | Status | Owner |
+|-------|-----|-----|-----|--------|-------|
+| Triage + commit uncommitted changes (SEAT-REGISTRY) | — | M | 3 | Done | Dev lead |
+| Add missing `client_seat_tests.rs` + wire `revoke_seat` as IPC command | HMS-107 | M | 8 | In Progress | Backend |
+| Verify `migrate_client_license` implementation exists in `license.rs` | HMS-108 | M | 3 | In Progress | Backend |
+| Run full test suite on `batch-5-hardening` (cargo fmt/clippy/test, tsc/eslint/vitest) | HMS-504 | S | 13 | To Do | QA |
+| DPAPI encrypt `config.json` `db_password` | HMS-101 | M | 8 | To Do | Backend |
+| Wire CI gates (typecheck/lint/cargo check/cargo audit/npm audit) | HMS-201 | M | 5 | To Do | DevOps |
+| Rebuild installers + fresh-machine install test | HMS-204 | M | 5 | To Do | Release |
+| Audit log immutability trigger (append-only trigger, M-08) | HMS-104 | S | 5 | To Do | Backend |
+| `clear_config` IPC cleanup | HMS-106 | S | 2 | Done | Backend |
+| Fix Windows test manifest (remove manual manifest step) | HMS-205 | S | 5 | To Do | QA |
+| CHANGELOG + docs reconciliation (v0.5.0 planning note) | — | S | 3 | To Do | Tech writer |
+
+**Sprint 1 capacity:** ~51 points (adjust to team velocity).  
 **Definition of Done for Sprint 1:** v0.5.0 tag cut; both installers rebuilt and install-tested on clean Windows; CI gate job green on `main`; all merged stories meet DoD.
+
+**Notes:**
+- HMS-106 marked **Done** — `clear_config` is now registered in `generate_handler![]` (committed in `c346c22`); gate: `SettingsManage` once `setup_complete=true` on all builds, plus client-only unauthenticated reset when backend confirms init/connectivity failure.
+- HMS-107 / HMS-108 are gaps surfaced during the diff review of `c346c22`.
+
 
 ---
 
@@ -162,8 +175,9 @@
 
 ## 8. Immediate next steps (this week)
 
-1. Review `git diff` on the 14 modified files; decide commit vs revert; confirm purpose of untracked `client_seats.rs`.
-2. Create branch `batch-5-hardening` from `main`; commit triaged work.
-3. Pull HMS-101, HMS-201, HMS-204, HMS-104 into Sprint 1; run Sprint Planning.
-4. Add this file to the repo and update `CHANGELOG.md` with the v0.5.0 planning note.
+1. ~~Review `git diff` on the 14 modified files; decide commit vs revert; confirm purpose of untracked `client_seats.rs`.~~ — **Done.** Committed as `c346c22` on `batch-5-hardening`.
+2. ~~Create branch `batch-5-hardening` from `main`; commit triaged work.~~ — **Done.** Branch created; commit `c346c22`.
+3. **In Progress:** Work HMS-107 (`client_seat_tests.rs` + `revoke_seat` IPC) and HMS-108 (verify `migrate_client_license` in `license.rs`).
+4. **To Do:** Run full test suite on `batch-5-hardening` (HMS-504); pull HMS-101, HMS-201, HMS-204, HMS-104 into Sprint 1; run Sprint Planning.
+5. **To Do:** Update `CHANGELOG.md` with the v0.5.0 planning note; `git add docs/AGILE_SCRUM_BACKLOG.md` and commit to `batch-5-hardening`.
 
